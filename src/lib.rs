@@ -7,6 +7,8 @@
 pub mod cli;
 pub mod config;
 pub mod control;
+pub mod pcapio;
+pub mod proto;
 pub mod run;
 
 use cli::{Cli, Command};
