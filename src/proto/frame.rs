@@ -138,19 +138,79 @@ pub fn recompute_checksums(buf: &mut [u8], l: &FrameLayout) {
     }
 }
 
+/// True if the IPv4 header checksum and the TCP/UDP checksum both validate.
+/// Non-IPv4 frames are reported valid (nothing for us to check).
+pub fn checksums_valid(buf: &[u8], l: &FrameLayout) -> bool {
+    if l.l3_kind != L3Kind::Ipv4 {
+        return true;
+    }
+    let mut s = 0u32;
+    sum_words(&mut s, &buf[l.l3..l.l3 + l.ihl]);
+    if fold(s) != 0xffff {
+        return false;
+    }
+    match l.l4_kind {
+        L4Kind::Tcp | L4Kind::Udp => {
+            let src = &buf[l.l3 + 12..l.l3 + 16];
+            let dst = &buf[l.l3 + 16..l.l3 + 20];
+            let proto = buf[l.l3 + 9];
+            let l4_len = l.end - l.l4;
+            let pseudo = [
+                src[0],
+                src[1],
+                src[2],
+                src[3],
+                dst[0],
+                dst[1],
+                dst[2],
+                dst[3],
+                0,
+                proto,
+                (l4_len >> 8) as u8,
+                (l4_len & 0xff) as u8,
+            ];
+            let mut s = 0u32;
+            sum_words(&mut s, &pseudo);
+            sum_words(&mut s, &buf[l.l4..l.end]);
+            fold(s) == 0xffff
+        }
+        L4Kind::Other => true,
+    }
+}
+
 fn l4_checksum(buf: &mut [u8], l: &FrameLayout, csum_off: usize) {
     if l.end <= l.l4 || l.l4 + csum_off + 1 >= buf.len() {
         return;
     }
-    let src = [buf[l.l3 + 12], buf[l.l3 + 13], buf[l.l3 + 14], buf[l.l3 + 15]];
-    let dst = [buf[l.l3 + 16], buf[l.l3 + 17], buf[l.l3 + 18], buf[l.l3 + 19]];
+    let src = [
+        buf[l.l3 + 12],
+        buf[l.l3 + 13],
+        buf[l.l3 + 14],
+        buf[l.l3 + 15],
+    ];
+    let dst = [
+        buf[l.l3 + 16],
+        buf[l.l3 + 17],
+        buf[l.l3 + 18],
+        buf[l.l3 + 19],
+    ];
     let proto = buf[l.l3 + 9];
     let l4_len = l.end - l.l4;
     buf[l.l4 + csum_off] = 0;
     buf[l.l4 + csum_off + 1] = 0;
     let pseudo = [
-        src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], 0, proto,
-        (l4_len >> 8) as u8, (l4_len & 0xff) as u8,
+        src[0],
+        src[1],
+        src[2],
+        src[3],
+        dst[0],
+        dst[1],
+        dst[2],
+        dst[3],
+        0,
+        proto,
+        (l4_len >> 8) as u8,
+        (l4_len & 0xff) as u8,
     ];
     let mut s = 0u32;
     sum_words(&mut s, &pseudo);
@@ -213,14 +273,26 @@ impl<'a> ParsedFrame<'a> {
 
     pub fn ipv4_src(&self) -> Option<[u8; 4]> {
         let l = self.layout.l3;
-        self.is_ipv4()
-            .then(|| [self.buf[l + 12], self.buf[l + 13], self.buf[l + 14], self.buf[l + 15]])
+        self.is_ipv4().then(|| {
+            [
+                self.buf[l + 12],
+                self.buf[l + 13],
+                self.buf[l + 14],
+                self.buf[l + 15],
+            ]
+        })
     }
 
     pub fn ipv4_dst(&self) -> Option<[u8; 4]> {
         let l = self.layout.l3;
-        self.is_ipv4()
-            .then(|| [self.buf[l + 16], self.buf[l + 17], self.buf[l + 18], self.buf[l + 19]])
+        self.is_ipv4().then(|| {
+            [
+                self.buf[l + 16],
+                self.buf[l + 17],
+                self.buf[l + 18],
+                self.buf[l + 19],
+            ]
+        })
     }
 
     pub fn set_ipv4_src(&mut self, a: [u8; 4]) {
@@ -306,8 +378,18 @@ mod tests {
         let dst = &buf[l.l3 + 16..l.l3 + 20];
         let l4_len = l.end - l.l4;
         let pseudo = [
-            src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], 0, 17,
-            (l4_len >> 8) as u8, (l4_len & 0xff) as u8,
+            src[0],
+            src[1],
+            src[2],
+            src[3],
+            dst[0],
+            dst[1],
+            dst[2],
+            dst[3],
+            0,
+            17,
+            (l4_len >> 8) as u8,
+            (l4_len & 0xff) as u8,
         ];
         let mut s = 0u32;
         sum_words(&mut s, &pseudo);

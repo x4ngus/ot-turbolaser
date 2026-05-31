@@ -301,8 +301,8 @@ impl Config {
 
 /// Read, parse, and validate a config file.
 pub fn load(path: &Path) -> Result<Config, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let cfg: Config =
         serde_norway::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     cfg.validate()?;
@@ -386,7 +386,9 @@ mod tests {
             .validate()
             .is_ok());
         assert!(rate(RateModel::Pps, None, None, None).validate().is_err());
-        assert!(rate(RateModel::Original, None, None, None).validate().is_ok());
+        assert!(rate(RateModel::Original, None, None, None)
+            .validate()
+            .is_ok());
     }
 
     fn gap(dist: GapDist) -> GapCfg {

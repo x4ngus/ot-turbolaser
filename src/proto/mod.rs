@@ -6,6 +6,7 @@
 //! (the mutators land in a later phase).
 
 pub mod frame;
+pub mod l3;
 pub mod mapper;
 
 pub use frame::{FrameLayout, L3Kind, L4Kind, ParsedFrame};
