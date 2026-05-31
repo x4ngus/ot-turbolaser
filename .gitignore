@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+
+# Captures are never committed. Source them yourself, see README.
+/pcaps/
+*.pcap
+*.pcapng
+
+# macOS
+.DS_Store
