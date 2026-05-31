@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod run;
 
 use cli::{Cli, Command};
@@ -17,9 +18,11 @@ pub fn dispatch(cli: Cli) -> i32 {
         Command::Run(a) => run::run(&a),
         Command::Check(a) => check(&a),
         Command::Reload(_) => not_yet("reload"),
-        Command::Up(_) => not_yet("up"),
-        Command::Down(_) => not_yet("down"),
-        Command::Status(_) => not_yet("status"),
+        Command::Up(a) => control::up(&a),
+        Command::Down(a) => control::down(&a),
+        Command::Status(a) => control::status(&a),
+        Command::NetSetup(a) => control::net_setup(&a),
+        Command::NetTeardown(a) => control::net_teardown(&a),
     }
 }
 

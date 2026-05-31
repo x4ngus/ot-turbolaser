@@ -6,10 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# The network setup (isolated bridge + mirror) is wired as ExecStartPre/Post in
-# Phase 3 once scripts/net-setup.sh exists. It runs as root before privileges
-# drop, which is why net setup is a one-shot step and not done by the daemon.
+# Network setup (isolated bridge + mirror) runs before the daemon, and teardown
+# after it stops, both driven from the same config. net-setup refuses to attach
+# the bridge to a physical uplink.
+ExecStartPre=/opt/replay/bin/turbolaser net-setup --config /opt/replay/conf/replay.yaml
 ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml
+ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
 Restart=always
 RestartSec=3
 

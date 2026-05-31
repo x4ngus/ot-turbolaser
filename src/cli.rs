@@ -27,14 +27,18 @@ pub enum Command {
     Run(RunArgs),
     /// Forge variant pcaps from a source capture (reload the magazine).
     Reload(ReloadArgs),
-    /// Set up the isolated bridge and mirror, then start the service.
+    /// Enable and start the appliance service (the unit sets up the mirror).
     Up(NetArgs),
-    /// Stop the service, then tear down the mirror and bridge.
+    /// Stop and disable the appliance service (the unit tears down the mirror).
     Down(NetArgs),
     /// Print the daemon status from the heartbeat file.
     Status(StatusArgs),
     /// Validate a config file without replaying.
     Check(CheckArgs),
+    /// Set up the bridge and mirror from config. Used by the systemd unit.
+    NetSetup(NetArgs),
+    /// Tear down the bridge and mirror from config. Used by the systemd unit.
+    NetTeardown(NetArgs),
 }
 
 #[derive(Args, Debug)]
