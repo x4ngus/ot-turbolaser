@@ -1,10 +1,12 @@
-//! Spawn a single-shot tcpreplay run and summarise the result.
-//!
-//! The orchestrator owns the loop, so each run is one `--loop=1` invocation
-//! that can use a different capture, seed, and rate.
+//! Spawn a single-shot tcpreplay run, watched by the tx watchdog, and
+//! summarise the result. The orchestrator owns the loop, so each run is one
+//! `--loop=1` invocation that can use a different capture, seed, and rate.
 
+use super::watchdog::Watchdog;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 pub struct ReplayResult {
     pub success: bool,
@@ -12,25 +14,54 @@ pub struct ReplayResult {
     pub detail: String,
 }
 
-pub fn run_once(iface: &str, pcap: &Path, rate_args: &[String]) -> std::io::Result<ReplayResult> {
-    let mut cmd = Command::new("tcpreplay");
-    cmd.arg(format!("--intf1={iface}"))
+pub fn run_once(
+    iface: &str,
+    pcap: &Path,
+    rate_args: &[String],
+    watchdog: &Watchdog,
+) -> std::io::Result<ReplayResult> {
+    let mut child = Command::new("tcpreplay")
+        .arg(format!("--intf1={iface}"))
         .arg("--preload-pcap")
         .arg("--loop=1")
-        .arg("--stats=1");
-    for a in rate_args {
-        cmd.arg(a);
+        .arg("--stats=1")
+        .args(rate_args)
+        .arg(pcap)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    watchdog.begin();
+    let mut killed = false;
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if watchdog.tripped() && !killed {
+            let _ = child.kill();
+            killed = true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    watchdog.end();
+
+    let mut text = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        let _ = o.read_to_string(&mut text);
     }
-    cmd.arg(pcap);
+    if let Some(mut e) = child.stderr.take() {
+        let _ = e.read_to_string(&mut text);
+    }
 
-    let out = cmd.output()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-
+    let summary = summarize(&text, status.code());
     Ok(ReplayResult {
-        success: out.status.success(),
+        success: status.success() && !killed,
         packets: parse_packets(&text),
-        detail: summarize(&text, out.status.code()),
+        detail: if killed {
+            format!("watchdog killed stalled replay; {summary}")
+        } else {
+            summary
+        },
     })
 }
 

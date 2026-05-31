@@ -71,6 +71,61 @@ See `conf/replay.yaml` for an annotated sample: interface, mode, rate model, gap
 distribution, per-file weights, seed handling, and paths. Validate a config
 without replaying with `turbolaser check --config <path>`.
 
+## Deployment topology
+
+The appliance needs two interfaces on an isolated segment:
+
+- the replay port (`iface` in the config, default `tl0`), where tcpreplay
+  transmits and which the mirror copies from, and
+- the sensor monitor port (`net.sensor_port`, default `sens0`), set promiscuous,
+  which receives the mirrored copy and feeds the sensor.
+
+`net-setup.sh` builds an isolated bridge with no uplink, enslaves the replay
+port, and mirrors its egress to the sensor port (tc clsact/mirred by default, or
+Open vSwitch). It refuses to put a physical NIC on the bridge, so the isolated
+segment can never reach a production or uplinked network.
+
+Two common layouts:
+
+1. Self-contained container or VM with two virtual interfaces (veth or tap) for
+   the replay and sensor ports, with the sensor cabled or bridged to the
+   appliance's sensor port. net-setup runs inside the appliance.
+2. Host-side mirror, where the replay port is the container's veth and the
+   sensor port is a dedicated NIC cabled to the sensor. net-setup runs on the
+   host against those ports.
+
+## Running in a Proxmox LXC
+
+Use a privileged container (the daemon needs `CAP_NET_RAW` and `CAP_NET_ADMIN`
+for raw transmit and for `ip`/`tc`). Give the container two NICs on an isolated
+Linux bridge that has no uplink, mapped to the replay and sensor ports. A minimal
+Debian 12 container idles well under 256 MB.
+
+```
+# on the appliance (container), as root:
+scripts/bootstrap.sh                 # tcpreplay + iproute2 (add --ovs for OVS)
+cargo build --release                # or copy in a prebuilt static binary
+sudo scripts/install.sh              # lays out /opt/replay, installs the unit
+# edit /opt/replay/conf/replay.yaml: iface, net.sensor_port, mode
+turbolaser reload --in /opt/replay/pcaps/pool/<cap>.pcap \
+    --out-dir /opt/replay/pcaps/variants --count 16
+turbolaser up
+turbolaser status
+```
+
+## Verifying on the sensor
+
+- After `turbolaser up`, confirm the topology print and that net-setup refuses a
+  physical NIC if you point it at one.
+- With a capture replaying, run `tshark -i <sensor_port>` and confirm the sensor
+  receives unicast frames, not just broadcast and multicast. Watch the mirror
+  counters with `tc -s filter show dev <iface> egress`.
+- Read `/run/ot-turbolaser/status.json` and `journalctl -u ot-turbolaser` for the
+  per-run seed, gap timing, and state.
+- In variety mode, confirm replayed IPs occupy fresh random subnets each run
+  while conversations stay intact and MACs are unchanged. In baseline mode, IPs
+  are stable across runs and only timing varies.
+
 ## Build from source
 
 Requires a recent stable Rust toolchain.

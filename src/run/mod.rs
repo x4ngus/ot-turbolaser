@@ -12,6 +12,7 @@ mod seed;
 mod selection;
 mod signal;
 pub mod status;
+mod watchdog;
 
 use crate::cli::RunArgs;
 use crate::config::{self, Config, Mode};
@@ -47,6 +48,12 @@ pub fn run(args: &RunArgs) -> i32 {
     );
 
     let shutdown = signal::install_shutdown();
+    let watchdog = watchdog::Watchdog::spawn(
+        cfg.iface.clone(),
+        cfg.watchdog.poll_secs,
+        cfg.watchdog.flatline_secs,
+        shutdown.clone(),
+    );
     let started = now_unix();
     let mut run_counter: u64 = 0;
 
@@ -107,7 +114,7 @@ pub fn run(args: &RunArgs) -> i32 {
         s.l3_seed = l3_seed_used;
         write(&cfg, &mut s);
 
-        match replay::run_once(&cfg.iface, file_to_send, &cfg.rate.to_args()) {
+        match replay::run_once(&cfg.iface, file_to_send, &cfg.rate.to_args(), &watchdog) {
             Ok(res) if res.success => {
                 info!("run={run_counter} done: {}", res.detail);
                 s.last_run_packets = res.packets;
