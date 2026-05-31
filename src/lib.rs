@@ -9,6 +9,7 @@ pub mod config;
 pub mod control;
 pub mod pcapio;
 pub mod proto;
+pub mod reload;
 pub mod run;
 
 use cli::{Cli, Command};
@@ -19,7 +20,7 @@ pub fn dispatch(cli: Cli) -> i32 {
     match cli.command {
         Command::Run(a) => run::run(&a),
         Command::Check(a) => check(&a),
-        Command::Reload(_) => not_yet("reload"),
+        Command::Reload(a) => reload::reload(&a),
         Command::Up(a) => control::up(&a),
         Command::Down(a) => control::down(&a),
         Command::Status(a) => control::status(&a),
@@ -42,9 +43,4 @@ fn check(a: &cli::CheckArgs) -> i32 {
             1
         }
     }
-}
-
-fn not_yet(what: &str) -> i32 {
-    eprintln!("{what}: not yet implemented");
-    1
 }

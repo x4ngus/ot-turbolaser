@@ -5,9 +5,14 @@
 //! seeded, consistent identifier remap. Each protocol implements [`OtMutator`]
 //! (the mutators land in a later phase).
 
+pub mod crc;
 pub mod frame;
 pub mod l3;
 pub mod mapper;
+pub mod mutators;
+
+#[cfg(test)]
+pub mod testutil;
 
 pub use frame::{FrameLayout, L3Kind, L4Kind, ParsedFrame};
 pub use mapper::{Domain, SeededMapper};
