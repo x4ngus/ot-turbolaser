@@ -1,0 +1,68 @@
+# ot-turbolaser replay config. Plain and direct. No payload mutation happens
+# here; payload-identity variants are pre-baked offline by `turbolaser reload`.
+
+# Replay NIC on the isolated bridge. This is also the mirror source port.
+iface: tl0
+
+# variety  = fresh random, topology-preserving L3 remap every run.
+# baseline = fixed seed and asset set, vary only timing and the inter-run gap.
+mode: variety
+
+# Baseline master seed (reproducible). Ignored in variety, which uses entropy.
+seed: 1337
+
+paths:
+  pool: /opt/replay/pcaps/pool
+  variants: /opt/replay/pcaps/variants
+  shm_dir: /dev/shm/ot-turbolaser
+  status_file: /run/ot-turbolaser/status.json
+
+# Cheap per-run L3 randomisation. The coherent remapper keeps conversations and
+# subnet structure intact while moving everything to fresh random subnets.
+l3:
+  remap: true
+  fallback: none          # none | tcprewrite
+  subnets: []             # optional CIDR hints, e.g. ["192.168.10.0/24"]
+
+# Replay rate. Default honours the capture's own timing.
+rate:
+  model: original         # original | multiplier | pps | mbps | topspeed
+  # For another model, set 'model' and add its parameter:
+  #   model: multiplier   ->  multiplier: 2.0
+  #   model: pps          ->  pps: 200   (optional pps_multi: 1)
+  #   model: mbps         ->  mbps: 10.0
+  #   model: topspeed     ->  no parameter
+
+# Inter-run gap distribution.
+gap:
+  dist: exp_poisson       # exp_poisson | trunc_normal
+  mean_secs: 5.0
+  min_secs: 0.5           # optional clamp (skews the tail)
+  max_secs: 60.0
+  # For trunc_normal instead:
+  #   dist: trunc_normal
+  #   mean_secs: 8.0
+  #   stddev_secs: 3.0
+  #   lower_secs: 1.0
+  #   upper_secs: 30.0
+
+# Per-file selection weights. Precedence: files (exact) > globs (first match) > default.
+weights:
+  default: 1.0
+  globs:
+    - { pattern: "*modbus*", weight: 3.0 }
+    - { pattern: "*dnp3*", weight: 0.5 }
+  files:
+    noisy.pcap: 0.0         # 0 = never selected
+
+watchdog:
+  poll_secs: 2
+  flatline_secs: 10         # tx_packets flat this long during a send => abort and move on
+
+# Isolated bridge and mirror. The replay port is `iface` above.
+net:
+  mirror: tc                # tc | ovs
+  bridge: tlbr0
+  sensor_port: sens0
+
+no_pcaps_retry_secs: 30

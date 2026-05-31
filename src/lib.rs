@@ -5,6 +5,8 @@
 //! command surface and the README for the architecture.
 
 pub mod cli;
+pub mod config;
+pub mod run;
 
 use cli::{Cli, Command};
 
@@ -12,12 +14,28 @@ use cli::{Cli, Command};
 /// code: 0 on success, non-zero on error.
 pub fn dispatch(cli: Cli) -> i32 {
     match cli.command {
-        Command::Run(_) => not_yet("run"),
+        Command::Run(a) => run::run(&a),
+        Command::Check(a) => check(&a),
         Command::Reload(_) => not_yet("reload"),
         Command::Up(_) => not_yet("up"),
         Command::Down(_) => not_yet("down"),
         Command::Status(_) => not_yet("status"),
-        Command::Check(_) => not_yet("check"),
+    }
+}
+
+fn check(a: &cli::CheckArgs) -> i32 {
+    match config::load(&a.config) {
+        Ok(cfg) => {
+            println!(
+                "config OK: iface={} mode={:?} rate={:?} gap={:?}",
+                cfg.iface, cfg.mode, cfg.rate.model, cfg.gap.dist
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("config error: {e}");
+            1
+        }
     }
 }
 

@@ -1,0 +1,38 @@
+[Unit]
+Description=ot-turbolaser ICS/OT pcap replay appliance
+Documentation=https://github.com/x4ngus/ot-turbolaser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The network setup (isolated bridge + mirror) is wired as ExecStartPre/Post in
+# Phase 3 once scripts/net-setup.sh exists. It runs as root before privileges
+# drop, which is why net setup is a one-shot step and not done by the daemon.
+ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml
+Restart=always
+RestartSec=3
+
+# Creates /run/ot-turbolaser (0755) for the status heartbeat, cleaned on stop.
+RuntimeDirectory=ot-turbolaser
+RuntimeDirectoryMode=0755
+
+# Raw AF_PACKET TX for tcpreplay, plus tc/ip for the network setup.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Hardening compatible with raw sockets, /dev/shm scratch, and /run writes.
+# Do NOT add PrivateNetwork (hides the NICs), RestrictAddressFamilies without
+# AF_PACKET (blocks raw TX), or PrivateTmp (hides the /dev/shm scratch).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/run/ot-turbolaser /dev/shm /opt/replay/pcaps
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
