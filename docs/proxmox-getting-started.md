@@ -337,6 +337,15 @@ seed, then inter-run gaps.
   the host veth so the ingress hook can copy it. This is the default. If a future
   tcpreplay build sets `PACKET_QDISC_BYPASS`, switch to the OVS mirror, which
   copies in the datapath regardless.
+- Service fails with `226/NAMESPACE` ("Failed to set up mount namespacing"). The
+  unit's filesystem hardening needs a mount namespace, which a container cannot
+  set up. The shipped unit is already LXC safe. If you are on an older unit, add a
+  drop-in that disables it:
+  `mkdir -p /etc/systemd/system/ot-turbolaser.service.d` then write
+  `[Service]` with `ProtectSystem=no`, `ProtectHome=no`, `ProtectKernelTunables=no`,
+  `ProtectKernelModules=no`, `ProtectControlGroups=no`, and `ReadWritePaths=`, then
+  `systemctl daemon-reload && systemctl reset-failed ot-turbolaser &&
+  systemctl restart ot-turbolaser`.
 - Raw socket denied in the CT. Use a privileged container. If a restrictive
   AppArmor profile blocks raw networking, as a last resort set
   `lxc.apparmor.profile: unconfined` in `/etc/pve/lxc/910.conf` and weigh the

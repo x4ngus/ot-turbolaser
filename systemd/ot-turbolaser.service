@@ -23,18 +23,21 @@ RuntimeDirectoryMode=0755
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 
-# Hardening compatible with raw sockets, /dev/shm scratch, and /run writes.
-# Do NOT add PrivateNetwork (hides the NICs), RestrictAddressFamilies without
-# AF_PACKET (blocks raw TX), or PrivateTmp (hides the /dev/shm scratch).
+# Hardening that works inside an LXC container, the primary target. These do not
+# need a mount namespace.
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/run/ot-turbolaser /dev/shm /opt/replay/pcaps
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictRealtime=true
 LockPersonality=true
+# Filesystem and kernel hardening (ProtectSystem, ReadWritePaths, ProtectHome,
+# ProtectKernelTunables, ProtectKernelModules, ProtectControlGroups) is left out
+# of the default unit on purpose: it relies on mount namespaces, which an LXC
+# container cannot set up, so the service would fail with 226/NAMESPACE. On a
+# bare metal host or a VM, add it with the optional drop-in:
+#   install -D systemd/hardening.conf \
+#     /etc/systemd/system/ot-turbolaser.service.d/hardening.conf
+#   systemctl daemon-reload && systemctl restart ot-turbolaser
+# Do NOT add PrivateNetwork (hides the NICs), RestrictAddressFamilies without
+# AF_PACKET (blocks raw TX), or PrivateTmp (hides the /dev/shm scratch).
 
 [Install]
 WantedBy=multi-user.target
