@@ -1,16 +1,14 @@
+<p align="center">
+  <img src="docs/hero.png" alt="ot-turbolaser firing OT protocol traffic at a passive monitoring sensor" width="100%">
+</p>
+
 # ot-turbolaser
 
 A headless ICS/OT PCAP replay appliance. It continuously replays industrial
 protocol captures with randomised but genuine-looking network identifiers and
 timing, emitting frames onto an isolated virtual bridge. A host-side SPAN mirror
-copies that traffic to a passive monitoring sensor, for example a Dragos Platform
-sensor, so you can exercise protocol parsers and detections or build a traffic
-baseline without touching a production network.
-
-The name is the metaphor for how it works. The daemon is the turbolaser: `run`
-fires packets at the sensor. `reload` hand-loads the rounds, the variant pcaps,
-ahead of time. In firearms terms reload fits twice, since it means both loading
-the weapon and manufacturing your own ammunition.
+copies that traffic to a passive monitoring sensor, so you can exercise protocol 
+parsers and detections or build a baseline without touching a production network.
 
 ## Safety
 
@@ -27,16 +25,15 @@ loudly. Read the warning. Do not override it on a live network.
   mandatory, not optional. The host mirrors the replay port to the sensor's
   monitor port, which runs promiscuous. Both a tc clsact/mirred helper and an
   Open vSwitch helper are provided. tc-mirred is the default.
-- Randomisation is tiered. The cheap per-run tier rewrites L3 addresses with a
-  topology-preserving remap: fresh random subnets each run, but the same hosts
+- Topology-preserving remap: fresh random subnets each run, but the same hosts
   keep talking to the same hosts, so the sensor sees genuine looking
   conversations. The expensive tier, payload-layer asset identity (Modbus unit
   id, EtherNet/IP and CIP identity, S7comm module and SZL identity, DNP3 link
   addresses), is pre-baked offline by `reload` into variant pcaps and never
   mutated in the hot path.
 - Two modes. `variety` randomises aggressively every run to exercise parsers and
-  detections. `baseline` fixes the seed and the asset set and varies only timing
-  and the inter-run gap.
+  detections. `baseline` fixes the seed and the asset set, so the addresses stay
+  put, and changes only the replay timing and how long it pauses between runs.
 
 ## Quickstart
 
@@ -121,7 +118,7 @@ turbolaser status
   receives unicast frames, not just broadcast and multicast. Watch the mirror
   counters with `tc -s filter show dev <iface> egress`.
 - Read `/run/ot-turbolaser/status.json` and `journalctl -u ot-turbolaser` for the
-  per-run seed, gap timing, and state.
+  per-run seed, the pause between runs, and state.
 - In variety mode, confirm replayed IPs occupy fresh random subnets each run
   while conversations stay intact and MACs are unchanged. In baseline mode, IPs
   are stable across runs and only timing varies.
