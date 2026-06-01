@@ -93,6 +93,10 @@ Two common layouts:
 
 ## Running in a Proxmox LXC
 
+For a complete end-to-end walkthrough on a Dell R740, including CT template
+selection, host and guest network settings, and the host-side SPAN mirror, see
+[docs/proxmox-getting-started.md](docs/proxmox-getting-started.md).
+
 Use a privileged container (the daemon needs `CAP_NET_RAW` and `CAP_NET_ADMIN`
 for raw transmit and for `ip`/`tc`). Give the container two NICs on an isolated
 Linux bridge that has no uplink, mapped to the replay and sensor ports. A minimal
