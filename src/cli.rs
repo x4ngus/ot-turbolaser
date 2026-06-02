@@ -69,7 +69,7 @@ pub struct ReloadArgs {
     #[arg(long, default_value_t = 1)]
     pub count: u32,
     /// Mutation mode.
-    #[arg(long, value_enum, default_value_t = ModeSel::Variety)]
+    #[arg(long, value_enum, default_value_t = ModeSel::RedLaser)]
     pub mode: ModeSel,
     /// Also remap L3 with topology-preserving random subnets.
     #[arg(long)]
@@ -113,8 +113,8 @@ pub enum ProtoSel {
 
 /// Randomisation mode shared by run and reload.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[value(rename_all = "lowercase")]
+#[value(rename_all = "snake_case")]
 pub enum ModeSel {
-    Variety,
-    Baseline,
+    RedLaser,
+    GreenLaser,
 }

@@ -27,7 +27,7 @@ Linux VM.
 - Replay rate defaults to original capture timing. Multiplier, pps, mbps, and
   topspeed are also selectable.
 - Inter-run gap distributions: exponential/Poisson and truncated normal only.
-- Variety per-run randomisation is L3 only and topology preserving. No MAC, no
+- Red laser per-run randomisation is L3 only and topology preserving. No MAC, no
   L4. The cheap tier is an in-process coherent remapper, not tcprewrite.
   tcprewrite is kept only as an optional fallback.
 - Observability: structured logs to stderr (journald ingests them) plus a JSON

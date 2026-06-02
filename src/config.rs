@@ -16,7 +16,7 @@ pub struct Config {
     pub iface: String,
     #[serde(default)]
     pub mode: Mode,
-    /// Baseline master seed. Ignored in variety, which uses entropy.
+    /// Green-laser master seed. Ignored in red laser, which uses entropy.
     #[serde(default)]
     pub seed: Option<u64>,
     pub paths: Paths,
@@ -35,11 +35,22 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
 pub enum Mode {
     #[default]
-    Variety,
-    Baseline,
+    #[serde(rename = "red_laser", alias = "variety", alias = "red")]
+    RedLaser,
+    #[serde(rename = "green_laser", alias = "baseline", alias = "green")]
+    GreenLaser,
+}
+
+impl Mode {
+    /// Canonical config and status string for this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::RedLaser => "red_laser",
+            Mode::GreenLaser => "green_laser",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,7 +65,7 @@ pub struct Paths {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct L3Cfg {
-    /// Apply the coherent L3 remap per run in variety mode.
+    /// Apply the coherent L3 remap per run in red-laser mode.
     #[serde(default = "default_true")]
     pub remap: bool,
     /// Optional cheap-tier fallback when the in-process remap is off.

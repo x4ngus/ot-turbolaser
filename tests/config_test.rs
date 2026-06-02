@@ -8,5 +8,5 @@ fn sample_config_parses_and_validates() {
     let cfg = ot_turbolaser::config::load(&p)
         .unwrap_or_else(|e| panic!("sample config should load and validate: {e}"));
     assert_eq!(cfg.iface, "tl0");
-    assert_eq!(cfg.mode, ot_turbolaser::config::Mode::Variety);
+    assert_eq!(cfg.mode, ot_turbolaser::config::Mode::RedLaser);
 }

@@ -4,11 +4,12 @@
 # Replay NIC on the isolated bridge. This is also the mirror source port.
 iface: tl0
 
-# variety  = fresh random, topology-preserving L3 remap every run.
-# baseline = fixed seed and asset set, vary only timing and the inter-run gap.
-mode: variety
+# red_laser   = fresh random, topology-preserving L3 remap every run (adversarial).
+# green_laser = fixed seed and asset set, vary only timing and the inter-run gap.
+# The old names variety/baseline still parse as aliases.
+mode: red_laser
 
-# Baseline master seed (reproducible). Ignored in variety, which uses entropy.
+# Green-laser master seed (reproducible). Ignored in red laser, which uses entropy.
 seed: 1337
 
 paths:

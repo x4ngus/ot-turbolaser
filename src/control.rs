@@ -153,6 +153,7 @@ pub fn status(args: &StatusArgs) -> i32 {
         };
         println!("state:        {state}");
         println!("mode:         {}", field("mode"));
+        println!("laser:        {}", field("laser"));
         println!("iface:        {}", field("iface"));
         println!("run:          {}", field("run"));
         println!("current_file: {}", field("current_file"));

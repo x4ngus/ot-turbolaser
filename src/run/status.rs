@@ -12,7 +12,10 @@ pub struct Status {
     pub schema: u32,
     pub pid: u32,
     pub state: String,
+    /// Deprecated duplicate of `laser`, kept for one release. Carries the
+    /// canonical `red_laser`/`green_laser` value, not the old `variety`/`baseline`.
     pub mode: String,
+    pub laser: String,
     pub iface: String,
     pub run: u64,
     pub current_file: Option<String>,

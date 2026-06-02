@@ -31,9 +31,10 @@ loudly. Read the warning. Do not override it on a live network.
   id, EtherNet/IP and CIP identity, S7comm module and SZL identity, DNP3 link
   addresses), is pre-baked offline by `reload` into variant pcaps and never
   mutated in the hot path.
-- Two modes. `variety` randomises aggressively every run to exercise parsers and
-  detections. `baseline` fixes the seed and the asset set, so the addresses stay
-  put, and changes only the replay timing and how long it pauses between runs.
+- Two modes. `red_laser` randomises aggressively every run to exercise parsers
+  and detections. `green_laser` fixes the seed and the asset set, so the addresses
+  stay put, and changes only the replay timing and how long it pauses between runs.
+  The former names `variety` and `baseline` still parse as aliases.
 
 ## Quickstart
 
@@ -123,8 +124,8 @@ turbolaser status
   counters with `tc -s filter show dev <iface> egress`.
 - Read `/run/ot-turbolaser/status.json` and `journalctl -u ot-turbolaser` for the
   per-run seed, the pause between runs, and state.
-- In variety mode, confirm replayed IPs occupy fresh random subnets each run
-  while conversations stay intact and MACs are unchanged. In baseline mode, IPs
+- In red-laser mode, confirm replayed IPs occupy fresh random subnets each run
+  while conversations stay intact and MACs are unchanged. In green-laser mode, IPs
   are stable across runs and only timing varies.
 
 ## Build from source

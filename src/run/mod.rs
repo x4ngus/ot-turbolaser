@@ -1,6 +1,6 @@
 //! The replay daemon loop. `turbolaser run` calls [`run`].
 //!
-//! Each iteration: rescan captures, weighted-pick one, in variety mode remap
+//! Each iteration: rescan captures, weighted-pick one, in red-laser mode remap
 //! its L3 addresses into tmpfs with a fresh seed, fire it once with tcpreplay
 //! at the configured rate, write the heartbeat, sleep a sampled gap, repeat.
 //! Fail safe: missing captures sleep and retry, never crash-loop. The watchdog
@@ -43,8 +43,10 @@ pub fn run(args: &RunArgs) -> i32 {
     let hints = l3::parse_hints(&cfg.l3.subnets);
     let mut loop_rng = ChaCha8Rng::seed_from_u64(master);
     info!(
-        "turbolaser starting: iface={} mode={:?} seed_master={:#018x}",
-        cfg.iface, cfg.mode, master
+        "turbolaser starting: iface={} mode={} seed_master={:#018x}",
+        cfg.iface,
+        cfg.mode.as_str(),
+        master
     );
 
     let shutdown = signal::install_shutdown();
@@ -86,11 +88,11 @@ pub fn run(args: &RunArgs) -> i32 {
 
         let run_seed = seed::run_seed(master, run_counter);
 
-        // Variety mode relocates L3 addresses per run into tmpfs. Baseline
+        // Red laser relocates L3 addresses per run into tmpfs. Green laser
         // keeps the asset set fixed and replays the capture as-is.
         let mut remapped: Option<PathBuf> = None;
         let mut l3_seed_used: Option<u64> = None;
-        if cfg.mode == Mode::Variety && cfg.l3.remap {
+        if cfg.mode == Mode::RedLaser && cfg.l3.remap {
             match remap_to_shm(&cfg, &chosen, &hints, run_seed) {
                 Ok(p) => {
                     remapped = Some(p);
@@ -198,10 +200,11 @@ fn write(cfg: &Config, s: &mut Status) {
 
 fn base_status(cfg: &Config, started: u64, run: u64) -> Status {
     Status {
-        schema: 1,
+        schema: 2,
         pid: std::process::id(),
         state: String::new(),
-        mode: format!("{:?}", cfg.mode).to_lowercase(),
+        mode: cfg.mode.as_str().to_string(),
+        laser: cfg.mode.as_str().to_string(),
         iface: cfg.iface.clone(),
         run,
         current_file: None,

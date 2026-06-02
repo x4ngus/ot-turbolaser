@@ -1,14 +1,14 @@
 //! Seed handling.
 //!
-//! Baseline derives every per-run seed from a fixed master with SplitMix64, so
-//! the whole sequence (file order, gaps, L3 remap) reproduces across restarts.
-//! Variety draws the master from OS entropy, so each daemon start differs; the
+//! Green laser derives every per-run seed from a fixed master with SplitMix64,
+//! so the whole sequence (file order, gaps, L3 remap) reproduces across restarts.
+//! Red laser draws the master from OS entropy, so each daemon start differs; the
 //! master and every per-run seed are logged so an interesting run can be
-//! reproduced by pinning the seed in baseline mode.
+//! reproduced by pinning the seed in green-laser mode.
 
 use crate::config::Mode;
 
-pub const DEFAULT_BASELINE_SEED: u64 = 0x00C0_FFEE_0BAD_F00D;
+pub const DEFAULT_GREEN_SEED: u64 = 0x00C0_FFEE_0BAD_F00D;
 
 /// One SplitMix64 step. Cheap, well-distributed mixing of master and counter.
 pub fn splitmix64(seed: u64) -> u64 {
@@ -18,17 +18,17 @@ pub fn splitmix64(seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Resolve the master seed for a run. Baseline uses the configured seed (or a
-/// fixed default); variety ignores the config and uses entropy.
+/// Resolve the master seed for a run. Green laser uses the configured seed (or a
+/// fixed default); red laser ignores the config and uses entropy.
 pub fn master_seed(mode: Mode, configured: Option<u64>) -> u64 {
     match mode {
-        Mode::Baseline => configured.unwrap_or(DEFAULT_BASELINE_SEED),
-        Mode::Variety => rand::random(),
+        Mode::GreenLaser => configured.unwrap_or(DEFAULT_GREEN_SEED),
+        Mode::RedLaser => rand::random(),
     }
 }
 
 /// The per-run seed for iteration `run`, used for the L3 remap. Deterministic
-/// given the master, which is what makes baseline reproducible.
+/// given the master, which is what makes green laser reproducible.
 pub fn run_seed(master: u64, run: u64) -> u64 {
     splitmix64(master ^ run)
 }
@@ -38,9 +38,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_master_is_stable() {
-        assert_eq!(master_seed(Mode::Baseline, Some(42)), 42);
-        assert_eq!(master_seed(Mode::Baseline, None), DEFAULT_BASELINE_SEED);
+    fn green_master_is_stable() {
+        assert_eq!(master_seed(Mode::GreenLaser, Some(42)), 42);
+        assert_eq!(master_seed(Mode::GreenLaser, None), DEFAULT_GREEN_SEED);
     }
 
     #[test]

@@ -33,8 +33,11 @@ fn check(a: &cli::CheckArgs) -> i32 {
     match config::load(&a.config) {
         Ok(cfg) => {
             println!(
-                "config OK: iface={} mode={:?} rate={:?} gap={:?}",
-                cfg.iface, cfg.mode, cfg.rate.model, cfg.gap.dist
+                "config OK: iface={} mode={} rate={:?} gap={:?}",
+                cfg.iface,
+                cfg.mode.as_str(),
+                cfg.rate.model,
+                cfg.gap.dist
             );
             0
         }
