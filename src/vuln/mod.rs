@@ -139,6 +139,12 @@ impl VulnDb {
             self.profiles.get(n % self.profiles.len())
         }
     }
+
+    /// The profile for a given model, to recover encoding fields from a ledger
+    /// device record when re-announcing it.
+    pub fn by_model(&self, model: &str) -> Option<&DeviceProfile> {
+        self.profiles.iter().find(|p| p.model == model)
+    }
 }
 
 #[cfg(test)]

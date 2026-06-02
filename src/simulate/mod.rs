@@ -7,6 +7,7 @@
 //! here are pure and CLI-driven.
 
 pub mod devices;
+pub mod engine;
 pub mod zones;
 
 use rand::SeedableRng;

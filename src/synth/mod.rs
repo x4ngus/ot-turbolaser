@@ -13,3 +13,26 @@ pub mod lldp;
 pub mod modbus_devid;
 pub mod s7_szl;
 pub mod snmp;
+
+use std::time::Duration;
+
+use pcap_file::pcap::PcapHeader;
+
+use crate::pcapio::{Capture, OwnedPacket};
+
+/// Collect synthesized frames into a Capture for tmpfs write and replay. Frames
+/// are stamped a millisecond apart so tcpreplay paces them in order.
+pub fn to_capture(frames: Vec<Vec<u8>>) -> Capture {
+    Capture {
+        header: PcapHeader::default(),
+        packets: frames
+            .into_iter()
+            .enumerate()
+            .map(|(i, data)| OwnedPacket {
+                ts: Duration::from_millis(i as u64),
+                orig_len: data.len() as u32,
+                data,
+            })
+            .collect(),
+    }
+}
