@@ -12,7 +12,10 @@ pub struct Status {
     pub schema: u32,
     pub pid: u32,
     pub state: String,
+    /// Deprecated duplicate of `laser`, kept for one release. Carries the
+    /// canonical `red_laser`/`green_laser` value, not the old `variety`/`baseline`.
     pub mode: String,
+    pub laser: String,
     pub iface: String,
     pub run: u64,
     pub current_file: Option<String>,
@@ -22,8 +25,25 @@ pub struct Status {
     pub total_tx_packets: Option<u64>,
     pub next_gap_secs: Option<f64>,
     pub last_error: Option<String>,
+    // v0.2 zone and session exposure. Red laser fills these from the ledger;
+    // green laser fills zones derived from the current capture.
+    pub zone_count: usize,
+    pub device_count: usize,
+    pub device_cap: usize,
+    pub subnet_cap: usize,
+    pub cycle: u64,
+    pub last_threat_unix: Option<u64>,
+    pub zones: Vec<StatusZone>,
     pub updated_unix: u64,
     pub started_unix: u64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct StatusZone {
+    pub cidr: String,
+    pub name: String,
+    pub purdue_level: u8,
+    pub devices: usize,
 }
 
 pub fn write_atomic(path: &Path, status: &Status) -> io::Result<()> {

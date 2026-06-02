@@ -154,7 +154,7 @@ interface.
 
 ```
 iface: eth1            # the lab NIC on vmbr9
-mode: variety          # or baseline
+mode: red_laser        # or green_laser
 ```
 
 The mirror is set up on the host (step 8), not by the container, so tell the

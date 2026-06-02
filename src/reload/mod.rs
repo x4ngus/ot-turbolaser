@@ -37,8 +37,8 @@ pub fn reload(args: &ReloadArgs) -> i32 {
 
     let proto = proto_filter(args.proto);
     let mode = match args.mode {
-        ModeSel::Variety => "variety",
-        ModeSel::Baseline => "baseline",
+        ModeSel::RedLaser => "red_laser",
+        ModeSel::GreenLaser => "green_laser",
     };
     let validate = args.validate;
     if validate && !pipeline::tshark_available() {

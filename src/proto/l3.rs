@@ -61,6 +61,26 @@ fn group_of(addr: u32, hints: &[Ipv4Net]) -> (u8, u32) {
     (DEFAULT_PREFIX, addr & mask_for(DEFAULT_PREFIX))
 }
 
+/// The subnet an address belongs to, as an `Ipv4Net`. Shared by the remap and
+/// by zone grouping so the two always agree on subnet boundaries.
+pub(crate) fn subnet_of(addr: Ipv4Addr, hints: &[Ipv4Net]) -> Ipv4Net {
+    let (p, net) = group_of(u32::from(addr), hints);
+    Ipv4Net::new(Ipv4Addr::from(net), p).expect("prefix from group_of is valid")
+}
+
+/// A fresh `/prefix` network in 10/8 that does not overlap any in `existing`.
+/// Reuses the per-run remap's non-overlap logic so fabricated zones and the
+/// bulk-capture remap never collide.
+pub(crate) fn fresh_subnet(prefix: u8, existing: &[Ipv4Net], rng: &mut ChaCha8Rng) -> Ipv4Net {
+    let assigned: Vec<(u32, u8)> = existing
+        .iter()
+        .map(|n| (u32::from(n.network()), n.prefix_len()))
+        .collect();
+    let p = prefix.clamp(8, 30);
+    let net = pick_new_net(p, rng, &assigned);
+    Ipv4Net::new(Ipv4Addr::from(net), p).expect("valid prefix")
+}
+
 /// Remap every host in the capture in place, recomputing checksums on changed
 /// frames. Deterministic for a given capture and seed.
 pub fn remap_capture(cap: &mut Capture, hints: &[Ipv4Net], seed: u64) -> RemapSummary {

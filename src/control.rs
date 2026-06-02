@@ -153,11 +153,39 @@ pub fn status(args: &StatusArgs) -> i32 {
         };
         println!("state:        {state}");
         println!("mode:         {}", field("mode"));
+        println!("laser:        {}", field("laser"));
         println!("iface:        {}", field("iface"));
         println!("run:          {}", field("run"));
         println!("current_file: {}", field("current_file"));
         println!("tx_packets:   {}", field("total_tx_packets"));
         println!("last_packets: {}", field("last_run_packets"));
+        let zone_count = v.get("zone_count").and_then(|x| x.as_u64()).unwrap_or(0);
+        let device_count = v.get("device_count").and_then(|x| x.as_u64()).unwrap_or(0);
+        if zone_count > 0 || device_count > 0 {
+            println!("zones:        {}", field("zone_count"));
+            if device_count > 0 || v.get("device_cap").and_then(|x| x.as_u64()).unwrap_or(0) > 0 {
+                println!(
+                    "devices:      {} / {}",
+                    field("device_count"),
+                    field("device_cap")
+                );
+                println!("subnet cap:   {}", field("subnet_cap"));
+            }
+            if v.get("cycle").and_then(|x| x.as_u64()).unwrap_or(0) > 0 {
+                println!("cycle:        {}", field("cycle"));
+            }
+            if let Some(t) = v.get("last_threat_unix").and_then(|x| x.as_u64()) {
+                println!("last_threat:  {t}");
+            }
+            if let Some(zs) = v.get("zones").and_then(|x| x.as_array()) {
+                for z in zs {
+                    let c = z.get("cidr").and_then(|x| x.as_str()).unwrap_or("?");
+                    let n = z.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                    let d = z.get("devices").and_then(|x| x.as_u64()).unwrap_or(0);
+                    println!("  {c:<18} {n} ({d} devices)");
+                }
+            }
+        }
         println!("updated_unix: {}", field("updated_unix"));
         if let Some(err) = v.get("last_error").and_then(|x| x.as_str()) {
             println!("last_error:   {err}");

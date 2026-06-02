@@ -19,6 +19,11 @@ RestartSec=3
 RuntimeDirectory=ot-turbolaser
 RuntimeDirectoryMode=0755
 
+# Creates /var/lib/ot-turbolaser (0750) for the persistent red-laser session
+# ledger, preserved across restarts. Cleared with `turbolaser reset`.
+StateDirectory=ot-turbolaser
+StateDirectoryMode=0750
+
 # Raw AF_PACKET TX for tcpreplay, plus tc/ip for the network setup.
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN

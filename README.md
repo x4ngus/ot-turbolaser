@@ -31,9 +31,49 @@ loudly. Read the warning. Do not override it on a live network.
   id, EtherNet/IP and CIP identity, S7comm module and SZL identity, DNP3 link
   addresses), is pre-baked offline by `reload` into variant pcaps and never
   mutated in the hot path.
-- Two modes. `variety` randomises aggressively every run to exercise parsers and
-  detections. `baseline` fixes the seed and the asset set, so the addresses stay
-  put, and changes only the replay timing and how long it pauses between runs.
+- Two modes. `red_laser` randomises aggressively every run to exercise parsers
+  and detections. `green_laser` fixes the seed and the asset set, so the addresses
+  stay put, and changes only the replay timing and how long it pauses between runs.
+  The former names `variety` and `baseline` still parse as aliases.
+
+## Red laser and green laser
+
+Red laser is the adversarial mode. On top of the replayed chatter it fabricates a
+believable ICS estate and feeds it to the sensor:
+
+- Named zones grouped by subnet, following the Purdue/IEC-62443 model and the
+  dominant vendor OUI (for example "Siemens PCS7 Manufacturing Line 1"), with
+  managed switches as the conduits between zones.
+- Simulated devices carrying real, advisory-sourced vendor/model/firmware
+  identities that trigger CVE matches, delivered as genuine protocol assertions
+  (EtherNet/IP List Identity, Modbus 0x2B/0x0E, S7comm SZL, plus LLDP/CDP/SNMP for
+  switches) so each detection rests on a coherent transaction rather than an
+  orphan packet.
+- Rare external-threat injections: a genuine host is occasionally promoted to a
+  threat actor by re-originating it from an external address with a desktop MAC,
+  at most once a day.
+
+A persistent session ledger bounds the world to at most 10 zones and 2000
+devices, preserves unique IP assignment, and survives restarts. It is the ground
+truth you can diff against the sensor.
+
+Green laser is the accurate mode: it replays a fixed, reproducible baseline and
+derives zones read-only from the capture's actual addresses and MAC OUIs, with no
+fabrication.
+
+Inspect and drive the simulation:
+
+- `turbolaser zones` shows the current zone map (green derives it from the
+  captures, red reads the ledger).
+- `turbolaser plan` previews the fabricated zones, devices, and CVE assignments
+  without sending any traffic.
+- `turbolaser reset` clears the session ledger for a fresh feed.
+- `turbolaser status` reports the zone list, device count against the cap, and
+  the last threat injection.
+
+The estate, CVE profiles, and external ranges are configurable; see the v0.2
+block in `conf/replay.yaml`. The bundled OUI and vulnerable-profile databases can
+be overridden on disk.
 
 ## Quickstart
 
@@ -123,8 +163,8 @@ turbolaser status
   counters with `tc -s filter show dev <iface> egress`.
 - Read `/run/ot-turbolaser/status.json` and `journalctl -u ot-turbolaser` for the
   per-run seed, the pause between runs, and state.
-- In variety mode, confirm replayed IPs occupy fresh random subnets each run
-  while conversations stay intact and MACs are unchanged. In baseline mode, IPs
+- In red-laser mode, confirm replayed IPs occupy fresh random subnets each run
+  while conversations stay intact and MACs are unchanged. In green-laser mode, IPs
   are stable across runs and only timing varies.
 
 ## Build from source

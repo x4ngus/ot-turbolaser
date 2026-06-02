@@ -20,10 +20,21 @@ done
     exit 1
 }
 
-install -d "$PREFIX/bin" "$PREFIX/conf" "$PREFIX/scripts" \
-    "$PREFIX/pcaps/pool" "$PREFIX/pcaps/variants"
+install -d "$PREFIX/bin" "$PREFIX/conf" "$PREFIX/scripts" "$PREFIX/data" \
+    "$PREFIX/pcaps/pool" "$PREFIX/pcaps/variants" /var/lib/ot-turbolaser
 install -m 0755 "$BIN_SRC" "$PREFIX/bin/turbolaser"
 install -m 0755 scripts/net-setup.sh scripts/net-teardown.sh "$PREFIX/scripts/"
+
+# Bundled OUI and vulnerable-profile databases. The binary embeds these; the
+# on-disk copies are optional overrides the operator can edit. Never clobber an
+# edited override: install the sample alongside instead.
+for d in oui.csv vuln_profiles.toml; do
+    if [[ -f "$PREFIX/data/$d" ]]; then
+        install -m 0644 "data/$d" "$PREFIX/data/$d.example"
+    else
+        install -m 0644 "data/$d" "$PREFIX/data/$d"
+    fi
+done
 
 # Never clobber an edited config: install the sample alongside instead.
 if [[ -f "$PREFIX/conf/replay.yaml" ]]; then

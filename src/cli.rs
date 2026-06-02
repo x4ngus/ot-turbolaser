@@ -35,6 +35,12 @@ pub enum Command {
     Status(StatusArgs),
     /// Validate a config file without replaying.
     Check(CheckArgs),
+    /// Show the current zone map (green derives from captures, red reads the ledger).
+    Zones(ZonesArgs),
+    /// Clear the red-laser session ledger for a fresh feed.
+    Reset(ResetArgs),
+    /// Preview the fabricated zone and device map without sending traffic.
+    Plan(PlanArgs),
     /// Set up the bridge and mirror from config. Used by the systemd unit.
     NetSetup(NetArgs),
     /// Tear down the bridge and mirror from config. Used by the systemd unit.
@@ -69,7 +75,7 @@ pub struct ReloadArgs {
     #[arg(long, default_value_t = 1)]
     pub count: u32,
     /// Mutation mode.
-    #[arg(long, value_enum, default_value_t = ModeSel::Variety)]
+    #[arg(long, value_enum, default_value_t = ModeSel::RedLaser)]
     pub mode: ModeSel,
     /// Also remap L3 with topology-preserving random subnets.
     #[arg(long)]
@@ -100,6 +106,33 @@ pub struct CheckArgs {
     pub config: PathBuf,
 }
 
+#[derive(Args, Debug)]
+pub struct ZonesArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ResetArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct PlanArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// How many devices to fabricate in the preview (default 64).
+    #[arg(long)]
+    pub devices: Option<usize>,
+}
+
 /// Protocol selector for reload. `auto` dispatches by sniffing each frame.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lowercase")]
@@ -113,8 +146,8 @@ pub enum ProtoSel {
 
 /// Randomisation mode shared by run and reload.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[value(rename_all = "lowercase")]
+#[value(rename_all = "snake_case")]
 pub enum ModeSel {
-    Variety,
-    Baseline,
+    RedLaser,
+    GreenLaser,
 }

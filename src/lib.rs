@@ -7,10 +7,16 @@
 pub mod cli;
 pub mod config;
 pub mod control;
+pub mod ledger;
+pub mod oui;
 pub mod pcapio;
 pub mod proto;
 pub mod reload;
 pub mod run;
+pub mod simulate;
+pub mod synth;
+pub mod threat;
+pub mod vuln;
 
 use cli::{Cli, Command};
 
@@ -20,6 +26,9 @@ pub fn dispatch(cli: Cli) -> i32 {
     match cli.command {
         Command::Run(a) => run::run(&a),
         Command::Check(a) => check(&a),
+        Command::Zones(a) => simulate::cmd_zones(&a),
+        Command::Reset(a) => simulate::cmd_reset(&a),
+        Command::Plan(a) => simulate::cmd_plan(&a),
         Command::Reload(a) => reload::reload(&a),
         Command::Up(a) => control::up(&a),
         Command::Down(a) => control::down(&a),
@@ -33,8 +42,11 @@ fn check(a: &cli::CheckArgs) -> i32 {
     match config::load(&a.config) {
         Ok(cfg) => {
             println!(
-                "config OK: iface={} mode={:?} rate={:?} gap={:?}",
-                cfg.iface, cfg.mode, cfg.rate.model, cfg.gap.dist
+                "config OK: iface={} mode={} rate={:?} gap={:?}",
+                cfg.iface,
+                cfg.mode.as_str(),
+                cfg.rate.model,
+                cfg.gap.dist
             );
             0
         }

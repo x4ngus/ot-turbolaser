@@ -19,7 +19,7 @@ Linux VM.
 - Whole toolset is Rust. No Python, no scapy, anywhere.
 - One crate, one binary `turbolaser`, over a shared library. Subcommands:
   `run` (the daemon loop), `reload` (forge variant pcaps), `up`, `down`,
-  `status`, `check`.
+  `status`, `check`, `zones`, `plan`, `reset`.
 - `reload` replaces the originally planned Python+scapy baker. The gun metaphor
   ties naming to function: `run` fires, `reload` hand-loads the rounds.
 - Default mirror is tc clsact/mirred. An OVS helper is also provided.
@@ -27,22 +27,45 @@ Linux VM.
 - Replay rate defaults to original capture timing. Multiplier, pps, mbps, and
   topspeed are also selectable.
 - Inter-run gap distributions: exponential/Poisson and truncated normal only.
-- Variety per-run randomisation is L3 only and topology preserving. No MAC, no
-  L4. The cheap tier is an in-process coherent remapper, not tcprewrite.
-  tcprewrite is kept only as an optional fallback.
+- Red laser per-run randomisation of the replayed chatter is L3 only and
+  topology preserving, via the in-process coherent remapper (tcprewrite is kept
+  only as an optional fallback). On top of that, red laser synthesizes
+  device-identity and switch-beacon assertions and occasionally promotes a host
+  to an external threat actor; those paths build or rewrite whole frames,
+  including MACs, and are fired as separate bursts, never edits to the replayed
+  capture's payloads.
 - Observability: structured logs to stderr (journald ingests them) plus a JSON
   heartbeat at /run/ot-turbolaser/status.json.
 - License is MIT.
+- v0.2 red/green laser: `variety`/`baseline` are renamed to `red_laser`/
+  `green_laser` (old names still parse as aliases). Green laser is read-only and
+  derives zones from real captures; red laser owns the content layer.
+- New content is synthesized whole in Rust as genuine protocol assertions
+  (query plus response, or an SNMP fetch), never lone packets, so a CVE match
+  rests on a coherent transaction. CVE identities come from a curated,
+  advisory-sourced profile database. The OUI and profile databases are embedded
+  with on-disk overrides.
+- A persistent session ledger at /var/lib/ot-turbolaser enforces the hard caps
+  and preserves unique IP assignment across restarts. `reset` clears it.
+- External threats are genuine-host promotion (IP and MAC rewrite of a real
+  host), sparse and rate-limited. Never synthesize real exploit payloads.
 
 ## Hard invariants
 
 - Never bridge to a production or uplinked network. net-setup must refuse to
   attach the bridge to a physical NIC and warn loudly.
-- No payload-layer mutation in the hot path. Only the L3 coherent remap runs per
-  run. All payload identity mutation happens offline in `reload`.
-- Mutations are fixed-width. No field changes byte length, so upper-layer length
-  fields never need recomputation. Only the protocol CRC (DNP3) and the L3/L4
-  checksums change.
+- The replayed-capture path stays fixed-width: the reload mutators change no
+  field's byte length, so upper-layer lengths never move, and only the DNP3 CRC
+  and the L3/L4 checksums change. Red laser does not edit a replayed capture's
+  payloads in the hot path: device identities and switch beacons are synthesized
+  whole (the lengths are ours to set) and fired as a separate burst, and threat
+  promotion only rewrites a selected host's L3 and MAC and recomputes checksums.
+- Hard caps (10 zones, 2000 devices) live in ledger constants; config may lower
+  but never raise them. External-threat promotion is sparse, at most one per 24h
+  (a floor enforced regardless of config).
+- Synthesized and promoted traffic is data-plane payload on the isolated bridge
+  only. External source addresses are bytes, not routes; keep the bridge
+  isolated (net-setup refuses a physical NIC).
 - Fail safe. If no pcaps are present, sleep and retry, never crash-loop. systemd
   Restart=always plus the tx watchdog cover the rest.
 - Variants must stay internally consistent so the sensor never sees malformed

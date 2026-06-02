@@ -1,0 +1,20 @@
+# Curated ICS/OT vendor OUI subset for ot-turbolaser.
+# Format: OUI,Vendor   (OUI is the 24-bit prefix; ':' or '-' separators optional)
+# This is a starter set for zone naming and device fabrication. Verify against
+# the IEEE registry and extend as needed. An on-disk file at oui_db.path
+# overrides this embedded table.
+0000BC,Rockwell Automation
+001D9C,Rockwell Automation
+000054,Schneider Electric
+0080F4,Schneider Electric
+000E8C,Siemens AG
+001B1B,Siemens AG
+286336,Siemens AG
+000991,GE Fanuc Automation
+00000C,Cisco Systems
+001B0C,Cisco Systems
+008063,Hirschmann
+0090E8,Moxa
+00A045,Phoenix Contact
+0030DE,WAGO
+000105,Beckhoff Automation

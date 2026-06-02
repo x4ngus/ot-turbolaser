@@ -1,10 +1,12 @@
 //! The replay daemon loop. `turbolaser run` calls [`run`].
 //!
-//! Each iteration: rescan captures, weighted-pick one, in variety mode remap
-//! its L3 addresses into tmpfs with a fresh seed, fire it once with tcpreplay
-//! at the configured rate, write the heartbeat, sleep a sampled gap, repeat.
-//! Fail safe: missing captures sleep and retry, never crash-loop. The watchdog
-//! lands in a later phase.
+//! Each iteration: rescan captures and weighted-pick one. In red-laser mode,
+//! remap its L3 into tmpfs, optionally promote a host to an external threat
+//! actor, fire the capture, then fire a second short burst of synthesized
+//! device-identity and switch assertions. Green laser replays the capture as-is
+//! and derives zones for the heartbeat. Either way write the heartbeat and sleep
+//! a sampled gap. Fail safe: missing captures sleep and retry, never crash-loop;
+//! the tx watchdog guards each send.
 
 mod gap;
 mod replay;
@@ -16,7 +18,11 @@ mod watchdog;
 
 use crate::cli::RunArgs;
 use crate::config::{self, Config, Mode};
+use crate::ledger;
+use crate::oui::OuiDb;
 use crate::proto::l3;
+use crate::simulate::engine::SimulatorEngine;
+use crate::simulate::zones;
 use ipnet::Ipv4Net;
 use log::{error, info, warn};
 use rand::SeedableRng;
@@ -24,7 +30,7 @@ use rand_chacha::ChaCha8Rng;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use status::Status;
+use status::{Status, StatusZone};
 
 /// Skip the L3 remap for captures larger than this, to bound tmpfs use.
 const MAX_SHM_BYTES: u64 = 256 * 1024 * 1024;
@@ -43,8 +49,10 @@ pub fn run(args: &RunArgs) -> i32 {
     let hints = l3::parse_hints(&cfg.l3.subnets);
     let mut loop_rng = ChaCha8Rng::seed_from_u64(master);
     info!(
-        "turbolaser starting: iface={} mode={:?} seed_master={:#018x}",
-        cfg.iface, cfg.mode, master
+        "turbolaser starting: iface={} mode={} seed_master={:#018x}",
+        cfg.iface,
+        cfg.mode.as_str(),
+        master
     );
 
     let shutdown = signal::install_shutdown();
@@ -56,6 +64,23 @@ pub fn run(args: &RunArgs) -> i32 {
     );
     let started = now_unix();
     let mut run_counter: u64 = 0;
+
+    // Red laser drives a persistent simulator (zones, devices, identity
+    // assertions). Green laser only reads the OUI table to label derived zones.
+    let mut engine = match cfg.mode {
+        Mode::RedLaser => {
+            let e = SimulatorEngine::red(&cfg, started);
+            info!(
+                "red laser session: seed={:#018x} devices={} zones={}",
+                e.seed(),
+                e.ledger().device_count(),
+                e.ledger().subnet_count()
+            );
+            Some(e)
+        }
+        Mode::GreenLaser => None,
+    };
+    let oui = OuiDb::load(&cfg.oui_db.path);
 
     let mut s = base_status(&cfg, started, 0);
     s.state = "starting".into();
@@ -86,11 +111,11 @@ pub fn run(args: &RunArgs) -> i32 {
 
         let run_seed = seed::run_seed(master, run_counter);
 
-        // Variety mode relocates L3 addresses per run into tmpfs. Baseline
+        // Red laser relocates L3 addresses per run into tmpfs. Green laser
         // keeps the asset set fixed and replays the capture as-is.
         let mut remapped: Option<PathBuf> = None;
         let mut l3_seed_used: Option<u64> = None;
-        if cfg.mode == Mode::Variety && cfg.l3.remap {
+        if cfg.mode == Mode::RedLaser && cfg.l3.remap {
             match remap_to_shm(&cfg, &chosen, &hints, run_seed) {
                 Ok(p) => {
                     remapped = Some(p);
@@ -100,6 +125,14 @@ pub fn run(args: &RunArgs) -> i32 {
             }
         }
         let file_to_send: &Path = remapped.as_deref().unwrap_or(chosen.as_path());
+
+        // Red laser: an infrequent (<=1/24h) external-threat promotion of a
+        // genuine host in this capture, replacing the file to send when it fires.
+        let mut promoted: Option<PathBuf> = None;
+        if let Some(e) = engine.as_mut() {
+            promoted = e.maybe_promote(file_to_send, now_unix());
+        }
+        let file_to_send: &Path = promoted.as_deref().unwrap_or(file_to_send);
 
         info!(
             "run={run_counter} file={} rate={:?} run_seed={:#018x}",
@@ -112,6 +145,7 @@ pub fn run(args: &RunArgs) -> i32 {
         s.state = "replaying".into();
         s.current_file = Some(chosen.display().to_string());
         s.l3_seed = l3_seed_used;
+        apply_sim_status(&mut s, &cfg, engine.as_ref(), &chosen, &oui, &hints);
         write(&cfg, &mut s);
 
         match replay::run_once(&cfg.iface, file_to_send, &cfg.rate.to_args(), &watchdog) {
@@ -131,6 +165,28 @@ pub fn run(args: &RunArgs) -> i32 {
 
         if let Some(p) = &remapped {
             let _ = std::fs::remove_file(p);
+        }
+        if let Some(p) = &promoted {
+            let _ = std::fs::remove_file(p);
+        }
+
+        // Red laser: fabricate and fire device identities and switch beacons as
+        // a second short burst on the same wire, then refresh the heartbeat.
+        if let Some(e) = engine.as_mut() {
+            if let Some(p) = e.red_tick(run_counter) {
+                match replay::run_once(&cfg.iface, &p, &cfg.rate.to_args(), &watchdog) {
+                    Ok(res) if res.success => {
+                        info!("run={run_counter} identities sent: {}", res.detail)
+                    }
+                    Ok(res) => warn!("run={run_counter} identity replay failed: {}", res.detail),
+                    Err(err) => warn!("run={run_counter} identity replay error: {err}"),
+                }
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+        if engine.is_some() {
+            apply_sim_status(&mut s, &cfg, engine.as_ref(), &chosen, &oui, &hints);
+            write(&cfg, &mut s);
         }
 
         if args.once {
@@ -198,10 +254,11 @@ fn write(cfg: &Config, s: &mut Status) {
 
 fn base_status(cfg: &Config, started: u64, run: u64) -> Status {
     Status {
-        schema: 1,
+        schema: 2,
         pid: std::process::id(),
         state: String::new(),
-        mode: format!("{:?}", cfg.mode).to_lowercase(),
+        mode: cfg.mode.as_str().to_string(),
+        laser: cfg.mode.as_str().to_string(),
         iface: cfg.iface.clone(),
         run,
         current_file: None,
@@ -211,12 +268,72 @@ fn base_status(cfg: &Config, started: u64, run: u64) -> Status {
         total_tx_packets: None,
         next_gap_secs: None,
         last_error: None,
+        zone_count: 0,
+        device_count: 0,
+        device_cap: 0,
+        subnet_cap: 0,
+        cycle: 0,
+        last_threat_unix: None,
+        zones: Vec::new(),
         updated_unix: 0,
         started_unix: started,
     }
 }
 
-fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
+/// Fill the zone and session fields of the heartbeat. Red laser reports its
+/// ledger; green laser reports zones derived from the current capture.
+fn apply_sim_status(
+    s: &mut Status,
+    cfg: &Config,
+    engine: Option<&SimulatorEngine>,
+    chosen: &Path,
+    oui: &OuiDb,
+    hints: &[Ipv4Net],
+) {
+    s.device_cap = ledger::effective_device_cap(cfg.synthesis.max_devices);
+    s.subnet_cap = ledger::effective_subnet_cap(cfg.zones.max_subnets);
+    match cfg.mode {
+        Mode::RedLaser => {
+            if let Some(e) = engine {
+                let led = e.ledger();
+                s.device_count = led.device_count();
+                s.cycle = led.cycle;
+                s.last_threat_unix = led.last_threat_unix;
+                s.zones = led
+                    .subnets
+                    .iter()
+                    .map(|z| StatusZone {
+                        cidr: z.cidr.clone(),
+                        name: z.zone_name.clone(),
+                        purdue_level: z.purdue_level,
+                        devices: led
+                            .devices
+                            .iter()
+                            .filter(|d| d.subnet_cidr == z.cidr)
+                            .count(),
+                    })
+                    .collect();
+                s.zone_count = s.zones.len();
+            }
+        }
+        Mode::GreenLaser => {
+            if let Ok(cap) = crate::pcapio::read(chosen) {
+                s.zones = zones::derive_zones(&cap, hints, oui)
+                    .iter()
+                    .map(|z| StatusZone {
+                        cidr: z.cidr.to_string(),
+                        name: z.name.clone(),
+                        purdue_level: z.purdue_level,
+                        devices: z.device_ips.len(),
+                    })
+                    .collect();
+                s.zone_count = s.zones.len();
+            }
+        }
+    }
+}
+
+pub(crate) fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in [&cfg.paths.variants, &cfg.paths.pool] {
         if let Ok(rd) = std::fs::read_dir(dir) {

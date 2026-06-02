@@ -309,6 +309,33 @@ impl<'a> ParsedFrame<'a> {
         }
     }
 
+    /// Destination MAC (Ethernet bytes 0..6). The buffer always starts with the
+    /// Ethernet header; `parse_layout` guarantees at least 14 bytes.
+    pub fn dst_mac(&self) -> [u8; 6] {
+        let mut m = [0u8; 6];
+        m.copy_from_slice(&self.buf[0..6]);
+        m
+    }
+
+    /// Source MAC (Ethernet bytes 6..12).
+    pub fn src_mac(&self) -> [u8; 6] {
+        let mut m = [0u8; 6];
+        m.copy_from_slice(&self.buf[6..12]);
+        m
+    }
+
+    /// Rewrite the destination MAC. No checksum recompute needed: the captured
+    /// frame carries no FCS and MAC bytes are outside the IP/L4 checksum scope.
+    pub fn set_dst_mac(&mut self, m: [u8; 6]) {
+        self.buf[0..6].copy_from_slice(&m);
+    }
+
+    /// Rewrite the source MAC. Used by red-laser device fabrication and threat
+    /// promotion to assign a vendor or harvested desktop OUI.
+    pub fn set_src_mac(&mut self, m: [u8; 6]) {
+        self.buf[6..12].copy_from_slice(&m);
+    }
+
     pub fn src_port(&self) -> Option<u16> {
         match self.layout.l4_kind {
             L4Kind::Tcp | L4Kind::Udp => {
@@ -407,6 +434,23 @@ mod tests {
         let mut s = 0u32;
         sum_words(&mut s, &hdr);
         assert_eq!(!fold(s), 0xb861);
+    }
+
+    #[test]
+    fn mac_accessors_read_and_write() {
+        let mut p = udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 1000, 502, b"x");
+        let l = {
+            let mut f = ParsedFrame::parse(&mut p).unwrap();
+            assert_eq!(f.dst_mac(), [0x52, 0x54, 0, 0, 0, 1]);
+            assert_eq!(f.src_mac(), [0x52, 0x54, 0, 0, 0, 2]);
+            f.set_src_mac([0x00, 0x90, 0xE8, 0xAB, 0xCD, 0xEF]);
+            f.recompute_checksums();
+            f.layout
+        };
+        assert_eq!(&p[6..12], &[0x00, 0x90, 0xE8, 0xAB, 0xCD, 0xEF]);
+        // IP/L4 checksums unaffected by the MAC edit.
+        assert!(ip_checksum_valid(&p, &l));
+        assert!(udp_checksum_valid(&p, &l));
     }
 
     #[test]
