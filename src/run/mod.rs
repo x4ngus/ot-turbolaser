@@ -124,6 +124,14 @@ pub fn run(args: &RunArgs) -> i32 {
         }
         let file_to_send: &Path = remapped.as_deref().unwrap_or(chosen.as_path());
 
+        // Red laser: an infrequent (<=1/24h) external-threat promotion of a
+        // genuine host in this capture, replacing the file to send when it fires.
+        let mut promoted: Option<PathBuf> = None;
+        if let Some(e) = engine.as_mut() {
+            promoted = e.maybe_promote(file_to_send, now_unix());
+        }
+        let file_to_send: &Path = promoted.as_deref().unwrap_or(file_to_send);
+
         info!(
             "run={run_counter} file={} rate={:?} run_seed={:#018x}",
             chosen.display(),
@@ -154,6 +162,9 @@ pub fn run(args: &RunArgs) -> i32 {
         }
 
         if let Some(p) = &remapped {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(p) = &promoted {
             let _ = std::fs::remove_file(p);
         }
 

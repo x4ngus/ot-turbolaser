@@ -6,7 +6,7 @@
 //! fires. The ledger persists on change so the world survives restarts.
 
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ipnet::Ipv4Net;
 use rand::SeedableRng;
@@ -14,8 +14,10 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::config::Config;
 use crate::ledger::{self, DeviceRecord, Session};
+use crate::oui::OuiDb;
 use crate::pcapio;
 use crate::synth::{self, cdp, enip_identity, lldp, modbus_devid, s7_szl, snmp};
+use crate::threat::{self, ThreatScheduler};
 use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
 
 use super::devices::{self, AllocParams};
@@ -34,11 +36,15 @@ pub struct SimulatorEngine {
     ledger_path: PathBuf,
     shm_dir: PathBuf,
     vuln: VulnDb,
+    oui: OuiDb,
     params: AllocParams,
     identity_every: u64,
     synth_enabled: bool,
     device_identity: bool,
     switch_beacons: bool,
+    threats_enabled: bool,
+    external_cidrs: Vec<String>,
+    scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
     announce_cursor: usize,
     dirty: bool,
@@ -49,17 +55,26 @@ impl SimulatorEngine {
     /// scenario RNG is seeded from the session seed so a run is reproducible.
     pub fn red(cfg: &Config, now_unix: u64) -> Self {
         let vuln = VulnDb::load(&cfg.oui_db.vuln_path);
+        let oui = OuiDb::load(&cfg.oui_db.path);
         let session = Session::load(&cfg.session.path)
             .ok()
             .flatten()
             .unwrap_or_else(|| {
                 Session::new(cfg.session.seed.unwrap_or_else(rand::random), now_unix)
             });
-        let sim_rng = ChaCha8Rng::seed_from_u64(session.seed);
+        let mut sim_rng = ChaCha8Rng::seed_from_u64(session.seed);
+        let scheduler = ThreatScheduler::new(
+            cfg.threats.min_interval_secs,
+            cfg.threats.max_interval_secs,
+            session.last_threat_unix,
+            now_unix,
+            &mut sim_rng,
+        );
         Self {
             ledger_path: cfg.session.path.clone(),
             shm_dir: cfg.paths.shm_dir.clone(),
             vuln,
+            oui,
             params: AllocParams {
                 max_subnets: ledger::effective_subnet_cap(cfg.zones.max_subnets),
                 max_devices: ledger::effective_device_cap(cfg.synthesis.max_devices),
@@ -69,6 +84,9 @@ impl SimulatorEngine {
             synth_enabled: cfg.synthesis.enabled,
             device_identity: cfg.synthesis.device_identity,
             switch_beacons: cfg.synthesis.switch_beacons,
+            threats_enabled: cfg.threats.enabled,
+            external_cidrs: cfg.threats.external_cidrs.clone(),
+            scheduler,
             sim_rng,
             announce_cursor: 0,
             dirty: false,
@@ -136,6 +154,45 @@ impl SimulatorEngine {
                 None
             }
         }
+    }
+
+    /// If an external-threat promotion is due, promote a genuine host in `file`
+    /// to an external actor and return a tmpfs pcap to replay in its place.
+    /// Sparse and rate-limited; the promotion is logged loudly and recorded in
+    /// the ledger. Returns None when no promotion is due or possible.
+    pub fn maybe_promote(&mut self, file: &Path, now: u64) -> Option<PathBuf> {
+        if !self.threats_enabled || !self.scheduler.due(now) {
+            return None;
+        }
+        let mut cap = pcapio::read(file).ok()?;
+        let record = threat::promote_host(
+            &mut cap,
+            &self.external_cidrs,
+            &self.oui,
+            now,
+            &mut self.sim_rng,
+        );
+        // Reschedule regardless, so a capture with no promotable host does not
+        // retry every iteration.
+        self.scheduler.reschedule(now, &mut self.sim_rng);
+        let record = record?;
+        std::fs::create_dir_all(&self.shm_dir).ok()?;
+        let out = self.shm_dir.join("threat-promoted.pcap");
+        if let Err(e) = pcapio::write(&out, &cap) {
+            log::warn!("could not write threat pcap: {e}");
+            return None;
+        }
+        log::warn!(
+            "THREAT INJECTION: promoted host {} to external {} (mac {})",
+            record.original_ip,
+            record.external_ip,
+            record.mac
+        );
+        self.ledger.promoted.push(record);
+        self.ledger.last_threat_unix = Some(now);
+        self.dirty = true;
+        self.persist_if_dirty();
+        Some(out)
     }
 
     /// Render a rotating window of devices as protocol-assertion frames.
