@@ -35,6 +35,12 @@ pub enum Command {
     Status(StatusArgs),
     /// Validate a config file without replaying.
     Check(CheckArgs),
+    /// Show the current zone map (green derives from captures, red reads the ledger).
+    Zones(ZonesArgs),
+    /// Clear the red-laser session ledger for a fresh feed.
+    Reset(ResetArgs),
+    /// Preview the fabricated zone and device map without sending traffic.
+    Plan(PlanArgs),
     /// Set up the bridge and mirror from config. Used by the systemd unit.
     NetSetup(NetArgs),
     /// Tear down the bridge and mirror from config. Used by the systemd unit.
@@ -98,6 +104,33 @@ pub struct StatusArgs {
 pub struct CheckArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct ZonesArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ResetArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct PlanArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// How many devices to fabricate in the preview (default 64).
+    #[arg(long)]
+    pub devices: Option<usize>,
 }
 
 /// Protocol selector for reload. `auto` dispatches by sniffing each frame.

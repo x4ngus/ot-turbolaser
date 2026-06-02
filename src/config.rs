@@ -5,9 +5,11 @@
 //! inconsistently across YAML libraries. Semantic checks live in
 //! [`Config::validate`], so a config that parses is also coherent.
 
+use ipnet::Ipv4Net;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +34,18 @@ pub struct Config {
     pub net: NetCfg,
     #[serde(default = "default_no_pcaps_retry")]
     pub no_pcaps_retry_secs: u64,
+    // v0.2 red/green laser content layer. All optional so existing configs and
+    // green laser are unaffected.
+    #[serde(default)]
+    pub zones: ZonesCfg,
+    #[serde(default)]
+    pub synthesis: SynthesisCfg,
+    #[serde(default)]
+    pub threats: ThreatsCfg,
+    #[serde(default)]
+    pub session: SessionCfg,
+    #[serde(default)]
+    pub oui_db: OuiDbCfg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -276,6 +290,133 @@ pub enum MirrorMode {
     Ovs,
 }
 
+/// Red-laser zone fabrication. The hard caps live in the ledger; config can
+/// lower them but never raise them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZonesCfg {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Cap on distinct subnet zones. Clamped to the ledger hard cap of 10.
+    #[serde(default)]
+    pub max_subnets: Option<usize>,
+    /// Prefix length for fabricated zone subnets.
+    #[serde(default = "default_zone_prefix")]
+    pub default_prefix: u8,
+}
+
+impl Default for ZonesCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_subnets: None,
+            default_prefix: default_zone_prefix(),
+        }
+    }
+}
+
+/// Red-laser packet synthesis: device-identity assertions and switch beacons.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynthesisCfg {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub switch_beacons: bool,
+    #[serde(default = "default_true")]
+    pub device_identity: bool,
+    /// Re-announce device identity every Nth run. 1 means every run.
+    #[serde(default = "default_identity_every")]
+    pub identity_every_n_runs: u64,
+    /// Cap on fabricated devices. Clamped to the ledger hard cap of 2000.
+    #[serde(default)]
+    pub max_devices: Option<usize>,
+}
+
+impl Default for SynthesisCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            switch_beacons: true,
+            device_identity: true,
+            identity_every_n_runs: default_identity_every(),
+            max_devices: None,
+        }
+    }
+}
+
+/// External-threat host promotion. Sparse and rate-limited; a 24h floor between
+/// promotions is enforced in code regardless of the interval set here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreatsCfg {
+    /// On by default under red laser; never fires under green laser.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_threat_min")]
+    pub min_interval_secs: u64,
+    #[serde(default = "default_threat_max")]
+    pub max_interval_secs: u64,
+    /// Non-RFC1918 source ranges a promoted host appears to come from. The
+    /// defaults are documentation ranges (non-RFC1918, so the external-source
+    /// anomaly still fires); set ranges your threat-intel feeds flag to also
+    /// exercise geo and reputation enrichment.
+    #[serde(default = "default_external_cidrs")]
+    pub external_cidrs: Vec<String>,
+}
+
+impl Default for ThreatsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_interval_secs: default_threat_min(),
+            max_interval_secs: default_threat_max(),
+            external_cidrs: default_external_cidrs(),
+        }
+    }
+}
+
+/// Persistent red-laser session ledger.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionCfg {
+    #[serde(default = "default_session_path")]
+    pub path: PathBuf,
+    /// Seed that makes a red-laser session reproducible. Entropy if unset, and
+    /// the drawn seed is then persisted in the ledger.
+    #[serde(default)]
+    pub seed: Option<u64>,
+}
+
+impl Default for SessionCfg {
+    fn default() -> Self {
+        Self {
+            path: default_session_path(),
+            seed: None,
+        }
+    }
+}
+
+/// Paths to the OUI and vulnerable-profile databases. Both are embedded in the
+/// binary; an on-disk file at these paths overrides the embedded set.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OuiDbCfg {
+    #[serde(default = "default_oui_path")]
+    pub path: PathBuf,
+    #[serde(default = "default_vuln_path")]
+    pub vuln_path: PathBuf,
+}
+
+impl Default for OuiDbCfg {
+    fn default() -> Self {
+        Self {
+            path: default_oui_path(),
+            vuln_path: default_vuln_path(),
+        }
+    }
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
         if self.iface.trim().is_empty() {
@@ -304,6 +445,39 @@ impl Config {
         for (f, w) in &self.weights.files {
             if *w < 0.0 {
                 return Err(format!("weight for file {f} must be >= 0"));
+            }
+        }
+        if matches!(self.zones.max_subnets, Some(0)) {
+            return Err("zones.max_subnets must be > 0".into());
+        }
+        if !(8..=30).contains(&self.zones.default_prefix) {
+            return Err("zones.default_prefix must be between 8 and 30".into());
+        }
+        if matches!(self.synthesis.max_devices, Some(0)) {
+            return Err("synthesis.max_devices must be > 0".into());
+        }
+        if self.synthesis.identity_every_n_runs == 0 {
+            return Err("synthesis.identity_every_n_runs must be > 0".into());
+        }
+        if self.threats.min_interval_secs > self.threats.max_interval_secs {
+            return Err("threats.min_interval_secs must be <= threats.max_interval_secs".into());
+        }
+        for c in &self.threats.external_cidrs {
+            let net = Ipv4Net::from_str(c)
+                .map_err(|_| format!("threats.external_cidrs entry {c} is not a valid CIDR"))?;
+            if net.network().is_private() {
+                return Err(format!(
+                    "threats.external_cidrs entry {c} is RFC1918; external threats must be public"
+                ));
+            }
+        }
+        for (name, p) in [
+            ("session.path", &self.session.path),
+            ("oui_db.path", &self.oui_db.path),
+            ("oui_db.vuln_path", &self.oui_db.vuln_path),
+        ] {
+            if !p.is_absolute() {
+                return Err(format!("{name} must be absolute: {}", p.display()));
             }
         }
         Ok(())
@@ -348,6 +522,33 @@ fn default_bridge() -> String {
 }
 fn default_sensor_port() -> String {
     "sens0".into()
+}
+fn default_zone_prefix() -> u8 {
+    24
+}
+fn default_identity_every() -> u64 {
+    1
+}
+fn default_threat_min() -> u64 {
+    172_800 // 2 days
+}
+fn default_threat_max() -> u64 {
+    1_209_600 // 14 days
+}
+fn default_external_cidrs() -> Vec<String> {
+    // Documentation ranges (RFC 5737): non-RFC1918 so the external-source
+    // anomaly fires, without baking in attribution to real networks. Operators
+    // set ranges their threat-intel flags to also exercise geo enrichment.
+    vec!["198.51.100.0/24".into(), "203.0.113.0/24".into()]
+}
+fn default_session_path() -> PathBuf {
+    PathBuf::from("/var/lib/ot-turbolaser/session.json")
+}
+fn default_oui_path() -> PathBuf {
+    PathBuf::from("/opt/replay/data/oui.csv")
+}
+fn default_vuln_path() -> PathBuf {
+    PathBuf::from("/opt/replay/data/vuln_profiles.toml")
 }
 
 #[cfg(test)]

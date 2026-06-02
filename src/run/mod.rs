@@ -219,7 +219,7 @@ fn base_status(cfg: &Config, started: u64, run: u64) -> Status {
     }
 }
 
-fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
+pub(crate) fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in [&cfg.paths.variants, &cfg.paths.pool] {
         if let Ok(rd) = std::fs::read_dir(dir) {

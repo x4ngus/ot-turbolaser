@@ -67,3 +67,34 @@ net:
   sensor_port: sens0
 
 no_pcaps_retry_secs: 30
+
+# --- v0.2 red laser content layer (all optional; green laser ignores these) ---
+# These default sensibly, so the block is commented. Uncomment to tune. The hard
+# caps (10 zones, 2000 devices) are enforced in code and cannot be exceeded.
+#
+# zones:
+#   enabled: true
+#   max_subnets: 10          # clamped to 10
+#   default_prefix: 24       # subnet size for fabricated zones
+#
+# synthesis:
+#   enabled: true
+#   switch_beacons: true     # LLDP/CDP/SNMP switch conduits between zones
+#   device_identity: true    # ENIP/Modbus/S7 identity assertions carrying CVEs
+#   identity_every_n_runs: 1
+#   max_devices: 2000        # clamped to 2000
+#
+# threats:                   # external-threat host promotion (red laser only)
+#   enabled: true
+#   min_interval_secs: 172800    # 2 days; a 24h floor is enforced regardless
+#   max_interval_secs: 1209600   # 14 days
+#   external_cidrs: ["198.51.100.0/24", "203.0.113.0/24"]  # set ranges your
+#                            # threat-intel flags to exercise geo/reputation enrichment
+#
+# session:
+#   path: /var/lib/ot-turbolaser/session.json
+#   seed: 1337               # set for a reproducible red-laser session
+#
+# oui_db:
+#   path: /opt/replay/data/oui.csv
+#   vuln_path: /opt/replay/data/vuln_profiles.toml
