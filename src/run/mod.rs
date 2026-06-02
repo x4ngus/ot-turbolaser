@@ -1,10 +1,12 @@
 //! The replay daemon loop. `turbolaser run` calls [`run`].
 //!
-//! Each iteration: rescan captures, weighted-pick one, in red-laser mode remap
-//! its L3 addresses into tmpfs with a fresh seed, fire it once with tcpreplay
-//! at the configured rate, write the heartbeat, sleep a sampled gap, repeat.
-//! Fail safe: missing captures sleep and retry, never crash-loop. The watchdog
-//! lands in a later phase.
+//! Each iteration: rescan captures and weighted-pick one. In red-laser mode,
+//! remap its L3 into tmpfs, optionally promote a host to an external threat
+//! actor, fire the capture, then fire a second short burst of synthesized
+//! device-identity and switch assertions. Green laser replays the capture as-is
+//! and derives zones for the heartbeat. Either way write the heartbeat and sleep
+//! a sampled gap. Fail safe: missing captures sleep and retry, never crash-loop;
+//! the tx watchdog guards each send.
 
 mod gap;
 mod replay;
