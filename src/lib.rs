@@ -14,6 +14,7 @@ pub mod proto;
 pub mod reload;
 pub mod run;
 pub mod simulate;
+pub mod synth;
 pub mod vuln;
 
 use cli::{Cli, Command};

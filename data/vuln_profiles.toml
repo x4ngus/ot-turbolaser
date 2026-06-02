@@ -25,6 +25,7 @@ protocol = "s7"
 purdue_level = 1
 oui = "00:0E:8C"
 cves = ["CVE-2020-15782"]   # memory protection bypass, fw < V4.5.0 (ICSA-21-152-01)
+s7_order_number = "6ES7 212-1AE40-0XB0"
 
 [[profile]]
 vendor = "Siemens AG"
@@ -34,6 +35,7 @@ protocol = "s7"
 purdue_level = 1
 oui = "00:0E:8C"
 cves = ["CVE-2016-9159"]    # credential disclosure over port 102 (ICSA-16-348-05)
+s7_order_number = "6ES7 315-2EH14-0AB0"
 
 [[profile]]
 vendor = "Rockwell Automation"

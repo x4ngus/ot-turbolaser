@@ -54,6 +54,10 @@ pub struct DeviceProfile {
     pub enip_device_type: Option<u16>,
     #[serde(default)]
     pub enip_product_code: Option<u16>,
+    /// S7 module order number (MLFB) carried in the SZL module-identification
+    /// response, e.g. "6ES7 212-1AE40-0XB0".
+    #[serde(default)]
+    pub s7_order_number: Option<String>,
     #[serde(default)]
     pub sys_descr: Option<String>,
 }
