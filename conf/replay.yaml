@@ -9,8 +9,10 @@ iface: tl0
 # The old names variety/baseline still parse as aliases.
 mode: red_laser
 
-# Green-laser master seed (reproducible). Ignored in red laser, which uses entropy.
-seed: 1337
+# Green-laser master seed (reproducible). IGNORED in red laser; pin session.seed
+# below instead. Left commented so a red-laser appliance does not warn about an
+# unused seed.
+# seed: 1337
 
 paths:
   pool: /opt/replay/pcaps/pool
@@ -22,8 +24,14 @@ paths:
 # subnet structure intact while moving everything to fresh random subnets.
 l3:
   remap: true
-  fallback: none          # none | tcprewrite
+  fallback: none          # deprecated/no-op: a capture that cannot be remapped
+                          # is skipped, never replayed with its original addresses
   subnets: []             # optional CIDR hints, e.g. ["192.168.10.0/24"]
+  zone_affinity: both     # both | vendor | protocol | off: how replayed hosts
+                          # are placed into the fabricated control-system zones
+  max_remap_bytes: 2147483648   # 2 GiB; a larger capture is skipped, never raw
+  on_oversize: remap_to_disk    # remap_to_disk | skip, when over the tmpfs budget
+  guard_public_sources: true    # refuse a public source on the wire if remap is off
 
 # Replay rate. Default honours the capture's own timing.
 rate:
@@ -82,7 +90,10 @@ no_pcaps_retry_secs: 30
 #   switch_beacons: true     # LLDP/CDP/SNMP switch conduits between zones
 #   device_identity: true    # ENIP/Modbus/S7 identity assertions carrying CVEs
 #   identity_every_n_runs: 1
-#   max_devices: 2000        # clamped to 2000
+#   cycle_every_n_runs: 0    # >0 re-labels zones every N runs once an unsealed
+#                            # session saturates; sealed plans never cycle
+#   target_devices: 64       # fleet size `plan --commit` fabricates and seals
+#   max_devices: 2000        # hard cap, clamped to 2000
 #
 # threats:                   # external-threat host promotion (red laser only)
 #   enabled: true
@@ -90,10 +101,13 @@ no_pcaps_retry_secs: 30
 #   max_interval_secs: 1209600   # 14 days
 #   external_cidrs: ["198.51.100.0/24", "203.0.113.0/24"]  # set ranges your
 #                            # threat-intel flags to exercise geo/reputation enrichment
-#
-# session:
-#   path: /var/lib/ot-turbolaser/session.json
-#   seed: 1337               # set for a reproducible red-laser session
+
+# Pin the red-laser session so plan and run agree. `turbolaser plan --commit`
+# fabricates the fleet from this seed and writes the sealed ledger the daemon
+# replays verbatim; `turbolaser reset` clears it for a fresh feed.
+session:
+  path: /var/lib/ot-turbolaser/session.json
+  seed: 1337
 #
 # oui_db:
 #   path: /opt/replay/data/oui.csv

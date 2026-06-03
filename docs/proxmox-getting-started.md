@@ -1,5 +1,9 @@
 # Getting started on Proxmox VE (Dell R740)
 
+> In a hurry? The [Proxmox quick start](proxmox-quickstart.md) is the short
+> copy-and-paste path, updated for the v0.2.1 plan-and-commit workflow. This page
+> is the full reference.
+
 A complete, end to end walkthrough: build an isolated lab segment on a Proxmox
 host, run ot-turbolaser in an LXC container, and feed varied OT traffic to a
 Dragos sensor VM. It covers the CT template, the host and guest network settings

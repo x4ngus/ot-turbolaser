@@ -5,6 +5,7 @@
 //! genuine protocol-assertion exchanges written to a tmpfs pcap the run loop
 //! fires. The ledger persists on change so the world survives restarts.
 
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
@@ -12,15 +13,18 @@ use ipnet::Ipv4Net;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::config::Config;
+use crate::config::{Config, OversizePolicy, ZoneAffinity};
 use crate::ledger::{self, DeviceRecord, Session};
 use crate::oui::OuiDb;
-use crate::pcapio;
-use crate::synth::{self, cdp, enip_identity, lldp, modbus_devid, s7_szl, snmp};
+use crate::pcapio::{self, Capture};
+use crate::proto::frame::{parse_layout, L3Kind, L4Kind};
+use crate::proto::l3;
+use crate::synth::{self, arp, cdp, enip_identity, lldp, modbus_devid, s7_szl, snmp};
 use crate::threat::{self, ThreatScheduler};
 use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
 
 use super::devices::{self, AllocParams};
+use super::zones;
 
 /// How many new devices to fabricate per iteration until the cap, so the asset
 /// set grows gradually like real discovery rather than all at once.
@@ -30,6 +34,8 @@ const FABRICATE_BATCH: usize = 16;
 const ANNOUNCE_WINDOW: usize = 256;
 /// The fabricated engineering station that issues discovery queries.
 const CLIENT_MAC: [u8; 6] = [0x00, 0x50, 0x56, 0x00, 0x00, 0x01];
+/// Skip the L3 remap for captures larger than this, to bound tmpfs use.
+const MAX_SHM_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct SimulatorEngine {
     pub ledger: Session,
@@ -39,14 +45,22 @@ pub struct SimulatorEngine {
     oui: OuiDb,
     params: AllocParams,
     identity_every: u64,
+    /// Cycle (re-label zones) every Nth run when unsealed and saturated; 0 off.
+    cycle_every: u64,
     synth_enabled: bool,
     device_identity: bool,
     switch_beacons: bool,
+    /// True when the loaded ledger was committed by `plan --commit`: do not
+    /// fabricate past it, just re-announce the sealed fleet.
+    sealed: bool,
     threats_enabled: bool,
     external_cidrs: Vec<String>,
     scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
     announce_cursor: usize,
+    /// Models already warned about missing from the vuln DB, so the warning
+    /// logs once rather than on every announce.
+    warned_models: HashSet<String>,
     dirty: bool,
 }
 
@@ -62,6 +76,7 @@ impl SimulatorEngine {
             .unwrap_or_else(|| {
                 Session::new(cfg.session.seed.unwrap_or_else(rand::random), now_unix)
             });
+        let sealed = session.sealed;
         let mut sim_rng = ChaCha8Rng::seed_from_u64(session.seed);
         let scheduler = ThreatScheduler::new(
             cfg.threats.min_interval_secs,
@@ -81,14 +96,17 @@ impl SimulatorEngine {
                 default_prefix: cfg.zones.default_prefix,
             },
             identity_every: cfg.synthesis.identity_every_n_runs.max(1),
+            cycle_every: cfg.synthesis.cycle_every_n_runs,
             synth_enabled: cfg.synthesis.enabled,
             device_identity: cfg.synthesis.device_identity,
             switch_beacons: cfg.synthesis.switch_beacons,
+            sealed,
             threats_enabled: cfg.threats.enabled,
             external_cidrs: cfg.threats.external_cidrs.clone(),
             scheduler,
             sim_rng,
             announce_cursor: 0,
+            warned_models: HashSet::new(),
             dirty: false,
             ledger: session,
         }
@@ -101,6 +119,138 @@ impl SimulatorEngine {
     /// The persisted session seed, logged so an entropy-seeded run can be pinned.
     pub fn seed(&self) -> u64 {
         self.ledger.seed
+    }
+
+    /// Remap a capture's hosts into the fabricated ledger zones (vendor/protocol
+    /// affinity, stable across runs via the session seed) and return the
+    /// remapped pcap path. With no fabricated zones yet it falls back to the
+    /// legacy random RFC1918 remap, still seeded on the session seed so
+    /// addresses no longer churn per run.
+    ///
+    /// The result is cached: the remap is deterministic for a given (capture,
+    /// session seed, affinity), so a repeated pick of the same capture reuses
+    /// the cached pcap with no re-read or recompute. The cache is byte-bounded.
+    pub fn remap_into_session(
+        &self,
+        cfg: &Config,
+        src: &Path,
+        hints: &[Ipv4Net],
+    ) -> Result<PathBuf, String> {
+        let meta = std::fs::metadata(src).map_err(|e| format!("stat {}: {e}", src.display()))?;
+        let size = meta.len();
+        if size > cfg.l3.max_remap_bytes {
+            return Err(format!(
+                "capture is {size} bytes, over the {} byte remap ceiling",
+                cfg.l3.max_remap_bytes
+            ));
+        }
+        let to_disk = size > MAX_SHM_BYTES;
+        if to_disk && cfg.l3.on_oversize == OversizePolicy::Skip {
+            return Err(format!(
+                "capture is {size} bytes, over the {MAX_SHM_BYTES} byte tmpfs budget (on_oversize=skip)"
+            ));
+        }
+        // Oversize captures spill to a disk dir beside the source so the tmpfs
+        // budget is never exceeded; normal captures cache on tmpfs.
+        let cache_dir = if to_disk {
+            src.parent()
+                .map(|d| d.join(".turbolaser-remap"))
+                .unwrap_or_else(|| self.shm_dir.clone())
+        } else {
+            self.shm_dir.join("remap-cache")
+        };
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("capture");
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let aff = match cfg.l3.zone_affinity {
+            ZoneAffinity::Both => 'b',
+            ZoneAffinity::Vendor => 'v',
+            ZoneAffinity::Protocol => 'p',
+            ZoneAffinity::Off => 'o',
+        };
+        let out = cache_dir.join(format!(
+            "{:016x}.{aff}.{mtime}.{size}.{stem}.pcap",
+            self.ledger.seed
+        ));
+        // Cache hit: identical (capture, seed, affinity) already remapped.
+        if out.is_file() {
+            return Ok(out);
+        }
+
+        let mut cap = pcapio::read(src)?;
+        let zones = self.zone_targets();
+        if zones.is_empty() {
+            l3::remap_capture(&mut cap, hints, self.ledger.seed);
+        } else {
+            let groups = self.capture_groups(&cap, hints);
+            l3::remap_capture_into_zones(
+                &mut cap,
+                &groups,
+                &zones,
+                cfg.l3.zone_affinity,
+                self.ledger.seed,
+            );
+        }
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| format!("mkdir {}: {e}", cache_dir.display()))?;
+        pcapio::write(&out, &cap)?;
+        evict_remap_cache(&cache_dir, &out);
+        Ok(out)
+    }
+
+    /// Per-zone remap targets from the ledger: each zone's CIDR, vendor, level,
+    /// dominant device protocol, and the device IPs reserved within it.
+    fn zone_targets(&self) -> Vec<l3::ZoneTarget> {
+        self.ledger
+            .subnets
+            .iter()
+            .filter_map(|s| {
+                let net = s.cidr.parse::<Ipv4Net>().ok()?;
+                let reserved: HashSet<Ipv4Addr> = self
+                    .ledger
+                    .devices
+                    .iter()
+                    .filter(|d| d.subnet_cidr == s.cidr)
+                    .filter_map(|d| d.ip.parse::<Ipv4Addr>().ok())
+                    .collect();
+                let protocol = self
+                    .ledger
+                    .devices
+                    .iter()
+                    .find(|d| d.subnet_cidr == s.cidr)
+                    .map(|d| d.protocol.clone());
+                Some(l3::ZoneTarget {
+                    net,
+                    vendor: s.vendor.clone(),
+                    purdue_level: s.purdue_level,
+                    protocol,
+                    reserved,
+                })
+            })
+            .collect()
+    }
+
+    /// Classify the capture's host-groups by vendor (MAC OUI majority, reusing
+    /// green-laser zone derivation) and dominant OT protocol (observed ports).
+    fn capture_groups(&self, cap: &Capture, hints: &[Ipv4Net]) -> Vec<l3::CaptureGroup> {
+        let proto = dominant_protocol_by_group(cap, hints);
+        zones::derive_zones(cap, hints, &self.oui)
+            .into_iter()
+            .map(|z| l3::CaptureGroup {
+                protocol: proto.get(&z.cidr).cloned(),
+                net: z.cidr,
+                purdue_level: z.purdue_level,
+                vendor: z.vendor,
+                hosts: z.device_ips,
+            })
+            .collect()
     }
 
     /// Persist the ledger if it changed since the last write.
@@ -120,19 +270,42 @@ impl SimulatorEngine {
         if !self.synth_enabled {
             return None;
         }
-        if self.device_identity {
+        let mut added = 0;
+        if self.device_identity && !self.sealed {
             let target =
                 (self.ledger.device_count() + FABRICATE_BATCH).min(self.params.max_devices);
-            if devices::fabricate(
+            added = devices::fabricate(
                 &mut self.ledger,
                 &self.vuln,
                 &self.params,
                 target,
                 &mut self.sim_rng,
-            ) > 0
-            {
+            );
+            if added > 0 {
                 self.dirty = true;
             }
+        }
+
+        // Once an unsealed feed is saturated (nothing new fabricated this tick),
+        // refresh the zone names on a cadence so a long-running world keeps
+        // evolving. Sealed (committed-plan) sessions stay frozen.
+        if !self.sealed
+            && self.cycle_every > 0
+            && run > 0
+            && run.is_multiple_of(self.cycle_every)
+            && added == 0
+            && self.ledger.subnet_count() > 0
+        {
+            let cycle_next = self.ledger.cycle + 1;
+            self.ledger.rename_zones_new_cycle(|idx, s| {
+                zones::name_zone(
+                    s.vendor.as_deref(),
+                    None,
+                    s.purdue_level,
+                    idx + cycle_next as usize * ledger::MAX_SUBNETS,
+                )
+            });
+            self.dirty = true;
         }
 
         let frames = if run.is_multiple_of(self.identity_every) {
@@ -145,7 +318,10 @@ impl SimulatorEngine {
             return None;
         }
 
-        std::fs::create_dir_all(&self.shm_dir).ok()?;
+        if let Err(e) = std::fs::create_dir_all(&self.shm_dir) {
+            log::warn!("could not create shm dir {}: {e}", self.shm_dir.display());
+            return None;
+        }
         let out = self.shm_dir.join("synth-identity.pcap");
         match pcapio::write(&out, &synth::to_capture(frames)) {
             Ok(()) => Some(out),
@@ -176,7 +352,10 @@ impl SimulatorEngine {
         // retry every iteration.
         self.scheduler.reschedule(now, &mut self.sim_rng);
         let record = record?;
-        std::fs::create_dir_all(&self.shm_dir).ok()?;
+        if let Err(e) = std::fs::create_dir_all(&self.shm_dir) {
+            log::warn!("could not create shm dir {}: {e}", self.shm_dir.display());
+            return None;
+        }
         let out = self.shm_dir.join("threat-promoted.pcap");
         if let Err(e) = pcapio::write(&out, &cap) {
             log::warn!("could not write threat pcap: {e}");
@@ -205,10 +384,27 @@ impl SimulatorEngine {
         let start = self.announce_cursor % n;
         let count = ANNOUNCE_WINDOW.min(n);
         let mut frames = Vec::new();
-        for k in 0..count {
-            let dev = &self.ledger.devices[(start + k) % n];
-            if let Some(profile) = self.vuln.by_model(&dev.model) {
-                frames.extend(assertions_for_device(dev, profile, switch_beacons));
+        let mut missing: Vec<String> = Vec::new();
+        {
+            let devices = &self.ledger.devices;
+            let vuln = &self.vuln;
+            for k in 0..count {
+                let dev = &devices[(start + k) % n];
+                // Own the profile so a missing-model fallback and the vuln borrow
+                // do not tangle; a device is never silently dropped.
+                let profile = match vuln.by_model(&dev.model) {
+                    Some(p) => p.clone(),
+                    None => {
+                        missing.push(dev.model.clone());
+                        fallback_profile(dev)
+                    }
+                };
+                frames.extend(assertions_for_device(dev, &profile, switch_beacons));
+            }
+        }
+        for model in missing {
+            if self.warned_models.insert(model.clone()) {
+                log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
         self.announce_cursor = (start + count) % n;
@@ -229,9 +425,14 @@ fn assertions_for_device(
     let client_ip = client_addr(&dev.subnet_cidr);
     let client_port = 50000u16;
 
+    // Announce the device's own MAC<->IP binding first so the sensor fuses it
+    // into one asset rather than separate MAC-only / IP-only entries.
+    let mut frames = vec![arp::gratuitous(dev_mac, dev_ip)];
+
     match profile.protocol {
         ProfileProto::Enip => {
             let (major, minor) = parse_version(&dev.firmware);
+            let product_name = profile.enip_product_name.as_deref().unwrap_or(&dev.model);
             let id = enip_identity::EnipIdentity {
                 vendor_id: profile.enip_vendor_id.unwrap_or(0),
                 device_type: profile.enip_device_type.unwrap_or(0),
@@ -239,21 +440,32 @@ fn assertions_for_device(
                 revision_major: major,
                 revision_minor: minor,
                 serial: u32::from(dev_ip),
-                product_name: &dev.model,
+                product_name: clamp_str(product_name, 255),
             };
             let (a, b) =
                 enip_identity::exchange(CLIENT_MAC, dev_mac, client_ip, dev_ip, client_port, &id);
-            vec![a, b]
+            frames.push(a);
+            frames.push(b);
         }
         ProfileProto::Modbus => {
             let id = modbus_devid::ModbusDevId {
-                vendor_name: &dev.vendor,
-                product_code: &dev.model,
-                revision: &dev.firmware,
+                vendor_name: clamp_str(
+                    profile.modbus_vendor_name.as_deref().unwrap_or(&dev.vendor),
+                    255,
+                ),
+                product_code: clamp_str(
+                    profile.modbus_product_code.as_deref().unwrap_or(&dev.model),
+                    255,
+                ),
+                revision: clamp_str(
+                    profile.modbus_revision.as_deref().unwrap_or(&dev.firmware),
+                    255,
+                ),
             };
             let (a, b) =
                 modbus_devid::exchange(CLIENT_MAC, dev_mac, client_ip, dev_ip, client_port, 1, &id);
-            vec![a, b]
+            frames.push(a);
+            frames.push(b);
         }
         ProfileProto::S7 => {
             let (major, minor) = parse_version(&dev.firmware);
@@ -261,25 +473,90 @@ fn assertions_for_device(
             let (a, b) = s7_szl::exchange(
                 CLIENT_MAC, dev_mac, client_ip, dev_ip, 2000, order, major, minor,
             );
-            vec![a, b]
+            frames.push(a);
+            frames.push(b);
         }
         ProfileProto::SwitchSnmp => {
             let descr = profile
                 .sys_descr
                 .clone()
                 .unwrap_or_else(|| format!("{} {}", dev.vendor, dev.model));
-            let mut frames = Vec::new();
             if switch_beacons {
-                frames.push(lldp::beacon(dev_mac, &dev.model, &descr));
-                frames.push(cdp::beacon(dev_mac, &dev.model, &dev.firmware, &dev.model));
+                frames.push(lldp::beacon(
+                    dev_mac,
+                    dev_ip,
+                    clamp_str(&dev.model, 511),
+                    clamp_str(&descr, 511),
+                ));
+                frames.push(cdp::beacon(
+                    dev_mac,
+                    dev_ip,
+                    &dev.model,
+                    &dev.firmware,
+                    &dev.model,
+                ));
             }
             let (a, b) = snmp::exchange(
-                CLIENT_MAC, dev_mac, client_ip, dev_ip, 43210, "public", 0x1234, &descr,
+                CLIENT_MAC,
+                dev_mac,
+                client_ip,
+                dev_ip,
+                43210,
+                "public",
+                0x1234,
+                &descr,
+                profile.sys_object_id.as_deref(),
             );
             frames.push(a);
             frames.push(b);
-            frames
         }
+    }
+    frames
+}
+
+/// Truncate a string to at most `max` bytes at a char boundary, so a builder's
+/// fixed-width length field can never disagree with the bytes that follow.
+fn clamp_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// A generic profile recovered from a ledger device whose model is no longer in
+/// the vuln DB, so it still announces a coherent (if unspecific) identity.
+fn fallback_profile(dev: &DeviceRecord) -> DeviceProfile {
+    DeviceProfile {
+        vendor: dev.vendor.clone(),
+        model: dev.model.clone(),
+        firmware: dev.firmware.clone(),
+        protocol: proto_from_str(&dev.protocol),
+        purdue_level: 0,
+        oui: None,
+        cves: dev.cves.clone(),
+        enip_vendor_id: None,
+        enip_device_type: None,
+        enip_product_code: None,
+        enip_product_name: None,
+        s7_order_number: None,
+        sys_descr: None,
+        sys_object_id: None,
+        modbus_vendor_name: None,
+        modbus_product_code: None,
+        modbus_revision: None,
+    }
+}
+
+fn proto_from_str(s: &str) -> ProfileProto {
+    match s {
+        "modbus" => ProfileProto::Modbus,
+        "s7" => ProfileProto::S7,
+        "switch_snmp" => ProfileProto::SwitchSnmp,
+        _ => ProfileProto::Enip,
     }
 }
 
@@ -300,13 +577,110 @@ fn parse_version(fw: &str) -> (u8, u8) {
     (groups.next().unwrap_or(0), groups.next().unwrap_or(0))
 }
 
-/// The engineering station address within a subnet (network + 250).
+/// The engineering station address within a subnet (network + 250, clamped to
+/// the last usable host so it never lands outside a small subnet).
 fn client_addr(subnet_cidr: &str) -> Ipv4Addr {
     subnet_cidr
         .parse::<Ipv4Net>()
         .ok()
-        .map(|n| Ipv4Addr::from(u32::from(n.network()).wrapping_add(250)))
+        .map(|n| {
+            let host_bits = 32 - u32::from(n.prefix_len());
+            let last_usable = if host_bits >= 1 {
+                (1u32 << host_bits).saturating_sub(2)
+            } else {
+                0
+            };
+            let offset = 250.min(last_usable);
+            Ipv4Addr::from(u32::from(n.network()) + offset)
+        })
         .unwrap_or(Ipv4Addr::new(10, 0, 0, 250))
+}
+
+/// Bound the remap cache: evict oldest entries until the directory's total size
+/// is within the tmpfs budget, never removing the entry just written.
+fn evict_remap_cache(dir: &Path, keep: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    for e in rd.flatten() {
+        let Ok(meta) = e.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        total += meta.len();
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        entries.push((e.path(), meta.len(), mtime));
+    }
+    if total <= MAX_SHM_BYTES {
+        return;
+    }
+    entries.sort_by_key(|(_, _, mtime)| *mtime); // oldest first
+    for (path, sz, _) in entries {
+        if total <= MAX_SHM_BYTES {
+            break;
+        }
+        if path == keep {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= sz;
+        }
+    }
+}
+
+/// Dominant OT protocol per capture host-group, voted from observed service
+/// ports, so e.g. a Modbus conversation is mapped into a Modicon zone.
+fn dominant_protocol_by_group(cap: &Capture, hints: &[Ipv4Net]) -> HashMap<Ipv4Net, String> {
+    let mut votes: HashMap<Ipv4Net, HashMap<&'static str, usize>> = HashMap::new();
+    for p in &cap.packets {
+        let Some(l) = parse_layout(&p.data) else {
+            continue;
+        };
+        if l.l3_kind != L3Kind::Ipv4 || l.l4_kind == L4Kind::Other || p.data.len() < l.l4 + 4 {
+            continue;
+        }
+        let sport = u16::from_be_bytes([p.data[l.l4], p.data[l.l4 + 1]]);
+        let dport = u16::from_be_bytes([p.data[l.l4 + 2], p.data[l.l4 + 3]]);
+        let Some(proto) =
+            l3::ot_protocol_for_port(dport).or_else(|| l3::ot_protocol_for_port(sport))
+        else {
+            continue;
+        };
+        if p.data.len() < l.l3 + 20 {
+            continue;
+        }
+        let src = Ipv4Addr::new(
+            p.data[l.l3 + 12],
+            p.data[l.l3 + 13],
+            p.data[l.l3 + 14],
+            p.data[l.l3 + 15],
+        );
+        let dst = Ipv4Addr::new(
+            p.data[l.l3 + 16],
+            p.data[l.l3 + 17],
+            p.data[l.l3 + 18],
+            p.data[l.l3 + 19],
+        );
+        for h in [src, dst] {
+            *votes
+                .entry(l3::subnet_of(h, hints))
+                .or_default()
+                .entry(proto)
+                .or_default() += 1;
+        }
+    }
+    votes
+        .into_iter()
+        .filter_map(|(g, m)| {
+            m.into_iter()
+                .max_by_key(|&(_, c)| c)
+                .map(|(proto, _)| (g, proto.to_string()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -344,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn enip_device_yields_request_and_reply() {
+    fn enip_device_yields_arp_request_and_reply() {
         let vuln = VulnDb::embedded().unwrap();
         let p = vuln
             .profiles()
@@ -353,14 +727,16 @@ mod tests {
             .unwrap();
         let d = dev("enip", &p.model, &p.firmware);
         let frames = assertions_for_device(&d, p, true);
-        assert_eq!(frames.len(), 2, "request and reply");
+        assert_eq!(frames.len(), 3, "gratuitous ARP + request + reply");
+        // First frame is the gratuitous ARP (ethertype 0x0806).
+        assert_eq!(u16::from_be_bytes([frames[0][12], frames[0][13]]), 0x0806);
         for f in &frames {
             assert!(crate::proto::frame::parse_layout(f).is_some());
         }
     }
 
     #[test]
-    fn switch_device_emits_beacons_and_snmp() {
+    fn switch_device_emits_arp_beacons_and_snmp() {
         let vuln = VulnDb::embedded().unwrap();
         let p = vuln
             .profiles()
@@ -370,13 +746,13 @@ mod tests {
         let d = dev("switch_snmp", &p.model, &p.firmware);
         assert_eq!(
             assertions_for_device(&d, p, true).len(),
-            4,
-            "lldp + cdp + snmp request/response"
+            5,
+            "arp + lldp + cdp + snmp request/response"
         );
         assert_eq!(
             assertions_for_device(&d, p, false).len(),
-            2,
-            "beacons off leaves only the snmp exchange"
+            3,
+            "beacons off leaves arp + the snmp exchange"
         );
     }
 }

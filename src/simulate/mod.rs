@@ -124,14 +124,51 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
         max_devices: ledger::effective_device_cap(cfg.synthesis.max_devices),
         default_prefix: cfg.zones.default_prefix,
     };
-    let target = args.devices.unwrap_or(64);
-    let mut s = Session::new(seed, 0);
+    let target = args.devices.unwrap_or(cfg.synthesis.target_devices);
+    let mut s = Session::new(seed, now_unix());
     let added = devices::fabricate(&mut s, &vuln, &params, target, &mut rng);
+    s.target_devices = target;
+
+    // --commit persists this fabricated session as the authoritative ledger the
+    // daemon replays verbatim. A bare `plan` only previews.
+    if args.commit {
+        match Session::load(&cfg.session.path) {
+            Ok(Some(_)) if !args.force => {
+                eprintln!(
+                    "refusing to overwrite existing session at {}; pass --force or run 'turbolaser reset' first",
+                    cfg.session.path.display()
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("session: {e}");
+                return 2;
+            }
+            _ => {}
+        }
+        s.sealed = true;
+        if let Err(e) = s.save_atomic(&cfg.session.path) {
+            eprintln!("commit: {e}");
+            return 1;
+        }
+        if args.json {
+            render_session(&s, true);
+        } else {
+            println!(
+                "committed plan: seed={seed:#018x}, {added} device(s) across {} zone(s) -> {}",
+                s.subnet_count(),
+                cfg.session.path.display()
+            );
+            render_session(&s, false);
+        }
+        return 0;
+    }
+
     if args.json {
         render_session(&s, true);
     } else {
         println!(
-            "plan (dry run, no traffic): seed={seed:#018x}, fabricated {added} device(s) across {} zone(s)",
+            "plan (preview, no traffic): seed={seed:#018x}, fabricated {added} device(s) across {} zone(s)",
             s.subnet_count()
         );
         render_session(&s, false);
@@ -149,8 +186,19 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
         if s.devices.len() > 12 {
             println!("  ... and {} more", s.devices.len() - 12);
         }
+        println!(
+            "(preview only; re-run with --commit to write {})",
+            cfg.session.path.display()
+        );
     }
     0
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Read and merge a bounded slice of the configured captures, for green-laser

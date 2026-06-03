@@ -128,9 +128,19 @@ pub struct PlanArgs {
     /// Emit raw JSON instead of a human summary.
     #[arg(long)]
     pub json: bool,
-    /// How many devices to fabricate in the preview (default 64).
+    /// Intended fleet size to fabricate. Defaults to synthesis.target_devices.
     #[arg(long)]
     pub devices: Option<usize>,
+    /// Persist the fabricated session as the authoritative ledger the daemon
+    /// replays verbatim. Without this, `plan` only previews.
+    #[arg(long, visible_alias = "write")]
+    pub commit: bool,
+    /// Overwrite an existing committed ledger (with --commit).
+    #[arg(long)]
+    pub force: bool,
+    /// Explicit preview only; never write. Mutually exclusive with --commit.
+    #[arg(long, conflicts_with = "commit")]
+    pub dry_run: bool,
 }
 
 /// Protocol selector for reload. `auto` dispatches by sniffing each frame.

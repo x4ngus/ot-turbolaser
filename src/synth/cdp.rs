@@ -4,6 +4,8 @@
 //! Software Version, and Platform. CDP rides an 802.3 LLC/SNAP frame rather than
 //! Ethernet II, with its own checksum over the CDP message.
 
+use std::net::Ipv4Addr;
+
 use super::eth::snap_frame;
 
 const CDP_MULTICAST: [u8; 6] = [0x01, 0x00, 0x0C, 0xCC, 0xCC, 0xCC];
@@ -16,6 +18,19 @@ fn tlv(t: u16, value: &[u8]) -> Vec<u8> {
     b.extend_from_slice(&((4 + value.len()) as u16).to_be_bytes());
     b.extend_from_slice(value);
     b
+}
+
+/// CDP Addresses TLV (0x0002) value carrying a single IPv4 address, so a sensor
+/// binds the switch's management IP to its CDP identity.
+fn addresses(ip: Ipv4Addr) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&1u32.to_be_bytes()); // number of addresses
+    v.push(1); // protocol type: NLPID
+    v.push(1); // protocol length
+    v.push(0xCC); // protocol: IP
+    v.extend_from_slice(&4u16.to_be_bytes()); // address length
+    v.extend_from_slice(&ip.octets());
+    v
 }
 
 /// Internet checksum over the CDP message, used in the CDP header.
@@ -38,12 +53,14 @@ fn checksum(data: &[u8]) -> u16 {
 /// Build a CDP beacon frame for a switch.
 pub fn beacon(
     switch_mac: [u8; 6],
+    mgmt_ip: Ipv4Addr,
     device_id: &str,
     software_version: &str,
     platform: &str,
 ) -> Vec<u8> {
     let mut tlvs = Vec::new();
     tlvs.extend_from_slice(&tlv(0x0001, device_id.as_bytes())); // Device ID
+    tlvs.extend_from_slice(&tlv(0x0002, &addresses(mgmt_ip))); // Addresses
     tlvs.extend_from_slice(&tlv(0x0005, software_version.as_bytes())); // Software version
     tlvs.extend_from_slice(&tlv(0x0006, platform.as_bytes())); // Platform
 
@@ -73,6 +90,7 @@ mod tests {
     fn beacon_has_snap_header_and_tlvs() {
         let f = beacon(
             [0x00, 0x1B, 0x0C, 1, 2, 3],
+            Ipv4Addr::new(10, 3, 0, 9),
             "IE3000-1",
             "15.2(4)EA",
             "cisco IE-3000-8TC",
@@ -83,5 +101,10 @@ mod tests {
         assert_eq!(&f[17..20], &SNAP_OUI_CISCO);
         assert_eq!(u16::from_be_bytes([f[20], f[21]]), CDP_PROTOCOL_ID);
         assert!(f.windows(8).any(|w| w == b"IE3000-1"));
+        // Addresses TLV carries the management IPv4.
+        assert!(
+            f.windows(4).any(|w| w == [10, 3, 0, 9]),
+            "management IP present"
+        );
     }
 }

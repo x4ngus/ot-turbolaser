@@ -54,12 +54,28 @@ pub struct DeviceProfile {
     pub enip_device_type: Option<u16>,
     #[serde(default)]
     pub enip_product_code: Option<u16>,
+    /// Exact CIP ProductName a sensor fingerprints, when it differs from
+    /// `model` (e.g. "1756-L61/B LOGIX5561"). Falls back to `model`.
+    #[serde(default)]
+    pub enip_product_name: Option<String>,
     /// S7 module order number (MLFB) carried in the SZL module-identification
     /// response, e.g. "6ES7 212-1AE40-0XB0".
     #[serde(default)]
     pub s7_order_number: Option<String>,
     #[serde(default)]
     pub sys_descr: Option<String>,
+    /// SNMP sysObjectID.0 (an enterprise OID like "1.3.6.1.4.1.8691.7.50") that
+    /// passive sensors key CVE attribution on. Emitted alongside sysDescr.
+    #[serde(default)]
+    pub sys_object_id: Option<String>,
+    /// Modbus device-identification object overrides (objects 0x00/0x01/0x02).
+    /// Each falls back to vendor/model/firmware when unset.
+    #[serde(default)]
+    pub modbus_vendor_name: Option<String>,
+    #[serde(default)]
+    pub modbus_product_code: Option<String>,
+    #[serde(default)]
+    pub modbus_revision: Option<String>,
 }
 
 impl DeviceProfile {

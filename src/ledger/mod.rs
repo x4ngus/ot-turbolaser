@@ -22,6 +22,11 @@ pub const MAX_SUBNETS: usize = 10;
 /// No red-laser session ever fabricates more than this many devices.
 pub const MAX_DEVICES: usize = 2000;
 
+/// Current ledger schema version. Bumped to 2 in v0.2.1, which adds `sealed`
+/// and `target_devices`. Older (schema 1) files load via serde defaults; a
+/// newer file is refused on load rather than silently misread.
+pub const SCHEMA: u32 = 2;
+
 /// Resolve an effective cap from an optional config value: a config can lower a
 /// hard cap but never exceed it.
 pub fn effective_subnet_cap(configured: Option<usize>) -> usize {
@@ -54,6 +59,14 @@ pub struct Session {
     pub promoted: Vec<PromotedHost>,
     #[serde(default)]
     pub last_threat_unix: Option<u64>,
+    /// True when this ledger was committed by `turbolaser plan --commit`. The
+    /// daemon replays it verbatim and does not fabricate past it.
+    #[serde(default)]
+    pub sealed: bool,
+    /// Intended fabricated fleet size recorded at commit time. 0 on an
+    /// unsealed or legacy (schema 1) ledger.
+    #[serde(default)]
+    pub target_devices: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +102,7 @@ impl Session {
     /// A fresh, empty session.
     pub fn new(seed: u64, now_unix: u64) -> Self {
         Self {
-            schema: 1,
+            schema: SCHEMA,
             created_unix: now_unix,
             seed,
             cycle: 0,
@@ -97,15 +110,35 @@ impl Session {
             devices: Vec::new(),
             promoted: Vec::new(),
             last_threat_unix: None,
+            sealed: false,
+            target_devices: 0,
         }
     }
 
     /// Load the ledger if present. `Ok(None)` means no file yet (start fresh).
     pub fn load(path: &Path) -> Result<Option<Self>, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|e| format!("parsing {}: {e}", path.display())),
+            Ok(text) => {
+                let mut s: Session = serde_json::from_str(&text)
+                    .map_err(|e| format!("parsing {}: {e}", path.display()))?;
+                if s.schema > SCHEMA {
+                    return Err(format!(
+                        "session {} has schema {} but this build supports up to {}; refusing to misread it",
+                        path.display(),
+                        s.schema,
+                        SCHEMA
+                    ));
+                }
+                if s.schema < SCHEMA {
+                    log::info!(
+                        "upgrading session ledger {} from schema {} to {SCHEMA}",
+                        path.display(),
+                        s.schema
+                    );
+                    s.schema = SCHEMA;
+                }
+                Ok(Some(s))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("reading {}: {e}", path.display())),
         }
@@ -118,7 +151,10 @@ impl Session {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        let tmp = path.with_extension("tmp");
+        // Unique temp name per process so a concurrent writer (e.g. `plan
+        // --commit` while a daemon is running) cannot clobber our in-flight
+        // file before the atomic rename.
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         {
             let mut f = std::fs::File::create(&tmp)
@@ -146,6 +182,12 @@ impl Session {
 
     pub fn device_count(&self) -> usize {
         self.devices.len()
+    }
+
+    /// True when this ledger was committed by `plan --commit` and the daemon
+    /// must replay it verbatim without fabricating more devices.
+    pub fn is_sealed(&self) -> bool {
+        self.sealed
     }
 
     pub fn has_subnet(&self, cidr: &str) -> bool {
@@ -190,14 +232,22 @@ impl Session {
 
     /// Reuse the existing subnets under fresh zone names. Called on a cycle
     /// boundary once the subnet cap prevents new zones. `namer` receives the
-    /// subnet index and its CIDR and returns the new zone name.
+    /// subnet index and its record (CIDR, vendor, level) and returns the new
+    /// zone name. Names are computed first, then assigned, so the namer can read
+    /// each record's fields.
     pub fn rename_zones_new_cycle<F>(&mut self, namer: F)
     where
-        F: Fn(usize, &str) -> String,
+        F: Fn(usize, &SubnetRecord) -> String,
     {
         self.cycle += 1;
-        for (i, s) in self.subnets.iter_mut().enumerate() {
-            s.zone_name = namer(i, &s.cidr);
+        let names: Vec<String> = self
+            .subnets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| namer(i, s))
+            .collect();
+        for (s, name) in self.subnets.iter_mut().zip(names) {
+            s.zone_name = name;
         }
     }
 }
@@ -300,9 +350,55 @@ mod tests {
         let mut s = Session::new(1, 0);
         s.add_subnet(subnet("10.1.0.0/24"));
         s.add_subnet(subnet("10.2.0.0/24"));
-        s.rename_zones_new_cycle(|i, cidr| format!("cycle1-zone{i}-{cidr}"));
+        s.rename_zones_new_cycle(|i, rec| format!("cycle1-zone{i}-{}", rec.cidr));
         assert_eq!(s.cycle, 1);
         assert_eq!(s.subnets[0].zone_name, "cycle1-zone0-10.1.0.0/24");
         assert_eq!(s.subnets[1].zone_name, "cycle1-zone1-10.2.0.0/24");
+    }
+
+    #[test]
+    fn new_session_is_current_schema_and_unsealed() {
+        let s = Session::new(1, 0);
+        assert_eq!(s.schema, SCHEMA);
+        assert!(!s.is_sealed());
+        assert_eq!(s.target_devices, 0);
+    }
+
+    #[test]
+    fn schema_1_file_loads_with_seal_defaults_and_upgrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        // A schema-1 ledger as v0.2.0 wrote it: no sealed/target_devices keys.
+        let legacy = r#"{"schema":1,"created_unix":100,"seed":4660,"cycle":0,
+            "subnets":[],"devices":[],"promoted":[],"last_threat_unix":null}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = Session::load(&path).unwrap().unwrap();
+        assert!(!loaded.sealed, "legacy ledger is unsealed");
+        assert_eq!(loaded.target_devices, 0);
+        assert_eq!(loaded.seed, 4660);
+        assert_eq!(loaded.schema, SCHEMA, "schema upgraded on load");
+    }
+
+    #[test]
+    fn newer_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let future =
+            r#"{"schema":99,"created_unix":0,"seed":1,"subnets":[],"devices":[],"promoted":[]}"#;
+        std::fs::write(&path, future).unwrap();
+        assert!(Session::load(&path).is_err(), "a newer schema is refused");
+    }
+
+    #[test]
+    fn sealed_roundtrips_through_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let mut s = Session::new(7, 0);
+        s.sealed = true;
+        s.target_devices = 64;
+        s.save_atomic(&path).unwrap();
+        let loaded = Session::load(&path).unwrap().unwrap();
+        assert!(loaded.is_sealed());
+        assert_eq!(loaded.target_devices, 64);
     }
 }

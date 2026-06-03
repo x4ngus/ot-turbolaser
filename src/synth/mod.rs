@@ -6,6 +6,7 @@
 //! (LLDP, CDP, SNMP) announce a network device sitting between zones. Frames are
 //! assembled into a `Capture` and fired with tcpreplay like any pcap.
 
+pub mod arp;
 pub mod cdp;
 pub mod enip_identity;
 pub mod eth;
