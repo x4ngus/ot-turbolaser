@@ -32,9 +32,6 @@ use std::sync::atomic::Ordering;
 
 use status::{Status, StatusZone};
 
-/// Skip the L3 remap for captures larger than this, to bound tmpfs use.
-const MAX_SHM_BYTES: u64 = 256 * 1024 * 1024;
-
 pub fn run(args: &RunArgs) -> i32 {
     init_logger();
     let cfg = match config::load(&args.config) {
@@ -116,12 +113,28 @@ pub fn run(args: &RunArgs) -> i32 {
         let mut remapped: Option<PathBuf> = None;
         let mut l3_seed_used: Option<u64> = None;
         if cfg.mode == Mode::RedLaser && cfg.l3.remap {
-            match remap_to_shm(&cfg, &chosen, &hints, run_seed) {
-                Ok(p) => {
-                    remapped = Some(p);
-                    l3_seed_used = Some(run_seed);
+            if let Some(e) = engine.as_ref() {
+                match e.remap_into_session(&cfg, &chosen, &hints) {
+                    Ok(p) => {
+                        remapped = Some(p);
+                        l3_seed_used = Some(e.seed());
+                    }
+                    Err(err) => {
+                        // Fail closed: never replay the original addresses (which
+                        // may be public). Skip this capture and try again.
+                        warn!(
+                            "run={run_counter} L3 remap failed ({err}); skipping capture to avoid emitting un-remapped addresses"
+                        );
+                        let mut s = base_status(&cfg, started, run_counter);
+                        s.state = "skipped_remap_failed".into();
+                        s.last_error = Some(err);
+                        write(&cfg, &mut s);
+                        let secs = gap::sample_gap(&cfg.gap, &mut loop_rng);
+                        signal::interruptible_sleep(secs, &shutdown);
+                        run_counter += 1;
+                        continue;
+                    }
                 }
-                Err(e) => warn!("L3 remap failed ({e}); replaying original"),
             }
         }
         let file_to_send: &Path = remapped.as_deref().unwrap_or(chosen.as_path());
@@ -133,6 +146,28 @@ pub fn run(args: &RunArgs) -> i32 {
             promoted = e.maybe_promote(file_to_send, now_unix());
         }
         let file_to_send: &Path = promoted.as_deref().unwrap_or(file_to_send);
+
+        // Backstop: with the remap off, never emit a capture that still carries a
+        // public source address. The promoted file is exempt; its external
+        // source is the deliberate threat injection.
+        if cfg.mode == Mode::RedLaser
+            && cfg.l3.guard_public_sources
+            && remapped.is_none()
+            && promoted.is_none()
+            && has_public_source(file_to_send)
+        {
+            warn!(
+                "run={run_counter} {} carries a public source and remap is off; skipping",
+                chosen.display()
+            );
+            let mut s = base_status(&cfg, started, run_counter);
+            s.state = "skipped_public_source".into();
+            write(&cfg, &mut s);
+            let secs = gap::sample_gap(&cfg.gap, &mut loop_rng);
+            signal::interruptible_sleep(secs, &shutdown);
+            run_counter += 1;
+            continue;
+        }
 
         info!(
             "run={run_counter} file={} rate={:?} run_seed={:#018x}",
@@ -163,9 +198,8 @@ pub fn run(args: &RunArgs) -> i32 {
             }
         }
 
-        if let Some(p) = &remapped {
-            let _ = std::fs::remove_file(p);
-        }
+        // The remapped capture is a cache entry kept for reuse across runs (the
+        // engine bounds the cache). Only the one-shot promoted file is removed.
         if let Some(p) = &promoted {
             let _ = std::fs::remove_file(p);
         }
@@ -208,33 +242,6 @@ pub fn run(args: &RunArgs) -> i32 {
     write(&cfg, &mut s);
     info!("turbolaser stopped");
     0
-}
-
-fn remap_to_shm(cfg: &Config, src: &Path, hints: &[Ipv4Net], seed: u64) -> Result<PathBuf, String> {
-    let meta = std::fs::metadata(src).map_err(|e| format!("stat {}: {e}", src.display()))?;
-    if meta.len() > MAX_SHM_BYTES {
-        return Err(format!(
-            "capture is {} bytes, over the {MAX_SHM_BYTES} byte tmpfs cap",
-            meta.len()
-        ));
-    }
-    std::fs::create_dir_all(&cfg.paths.shm_dir)
-        .map_err(|e| format!("mkdir {}: {e}", cfg.paths.shm_dir.display()))?;
-    let mut cap = crate::pcapio::read(src)?;
-    let summary = l3::remap_capture(&mut cap, hints, seed);
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("capture");
-    let out = cfg.paths.shm_dir.join(format!("{stem}.remap.pcap"));
-    crate::pcapio::write(&out, &cap)?;
-    log::debug!(
-        "L3 remap: {} hosts across {} subnets -> {}",
-        summary.host_count,
-        summary.subnets.len(),
-        out.display()
-    );
-    Ok(out)
 }
 
 fn init_logger() {
@@ -299,6 +306,13 @@ fn apply_sim_status(
                 s.device_count = led.device_count();
                 s.cycle = led.cycle;
                 s.last_threat_unix = led.last_threat_unix;
+                // Count devices per subnet in one O(devices) pass rather than
+                // re-scanning every device for each zone.
+                let mut counts: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for d in &led.devices {
+                    *counts.entry(d.subnet_cidr.as_str()).or_default() += 1;
+                }
                 s.zones = led
                     .subnets
                     .iter()
@@ -306,11 +320,7 @@ fn apply_sim_status(
                         cidr: z.cidr.clone(),
                         name: z.zone_name.clone(),
                         purdue_level: z.purdue_level,
-                        devices: led
-                            .devices
-                            .iter()
-                            .filter(|d| d.subnet_cidr == z.cidr)
-                            .count(),
+                        devices: counts.get(z.cidr.as_str()).copied().unwrap_or(0),
                     })
                     .collect();
                 s.zone_count = s.zones.len();
@@ -362,6 +372,33 @@ pub(crate) fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
 fn read_tx_packets(iface: &str) -> Option<u64> {
     let path = format!("/sys/class/net/{iface}/statistics/tx_packets");
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// True if any IPv4 source address in the capture is a public (non-RFC1918,
+/// non-loopback, non-link-local) unicast address. Used as a leak backstop when
+/// the remap is disabled.
+fn has_public_source(path: &Path) -> bool {
+    use crate::proto::frame::{parse_layout, L3Kind};
+    let Ok(cap) = crate::pcapio::read(path) else {
+        return false;
+    };
+    cap.packets.iter().any(|p| {
+        let Some(l) = parse_layout(&p.data) else {
+            return false;
+        };
+        if l.l3_kind != L3Kind::Ipv4 || p.data.len() < l.l3 + 16 {
+            return false;
+        }
+        let src = std::net::Ipv4Addr::new(
+            p.data[l.l3 + 12],
+            p.data[l.l3 + 13],
+            p.data[l.l3 + 14],
+            p.data[l.l3 + 15],
+        );
+        let o0 = src.octets()[0];
+        let unicast = o0 != 0 && o0 != 127 && o0 < 224;
+        unicast && !src.is_private() && !src.is_loopback() && !src.is_link_local()
+    })
 }
 
 fn now_unix() -> u64 {

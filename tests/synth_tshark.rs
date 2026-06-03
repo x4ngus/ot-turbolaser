@@ -101,6 +101,7 @@ fn synthesized_assertions_dissect_in_tshark() {
         "public",
         0x1234,
         "Moxa EDS-405A Series Managed Ethernet Switch, firmware V3.4",
+        Some("1.3.6.1.4.1.8691.7.50"),
     );
     frames.push(a);
     frames.push(b);
@@ -122,11 +123,13 @@ fn synthesized_assertions_dissect_in_tshark() {
     // LLDP and CDP switch beacons.
     frames.push(lldp::beacon(
         mac(7),
+        Ipv4Addr::new(10, 0, 4, 9),
         "sw-cell-1",
         "Hirschmann RSP20 HiOS-2A Rel. 07.0.02",
     ));
     frames.push(cdp::beacon(
         mac(8),
+        Ipv4Addr::new(10, 0, 4, 9),
         "IE3000-cell-1",
         "15.2(4)EA",
         "cisco IE-3000-8TC",

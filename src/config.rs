@@ -82,12 +82,30 @@ pub struct L3Cfg {
     /// Apply the coherent L3 remap per run in red-laser mode.
     #[serde(default = "default_true")]
     pub remap: bool,
-    /// Optional cheap-tier fallback when the in-process remap is off.
+    /// Deprecated and unused as of v0.2.1: the in-process remap is mandatory in
+    /// red laser, and a capture that cannot be remapped is skipped, never
+    /// replayed raw. Retained so existing configs still parse; to be removed.
     #[serde(default)]
     pub fallback: L3Fallback,
     /// Optional CIDR hints for grouping hosts into subnets.
     #[serde(default)]
     pub subnets: Vec<String>,
+    /// How replayed pcap hosts are mapped onto the fabricated zones: by vendor
+    /// and/or protocol affinity, or `off` for size-ordered placement only.
+    #[serde(default)]
+    pub zone_affinity: ZoneAffinity,
+    /// Hard ceiling on capture size to remap. A larger capture is skipped, never
+    /// replayed raw. Default 2 GiB.
+    #[serde(default = "default_max_remap_bytes")]
+    pub max_remap_bytes: u64,
+    /// What to do with a capture over the tmpfs budget but under
+    /// `max_remap_bytes`: remap it to a disk temp dir, or skip it.
+    #[serde(default)]
+    pub on_oversize: OversizePolicy,
+    /// Backstop: when the remap is off, refuse to send a capture that still
+    /// carries a public (non-RFC1918) source address. On by default.
+    #[serde(default = "default_true")]
+    pub guard_public_sources: bool,
 }
 
 impl Default for L3Cfg {
@@ -96,8 +114,39 @@ impl Default for L3Cfg {
             remap: true,
             fallback: L3Fallback::default(),
             subnets: Vec::new(),
+            zone_affinity: ZoneAffinity::default(),
+            max_remap_bytes: default_max_remap_bytes(),
+            on_oversize: OversizePolicy::default(),
+            guard_public_sources: true,
         }
     }
+}
+
+/// What the remap does with a capture too large for the tmpfs budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OversizePolicy {
+    /// Remap to a disk temp dir beside the source capture (default).
+    #[default]
+    RemapToDisk,
+    /// Skip the capture entirely.
+    Skip,
+}
+
+/// How the red-laser remap places a replayed capture's hosts into the
+/// fabricated ledger zones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ZoneAffinity {
+    /// Vendor first, then protocol, then Purdue level, then size.
+    #[default]
+    Both,
+    /// Vendor match only, else size-ordered.
+    Vendor,
+    /// Protocol match only, else size-ordered.
+    Protocol,
+    /// Size-ordered placement, ignore vendor/protocol.
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -328,9 +377,20 @@ pub struct SynthesisCfg {
     /// Re-announce device identity every Nth run. 1 means every run.
     #[serde(default = "default_identity_every")]
     pub identity_every_n_runs: u64,
+    /// Re-label zones with fresh names every Nth run once an unsealed session is
+    /// saturated, so a long-running feed keeps evolving. 0 disables (default).
+    /// Sealed (committed-plan) sessions never cycle.
+    #[serde(default)]
+    pub cycle_every_n_runs: u64,
     /// Cap on fabricated devices. Clamped to the ledger hard cap of 2000.
     #[serde(default)]
     pub max_devices: Option<usize>,
+    /// Intended fabricated fleet size. `plan --commit` fabricates exactly this
+    /// many devices and seals the ledger; the daemon does not grow past it.
+    /// Clamped to the device cap. A bare `plan` preview uses it unless
+    /// `--devices` overrides.
+    #[serde(default = "default_target_devices")]
+    pub target_devices: usize,
 }
 
 impl Default for SynthesisCfg {
@@ -340,7 +400,9 @@ impl Default for SynthesisCfg {
             switch_beacons: true,
             device_identity: true,
             identity_every_n_runs: default_identity_every(),
+            cycle_every_n_runs: 0,
             max_devices: None,
+            target_devices: default_target_devices(),
         }
     }
 }
@@ -422,6 +484,11 @@ impl Config {
         if self.iface.trim().is_empty() {
             return Err("iface must not be empty".into());
         }
+        if self.mode == Mode::RedLaser && self.seed.is_some() {
+            log::warn!(
+                "top-level 'seed' is ignored in red_laser; set session.seed for a reproducible red-laser session"
+            );
+        }
         for (name, p) in [
             ("pool", &self.paths.pool),
             ("variants", &self.paths.variants),
@@ -458,6 +525,9 @@ impl Config {
         }
         if self.synthesis.identity_every_n_runs == 0 {
             return Err("synthesis.identity_every_n_runs must be > 0".into());
+        }
+        if self.synthesis.target_devices == 0 {
+            return Err("synthesis.target_devices must be > 0".into());
         }
         if self.threats.min_interval_secs > self.threats.max_interval_secs {
             return Err("threats.min_interval_secs must be <= threats.max_interval_secs".into());
@@ -528,6 +598,12 @@ fn default_zone_prefix() -> u8 {
 }
 fn default_identity_every() -> u64 {
     1
+}
+fn default_target_devices() -> usize {
+    64
+}
+fn default_max_remap_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
 }
 fn default_threat_min() -> u64 {
     172_800 // 2 days
@@ -613,6 +689,19 @@ mod tests {
             lower_secs: Some(1.0),
             upper_secs: Some(30.0),
         }
+    }
+
+    #[test]
+    fn shipped_example_config_parses_and_validates() {
+        // Guards against a deny_unknown_fields break: the shipped config must
+        // parse and validate against the current schema (incl. the v0.2.1 keys).
+        let cfg = load(std::path::Path::new("conf/replay.yaml"))
+            .expect("shipped conf/replay.yaml must parse and validate");
+        assert_eq!(cfg.mode, Mode::RedLaser);
+        assert_eq!(cfg.l3.zone_affinity, ZoneAffinity::Both);
+        assert!(cfg.l3.guard_public_sources);
+        assert_eq!(cfg.synthesis.target_devices, 64);
+        assert_eq!(cfg.session.seed, Some(1337));
     }
 
     #[test]

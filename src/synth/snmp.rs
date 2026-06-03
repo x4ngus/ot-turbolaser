@@ -11,6 +11,39 @@ use super::eth::udp_frame;
 const SNMP_PORT: u16 = 161;
 // 1.3.6.1.2.1.1.1.0 (sysDescr.0): first two arcs fold to 0x2b, the rest follow.
 const SYSDESCR_OID: [u8; 8] = [0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00];
+// 1.3.6.1.2.1.1.2.0 (sysObjectID.0).
+const SYSOBJECTID_OID: [u8; 8] = [0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x02, 0x00];
+
+/// Encode a dotted OID string into BER OID content bytes (no tag/length). The
+/// first two arcs fold to `40*a + b`; later arcs use base-128 with the
+/// continuation bit. None if the string is not a valid OID.
+fn encode_oid(s: &str) -> Option<Vec<u8>> {
+    let arcs: Vec<u64> = s
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    if arcs.len() < 2 || arcs[0] > 2 {
+        return None;
+    }
+    let mut out = vec![(arcs[0] * 40 + arcs[1]) as u8];
+    for &arc in &arcs[2..] {
+        let mut group = [0u8; 10];
+        let mut n = 0;
+        let mut v = arc;
+        group[n] = (v & 0x7f) as u8;
+        n += 1;
+        v >>= 7;
+        while v > 0 {
+            group[n] = (v & 0x7f) as u8 | 0x80;
+            n += 1;
+            v >>= 7;
+        }
+        for i in (0..n).rev() {
+            out.push(group[i]);
+        }
+    }
+    Some(out)
+}
 
 fn ber_len(len: usize) -> Vec<u8> {
     if len < 0x80 {
@@ -58,25 +91,41 @@ fn message(community: &str, pdu_tag: u8, request_id: u32, varbind: &[u8]) -> Vec
     tlv(0x30, &msg)
 }
 
-/// GET sysDescr.0.
+/// One varbind SEQUENCE: an OID name and a value TLV.
+fn varbind(name_oid: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut vb = Vec::new();
+    vb.extend_from_slice(&tlv(0x06, name_oid));
+    vb.extend_from_slice(value);
+    tlv(0x30, &vb)
+}
+
+/// GET sysDescr.0 and sysObjectID.0.
 pub fn get_request(community: &str, request_id: u32) -> Vec<u8> {
-    let mut vb = Vec::new();
-    vb.extend_from_slice(&tlv(0x06, &SYSDESCR_OID));
-    vb.extend_from_slice(&tlv(0x05, &[])); // NULL value
-    let varbind = tlv(0x30, &vb);
-    message(community, 0xA0, request_id, &varbind)
+    let mut varbinds = Vec::new();
+    varbinds.extend_from_slice(&varbind(&SYSDESCR_OID, &tlv(0x05, &[])));
+    varbinds.extend_from_slice(&varbind(&SYSOBJECTID_OID, &tlv(0x05, &[])));
+    message(community, 0xA0, request_id, &varbinds)
 }
 
-/// The response binding sysDescr.0 to the description string.
-pub fn get_response(community: &str, request_id: u32, sys_descr: &str) -> Vec<u8> {
-    let mut vb = Vec::new();
-    vb.extend_from_slice(&tlv(0x06, &SYSDESCR_OID));
-    vb.extend_from_slice(&tlv(0x04, sys_descr.as_bytes())); // OCTET STRING value
-    let varbind = tlv(0x30, &vb);
-    message(community, 0xA2, request_id, &varbind)
+/// The response binding sysDescr.0 to the description string and, when known,
+/// sysObjectID.0 to the device's enterprise OID (the field passive sensors key
+/// CVE attribution on).
+pub fn get_response(
+    community: &str,
+    request_id: u32,
+    sys_descr: &str,
+    sys_object_id: Option<&str>,
+) -> Vec<u8> {
+    let mut varbinds = Vec::new();
+    varbinds.extend_from_slice(&varbind(&SYSDESCR_OID, &tlv(0x04, sys_descr.as_bytes())));
+    if let Some(oid) = sys_object_id.and_then(encode_oid) {
+        varbinds.extend_from_slice(&varbind(&SYSOBJECTID_OID, &tlv(0x06, &oid)));
+    }
+    message(community, 0xA2, request_id, &varbinds)
 }
 
-/// The (request, response) frames of an SNMP sysDescr fetch.
+/// The (request, response) frames of an SNMP fetch of sysDescr.0 and
+/// sysObjectID.0.
 #[allow(clippy::too_many_arguments)]
 pub fn exchange(
     mgr_mac: [u8; 6],
@@ -87,9 +136,10 @@ pub fn exchange(
     community: &str,
     request_id: u32,
     sys_descr: &str,
+    sys_object_id: Option<&str>,
 ) -> (Vec<u8>, Vec<u8>) {
     let req = get_request(community, request_id);
-    let resp = get_response(community, request_id, sys_descr);
+    let resp = get_response(community, request_id, sys_descr, sys_object_id);
     let rf = udp_frame(mgr_mac, sw_mac, mgr_ip, sw_ip, mgr_port, SNMP_PORT, &req);
     let pf = udp_frame(sw_mac, mgr_mac, sw_ip, mgr_ip, SNMP_PORT, mgr_port, &resp);
     (rf, pf)
@@ -108,13 +158,43 @@ mod tests {
 
     #[test]
     fn response_is_a_sequence_carrying_the_descr() {
-        let resp = get_response("public", 0x1234, "Cisco IOS Software, IE3000");
+        let resp = get_response("public", 0x1234, "Cisco IOS Software, IE3000", None);
         assert_eq!(resp[0], 0x30, "top-level SEQUENCE");
         // The description bytes appear verbatim in the encoding.
         let needle = b"Cisco IOS Software, IE3000";
         assert!(
             resp.windows(needle.len()).any(|w| w == needle),
             "sysDescr present in the response"
+        );
+    }
+
+    #[test]
+    fn encode_oid_known_vectors() {
+        // sysObjectID.0 itself.
+        assert_eq!(
+            encode_oid("1.3.6.1.2.1.1.2.0").unwrap(),
+            vec![0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x02, 0x00]
+        );
+        // Moxa enterprise arc 8691 spans two base-128 groups (0xC3 0x73).
+        let moxa = encode_oid("1.3.6.1.4.1.8691.7.50").unwrap();
+        assert_eq!(&moxa[0..5], &[0x2b, 0x06, 0x01, 0x04, 0x01]);
+        assert!(moxa.windows(2).any(|w| w == [0xC3, 0x73]), "8691 encoded");
+        assert!(encode_oid("not.an.oid").is_none());
+    }
+
+    #[test]
+    fn response_binds_sysobjectid_when_known() {
+        let resp = get_response("public", 1, "Moxa EDS-405A", Some("1.3.6.1.4.1.8691.7.50"));
+        // The sysObjectID name OID and an OBJECT IDENTIFIER value (tag 0x06) are
+        // both present.
+        assert!(
+            resp.windows(SYSOBJECTID_OID.len())
+                .any(|w| w == SYSOBJECTID_OID),
+            "sysObjectID.0 name present"
+        );
+        assert!(
+            resp.windows(2).any(|w| w == [0xC3, 0x73]),
+            "enterprise OID value present"
         );
     }
 }

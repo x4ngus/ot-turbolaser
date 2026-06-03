@@ -50,7 +50,9 @@ pub fn write_atomic(path: &Path, status: &Status) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
+    // Unique temp name per process so concurrent writers cannot clobber an
+    // in-flight file before the atomic rename.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let json = serde_json::to_string_pretty(status).map_err(io::Error::other)?;
     {
         let mut f = std::fs::File::create(&tmp)?;

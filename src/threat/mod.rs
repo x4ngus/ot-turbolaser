@@ -87,17 +87,29 @@ fn fmt_mac(m: [u8; 6]) -> String {
     )
 }
 
-/// Pick an external address from the first usable configured range.
+/// Pick an external address from the first usable configured range. Asserts the
+/// candidate is genuinely public at the point of use, independent of config
+/// validation, so a misconfigured range can never inject an RFC1918 "attacker".
 fn pick_external(cidrs: &[String], rng: &mut impl Rng) -> Option<Ipv4Addr> {
     for c in cidrs {
         if let Ok(net) = c.parse::<Ipv4Net>() {
-            let hosts: Vec<Ipv4Addr> = net.hosts().take(1024).collect();
+            let hosts: Vec<Ipv4Addr> = net
+                .hosts()
+                .filter(|ip| is_public_unicast(*ip))
+                .take(1024)
+                .collect();
             if !hosts.is_empty() {
                 return Some(hosts[rng.gen_range(0..hosts.len())]);
             }
         }
     }
     None
+}
+
+/// Unicast and not private/loopback/link-local: a believable external source.
+fn is_public_unicast(ip: Ipv4Addr) -> bool {
+    let o0 = ip.octets()[0];
+    o0 != 0 && o0 != 127 && o0 < 224 && !ip.is_private() && !ip.is_link_local()
 }
 
 /// Promote one genuine internal host in `cap` to an external threat actor,

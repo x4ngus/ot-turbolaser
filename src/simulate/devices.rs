@@ -5,6 +5,9 @@
 //! daemon will fabricate. Hard caps live in the ledger; `AllocParams` only
 //! lowers them.
 
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
+
 use ipnet::Ipv4Net;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -34,15 +37,18 @@ pub fn fabricate(
         return 0;
     }
     let target = target.min(params.max_devices);
+    // Build the used-IP set once and update it as we go, so fabrication is
+    // O(devices) rather than rebuilding the whole set on every IP probe.
+    let mut used: HashSet<Ipv4Addr> = session.used_ips();
     let mut added = 0;
     while session.device_count() < target {
-        let Some(cidr) = choose_or_create_subnet(session, vuln, params, rng) else {
+        let Some(cidr) = choose_or_create_subnet(session, vuln, params, &used, rng) else {
             break; // nothing has room and no new zone can be created
         };
         let Ok(net) = cidr.parse::<Ipv4Net>() else {
             break;
         };
-        let Some(ip) = session.next_free_ip(net) else {
+        let Some(ip) = next_free_in(net, &used) else {
             continue; // picked subnet filled up; retry selection
         };
         let zone_vendor = session
@@ -65,9 +71,16 @@ pub fn fabricate(
         if !session.add_device(rec) {
             break; // device hard cap reached
         }
+        used.insert(ip);
         added += 1;
     }
     added
+}
+
+/// The next host in `net` not already in `used`. Pure helper so fabrication
+/// keeps one growing set instead of rebuilding it on every probe.
+fn next_free_in(net: Ipv4Net, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
+    net.hosts().find(|ip| !used.contains(ip))
 }
 
 /// A subnet CIDR with a free host, creating a new zone when there is room and
@@ -77,6 +90,7 @@ fn choose_or_create_subnet(
     session: &mut Session,
     vuln: &VulnDb,
     params: &AllocParams,
+    used: &HashSet<Ipv4Addr>,
     rng: &mut ChaCha8Rng,
 ) -> Option<String> {
     let cidrs: Vec<String> = session.subnets.iter().map(|s| s.cidr.clone()).collect();
@@ -85,7 +99,7 @@ fn choose_or_create_subnet(
         .filter(|c| {
             c.parse::<Ipv4Net>()
                 .ok()
-                .and_then(|n| session.next_free_ip(n))
+                .and_then(|n| next_free_in(n, used))
                 .is_some()
         })
         .collect();
