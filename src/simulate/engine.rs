@@ -32,6 +32,13 @@ const FABRICATE_BATCH: usize = 16;
 /// How many devices to re-announce per iteration, cycling through the ledger, so
 /// each identity pcap stays small.
 const ANNOUNCE_WINDOW: usize = 256;
+/// How many capture-host MAC<->IP bindings to refresh per iteration via
+/// gratuitous ARP, cycling through the registry. Kept small so the wire stays an
+/// OT protocol feed rather than an ARP broadcast: announcing every host each tick
+/// floods a passive sensor with ARP and leaves hosts MAC-only when their IP
+/// traffic is not concurrently replaying. Each host re-announces as its window
+/// comes round, which is enough to keep the binding fresh between capture fires.
+const CAPTURE_ARP_WINDOW: usize = 16;
 /// The fabricated engineering station that issues discovery queries.
 const CLIENT_MAC: [u8; 6] = [0x00, 0x50, 0x56, 0x00, 0x00, 0x01];
 /// Skip the L3 remap for captures larger than this, to bound tmpfs use.
@@ -63,6 +70,9 @@ pub struct SimulatorEngine {
     scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
     announce_cursor: usize,
+    /// Cursor into the capture-host registry for the rotating gratuitous-ARP
+    /// refresh window, so each host re-announces in turn rather than all at once.
+    capture_arp_cursor: usize,
     /// Models already warned about missing from the vuln DB, so the warning
     /// logs once rather than on every announce.
     warned_models: HashSet<String>,
@@ -115,6 +125,7 @@ impl SimulatorEngine {
             scheduler,
             sim_rng,
             announce_cursor: 0,
+            capture_arp_cursor: 0,
             warned_models: HashSet::new(),
             remap_cache_bytes: HashMap::new(),
             dirty: false,
@@ -502,9 +513,11 @@ impl SimulatorEngine {
         Some(out)
     }
 
-    /// Render a rotating window of devices as protocol-assertion frames, plus a
-    /// gratuitous ARP per capture-derived asset so the sensor binds each one's
-    /// MAC and IP even between replays of its source capture.
+    /// Render a rotating window of devices as protocol-assertion frames (each
+    /// device's response already carries its MAC and IP, so it binds without a
+    /// separate ARP), plus a small rotating window of capture-host gratuitous
+    /// ARPs to keep those bindings fresh between capture replays. Kept ARP-light
+    /// on purpose: the wire is an OT protocol feed, not an ARP broadcast.
     fn build_assertions(&mut self) -> Vec<Vec<u8>> {
         let n = self.ledger.devices.len();
         if n == 0 || !self.device_identity {
@@ -537,12 +550,22 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Bind each capture-derived asset's MAC and IP with a gratuitous ARP, so
-        // the sensor fuses it into one asset even between replays of its capture.
-        for h in &self.ledger.capture_hosts {
-            if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                frames.push(arp::gratuitous(parse_mac(&h.mac), ip));
+        // Refresh a small rotating window of capture-host MAC<->IP bindings, not
+        // all of them, so the burst stays an OT protocol feed instead of an ARP
+        // broadcast. Each host re-announces as the window cycles round; its live
+        // IP traffic (the replayed capture) is the primary binding.
+        let hosts = &self.ledger.capture_hosts;
+        if !hosts.is_empty() {
+            let m = hosts.len();
+            let take = CAPTURE_ARP_WINDOW.min(m);
+            let start_h = self.capture_arp_cursor % m;
+            for k in 0..take {
+                let h = &hosts[(start_h + k) % m];
+                if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+                    frames.push(arp::gratuitous(parse_mac(&h.mac), ip));
+                }
             }
+            self.capture_arp_cursor = (start_h + take) % m;
         }
         self.announce_cursor = (start + count) % n;
         frames
@@ -562,9 +585,10 @@ fn assertions_for_device(
     let client_ip = client_addr(&dev.subnet_cidr);
     let client_port = 50000u16;
 
-    // Announce the device's own MAC<->IP binding first so the sensor fuses it
-    // into one asset rather than separate MAC-only / IP-only entries.
-    let mut frames = vec![arp::gratuitous(dev_mac, dev_ip)];
+    // No standalone gratuitous ARP here: every protocol exchange below answers
+    // from the device's own MAC and IP, which binds the asset on its own. Adding
+    // an ARP per device per tick only floods the sensor.
+    let mut frames: Vec<Vec<u8>> = Vec::new();
 
     match profile.protocol {
         ProfileProto::Enip => {
@@ -901,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn enip_device_yields_arp_request_and_reply() {
+    fn enip_device_yields_request_and_reply() {
         let vuln = VulnDb::embedded().unwrap();
         let p = vuln
             .profiles()
@@ -910,16 +934,17 @@ mod tests {
             .unwrap();
         let d = dev("enip", &p.model, &p.firmware);
         let frames = assertions_for_device(&d, p, true);
-        assert_eq!(frames.len(), 3, "gratuitous ARP + request + reply");
-        // First frame is the gratuitous ARP (ethertype 0x0806).
-        assert_eq!(u16::from_be_bytes([frames[0][12], frames[0][13]]), 0x0806);
+        assert_eq!(frames.len(), 2, "request + reply, no standalone ARP");
+        // The exchange is IPv4 (ethertype 0x0800); the device binds from its own
+        // response, not a separate gratuitous ARP.
+        assert_eq!(u16::from_be_bytes([frames[0][12], frames[0][13]]), 0x0800);
         for f in &frames {
             assert!(crate::proto::frame::parse_layout(f).is_some());
         }
     }
 
     #[test]
-    fn switch_device_emits_arp_beacons_and_snmp() {
+    fn switch_device_emits_beacons_and_snmp() {
         let vuln = VulnDb::embedded().unwrap();
         let p = vuln
             .profiles()
@@ -929,13 +954,13 @@ mod tests {
         let d = dev("switch_snmp", &p.model, &p.firmware);
         assert_eq!(
             assertions_for_device(&d, p, true).len(),
-            5,
-            "arp + lldp + cdp + snmp request/response"
+            4,
+            "lldp + cdp + snmp request/response"
         );
         assert_eq!(
             assertions_for_device(&d, p, false).len(),
-            3,
-            "beacons off leaves arp + the snmp exchange"
+            2,
+            "beacons off leaves the snmp exchange"
         );
     }
 

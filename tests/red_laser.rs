@@ -506,3 +506,55 @@ fn wire_carries_only_planned_coherent_frames() {
         );
     }
 }
+
+/// The identity burst must stay an OT protocol feed, not an ARP broadcast: with
+/// far more capture hosts than the refresh window, only a small rotating window
+/// of gratuitous ARPs is emitted, and OT protocol frames dominate. Regression
+/// guard for the ARP flood that drowned the sensor's analytic engine.
+#[test]
+fn synth_burst_is_arp_light_not_a_broadcast_flood() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 256",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0); // fabricate the fleet and zones
+
+    // Register far more capture hosts than the ARP refresh window (16).
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
+    engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    let hosts = engine.ledger().capture_host_count();
+    assert!(hosts > 40, "many capture hosts registered: {hosts}");
+
+    let pcap = engine.red_tick(1).expect("identity burst");
+    let cap = pcapio::read(&pcap).unwrap();
+    let arp = cap
+        .packets
+        .iter()
+        .filter(|p| p.data.len() >= 14 && u16::from_be_bytes([p.data[12], p.data[13]]) == 0x0806)
+        .count();
+    let total = cap.packets.len();
+    assert!(
+        arp < hosts,
+        "ARP is rotated, not one per host: {arp} arp vs {hosts} hosts"
+    );
+    assert!(
+        arp <= 16,
+        "ARP refresh window stays small (CAPTURE_ARP_WINDOW): {arp}"
+    );
+    assert!(
+        total - arp >= 8,
+        "OT protocol frames dominate the burst: {total} total, {arp} arp"
+    );
+}
