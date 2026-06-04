@@ -111,8 +111,6 @@ pub fn run(args: &RunArgs) -> i32 {
             }
         };
 
-        let run_seed = seed::run_seed(master, run_counter);
-
         // Red laser relocates L3 addresses per run into tmpfs. Green laser
         // keeps the asset set fixed and replays the capture as-is.
         let mut remapped: Option<PathBuf> = None;
@@ -175,10 +173,9 @@ pub fn run(args: &RunArgs) -> i32 {
         }
 
         info!(
-            "run={run_counter} file={} rate={:?} run_seed={:#018x}",
+            "run={run_counter} file={} rate={:?}",
             chosen.display(),
-            cfg.rate.model,
-            run_seed
+            cfg.rate.model
         );
 
         let mut s = base_status(&cfg, started, run_counter, last_packets);
@@ -508,6 +505,43 @@ mod tests {
             pps(Some((1000, 10)), 3000, 12),
             Some(1000.0),
             "2000 packets over 2 seconds"
+        );
+    }
+
+    #[test]
+    fn green_laser_run_sequence_reproduces_from_master() {
+        use crate::config::{GapCfg, GapDist, Weights};
+        let master = seed::master_seed(Mode::GreenLaser, Some(0xABCD));
+        let files: Vec<PathBuf> = ["a.pcap", "b.pcap", "c.pcap"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let weights = Weights::default();
+        let gapcfg = GapCfg {
+            dist: GapDist::ExpPoisson,
+            mean_secs: Some(5.0),
+            min_secs: Some(0.5),
+            max_secs: Some(60.0),
+            stddev_secs: None,
+            lower_secs: None,
+            upper_secs: None,
+        };
+        // The whole green-laser per-run sequence (capture order + gaps) is drawn
+        // from one master-seeded RNG, so it reproduces across restarts.
+        let run = || {
+            let mut rng = ChaCha8Rng::seed_from_u64(master);
+            let mut seq = Vec::new();
+            for _ in 0..8 {
+                let pick = selection::weighted_pick(&files, &weights, &mut rng).cloned();
+                let gap = gap::sample_gap(&gapcfg, &mut rng);
+                seq.push((pick, gap.to_bits()));
+            }
+            seq
+        };
+        assert_eq!(
+            run(),
+            run(),
+            "green laser reproduces its capture-order and gap sequence from the master"
         );
     }
 }
