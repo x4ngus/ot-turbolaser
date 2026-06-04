@@ -11,6 +11,11 @@ use std::time::Duration;
 pub struct ReplayResult {
     pub success: bool,
     pub packets: Option<u64>,
+    /// Achieved rate for this run, parsed from tcpreplay's own stats. Reported in
+    /// the heartbeat so the operator sees the real send rate rather than a value
+    /// derived from a whole-second NIC counter that rounds sub-second runs to 0.
+    pub pps: Option<f64>,
+    pub mbps: Option<f64>,
     pub detail: String,
 }
 
@@ -54,9 +59,12 @@ pub fn run_once(
     }
 
     let summary = summarize(&text, status.code());
+    let (pps, mbps) = parse_rate(&text);
     Ok(ReplayResult {
         success: status.success() && !killed,
         packets: parse_packets(&text),
+        pps,
+        mbps,
         detail: if killed {
             format!("watchdog killed stalled replay; {summary}")
         } else {
@@ -77,6 +85,37 @@ fn parse_packets(text: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Achieved (pps, Mbps) from tcpreplay's final
+/// "Actual: <n> packets (<b> bytes) sent in <t> seconds" line. tcpreplay's own
+/// timing is sub-second accurate, unlike the whole-second NIC counter, so a fast
+/// run reports a real rate instead of zero. Best effort: returns (None, None)
+/// when the line or any of count/bytes/duration is missing.
+fn parse_rate(text: &str) -> (Option<f64>, Option<f64>) {
+    let Some(line) = text.lines().find(|l| l.trim_start().starts_with("Actual:")) else {
+        return (None, None);
+    };
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    let packets = toks
+        .iter()
+        .position(|t| *t == "Actual:")
+        .and_then(|i| toks.get(i + 1))
+        .and_then(|t| t.parse::<u64>().ok());
+    let bytes = toks
+        .iter()
+        .find_map(|t| t.strip_prefix('(').and_then(|s| s.parse::<u64>().ok()));
+    let secs = toks
+        .iter()
+        .position(|t| *t == "in")
+        .and_then(|i| toks.get(i + 1))
+        .and_then(|t| t.parse::<f64>().ok());
+    match (packets, bytes, secs) {
+        (Some(p), Some(b), Some(s)) if s > 0.0 => {
+            (Some(p as f64 / s), Some(b as f64 * 8.0 / s / 1_000_000.0))
+        }
+        _ => (None, None),
+    }
 }
 
 fn summarize(text: &str, code: Option<i32>) -> String {
@@ -105,5 +144,22 @@ mod tests {
     #[test]
     fn no_count_when_absent() {
         assert_eq!(parse_packets("nothing here"), None);
+    }
+
+    #[test]
+    fn parses_rate_from_actual_line() {
+        // 1250000 bytes in 1.0s = 10.0 Mbps; 2500 packets in 1.0s = 2500 pps.
+        let text = "File Cache is enabled\nActual: 2500 packets (1250000 bytes) sent in 1.00 seconds\nRated: ...\n";
+        let (pps, mbps) = parse_rate(text);
+        assert_eq!(pps, Some(2500.0));
+        assert_eq!(mbps, Some(10.0));
+    }
+
+    #[test]
+    fn no_rate_when_line_absent_or_zero_duration() {
+        assert_eq!(parse_rate("nothing here"), (None, None));
+        // A zero duration cannot yield a rate.
+        let z = "Actual: 5 packets (300 bytes) sent in 0.00 seconds\n";
+        assert_eq!(parse_rate(z), (None, None));
     }
 }

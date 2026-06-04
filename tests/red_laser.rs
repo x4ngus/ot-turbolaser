@@ -369,3 +369,140 @@ fn reconcile_registers_same_origins_regardless_of_capture_order() {
         "distinct hosts register under a generous cap"
     );
 }
+
+/// First-principles wire check: feed the red-laser remap a capture that mixes OT
+/// conversations with the exact junk that leaked in the field (a foreign-MAC LLDP
+/// frame, an IPv6 frame, an oversize frame, a broadcast ARP) and confirm the wire
+/// carries only planned, coherent frames: every address in a fabricated 10/8
+/// zone, every source MAC locally administered (no foreign OUI), nothing over the
+/// MTU, no L2 or IPv6 chatter. tshark then confirms the surviving bytes dissect
+/// clean. This is the plan==wire and unionised-asset guarantee on real output.
+#[test]
+fn wire_carries_only_planned_coherent_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 64",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0); // fabricate the plant so the into-zones remap runs
+
+    let foreign = [0x00, 0x1c, 0x06]; // a real vendor OUI (not locally administered)
+    let udp = |sm: [u8; 6], s: Ipv4Addr, d: Ipv4Addr, dport: u16, pay: &[u8]| {
+        let data = eth::udp_frame(sm, [0x00, 0x1c, 0x06, 9, 9, 9], s, d, 50000, dport, pay);
+        OwnedPacket {
+            ts: Duration::new(1, 0),
+            orig_len: data.len() as u32,
+            data,
+        }
+    };
+    let raw = |d: Vec<u8>| OwnedPacket {
+        ts: Duration::new(1, 0),
+        orig_len: d.len() as u32,
+        data: d,
+    };
+    let mut lldp = vec![
+        0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e, 0x00, 0xe0, 0x62, 0x01, 0x02, 0x03, 0x88, 0xcc,
+    ];
+    lldp.extend(std::iter::repeat_n(0u8, 46));
+    let mut ipv6 = vec![0x52, 0x54, 0, 0, 0, 1, 0x52, 0x54, 0, 0, 0, 2, 0x86, 0xdd];
+    ipv6.extend(std::iter::repeat_n(0u8, 40));
+    ipv6[14] = 0x60;
+    ipv6[22] = 0x20;
+    let mut arp = vec![
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x1c, 0x06, 9, 9, 9, 0x08, 0x06,
+    ];
+    arp.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01]);
+    arp.extend_from_slice(&[0x00, 0x1c, 0x06, 9, 9, 9]);
+    arp.extend_from_slice(&[192, 168, 50, 30]);
+    arp.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    arp.extend_from_slice(&[192, 168, 50, 31]);
+
+    let cap = Capture {
+        header: PcapHeader::default(),
+        packets: vec![
+            udp(
+                [0x00, 0x1c, 0x06, 1, 1, 1],
+                Ipv4Addr::new(192, 168, 50, 10),
+                Ipv4Addr::new(192, 168, 50, 20),
+                50001,
+                b"poll",
+            ),
+            udp(
+                [0x00, 0x1c, 0x06, 2, 2, 2],
+                Ipv4Addr::new(192, 168, 50, 11),
+                Ipv4Addr::new(192, 168, 50, 21),
+                50002,
+                b"resp",
+            ),
+            raw(lldp),
+            raw(ipv6),
+            // Oversize (TSO-style) frame: remapped but dropped before the wire.
+            udp(
+                [0x00, 0x1c, 0x06, 4, 4, 4],
+                Ipv4Addr::new(192, 168, 50, 40),
+                Ipv4Addr::new(192, 168, 50, 41),
+                50001,
+                &[0u8; 2000],
+            ),
+            raw(arp),
+        ],
+    };
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = pool.join("mixed.pcap");
+    pcapio::write(&src, &cap).unwrap();
+
+    let out = engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    let remapped = pcapio::read(&out).unwrap();
+
+    // Only the two coherent conversations and the ARP survive; LLDP, IPv6, and the
+    // oversize frame are dropped.
+    assert_eq!(
+        remapped.packets.len(),
+        3,
+        "only plan-coherent frames remain"
+    );
+    for p in &remapped.packets {
+        let d = &p.data;
+        assert!(d.len() <= 1514, "no frame exceeds the MTU");
+        let ethertype = u16::from_be_bytes([d[12], d[13]]);
+        assert_ne!(ethertype, 0x86dd, "no IPv6 on the wire");
+        assert_ne!(ethertype, 0x88cc, "no LLDP/L2 chatter on the wire");
+        // Source MAC is locally administered (a stable plan MAC), never a foreign
+        // OUI carried over from the capture.
+        assert_eq!(d[6] & 0x02, 0x02, "source MAC is locally administered");
+        assert_ne!(&d[6..9], &foreign[..], "no foreign source OUI on the wire");
+        match ethertype {
+            0x0800 => {
+                assert_eq!(d[26], 10, "IPv4 source in a planned 10/8 zone");
+                assert_eq!(d[30], 10, "IPv4 destination in a planned 10/8 zone");
+            }
+            0x0806 => {
+                assert_eq!(d[28], 10, "ARP sender in a planned 10/8 zone");
+                assert_eq!(d[38], 10, "ARP target in a planned 10/8 zone");
+            }
+            other => panic!("unexpected ethertype {other:#06x} on the wire"),
+        }
+    }
+
+    // tshark confirms the surviving bytes dissect with no malformed frames.
+    if tshark_available() {
+        let malformed = tshark(
+            &out,
+            &["-Y", "_ws.malformed", "-T", "fields", "-e", "frame.number"],
+        );
+        assert!(
+            malformed.trim().is_empty(),
+            "no malformed frames: {malformed}"
+        );
+    }
+}

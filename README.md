@@ -44,7 +44,9 @@ Two modes:
   fabricates a believable ICS plant and feeds it to the sensor.
 - **green_laser** is the accurate mode. It replays a fixed, reproducible baseline
   and derives zones read-only from the capture's real addresses and MAC OUIs, with
-  no fabrication.
+  no fabrication. Green replays captures as-is, so the plan==wire and unionised-asset
+  guarantees below are red-laser properties; in green, the public-source backstop is
+  what keeps a routable address off the wire.
 
 The former names `variety` and `baseline` still parse as aliases.
 
@@ -112,15 +114,34 @@ turbolaser plan --config conf/replay.yaml --commit
 Then bring it online:
 
 ```
-just up               # set up the isolated bridge and mirror, start the service
+just fire             # set up the isolated bridge and mirror, start the service
 just pewpew
 ```
 
 Without `just`, the steps are `scripts/bootstrap.sh`,
 `turbolaser reload --in <pcap> --out-dir <variants> --count 16`,
-`turbolaser plan --commit`, `turbolaser up`, and `turbolaser pewpew`.
+`turbolaser plan --commit`, `turbolaser fire`, and `turbolaser pewpew`.
 
 For a Proxmox deployment, see the [Proxmox guide](docs/proxmox.md).
+
+## Commands
+
+Every subcommand takes `--config <path>` (default `/opt/replay/conf/replay.yaml`).
+`fire`/`halt` are the operator commands; `up`/`down` remain as aliases.
+
+| Command | What it does |
+| --- | --- |
+| `turbolaser fire` (alias `up`) | Bring the appliance online: enable and start the service, which sets up the isolated bridge and the port mirror. |
+| `turbolaser halt` (alias `down`) | Take the appliance offline: stop and disable the service, which tears down the mirror. |
+| `turbolaser plan` | Preview the fabricated zones, devices, and CVE assignments without sending traffic (red laser). `--devices N` overrides the fleet size, `--json` emits raw. |
+| `turbolaser plan --commit` | Fabricate the plant from `session.seed` and seal it as the ledger the daemon replays verbatim. `--write` is an alias, `--force` overwrites an existing ledger, `--dry-run` previews only. |
+| `turbolaser pewpew` (alias `status`) | Live fire-control readout: wire footprint vs plan, the zone list, throughput (pps and Mbps), and the last threat injection. `--json` emits raw. |
+| `turbolaser zones` | Show the current zone map: red reads the sealed ledger, green derives it from the captures. `--json` emits raw. |
+| `turbolaser reload --in <pcap> --out-dir <dir>` | Forge variant pcaps (the rounds) with payload-identity mutations. `--count N` rounds, `--proto`, `--seed-base`, `--remap-l3`, `--validate` (tshark-check each round). |
+| `turbolaser reset` | Clear the red-laser session ledger for a fresh plant. |
+| `turbolaser check` | Validate a config file without replaying. |
+| `turbolaser run` | The replay daemon loop itself. The systemd unit runs this; operators use `fire`/`halt`. `--once` does a single iteration (for testing). |
+| `turbolaser net-setup` / `net-teardown` | Low-level bridge and mirror setup/teardown from config. The unit calls these, and `fire`/`halt` wrap them. |
 
 ## Sourcing captures
 
@@ -181,14 +202,14 @@ sudo scripts/install.sh              # lays out /opt/replay, installs the unit
 turbolaser reload --in /opt/replay/pcaps/pool/<cap>.pcap \
     --out-dir /opt/replay/pcaps/variants --count 16
 turbolaser plan --config /opt/replay/conf/replay.yaml --commit   # red laser: seal the plant
-turbolaser up
+turbolaser fire
 turbolaser pewpew
 ```
 
 ## Verifying on the sensor
 
-- After `turbolaser up`, confirm the topology print and that net-setup refuses a
-  physical NIC if you point it at one.
+- After `turbolaser fire`, confirm the topology print and that net-setup refuses
+  a physical NIC if you point it at one.
 - With a capture replaying, run `tshark -i <sensor_port>` and confirm the sensor
   receives unicast frames, not just broadcast and multicast. Watch the mirror
   counters with `tc -s filter show dev <iface> egress`.
