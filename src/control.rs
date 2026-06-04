@@ -1,10 +1,11 @@
-//! Operator control: up, down, status, and the net-setup/net-teardown hooks
+//! Operator control: up, down, pewpew, and the net-setup/net-teardown hooks
 //! the systemd unit calls.
 //!
 //! The unit owns network setup so reboots and service restarts are
 //! self-contained. `up`/`down` simply drive systemctl; `net-setup`/
-//! `net-teardown` read the config and run the shell helpers; `status` reads the
-//! heartbeat file and reports health via the exit code.
+//! `net-teardown` read the config and run the shell helpers; `pewpew` reads the
+//! heartbeat file and reports health via the exit code (`status` is a deprecated
+//! alias).
 
 use crate::cli::{NetArgs, StatusArgs};
 use crate::config::{self, MirrorMode};
@@ -108,7 +109,7 @@ fn resolve_script(name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-pub fn status(args: &StatusArgs) -> i32 {
+pub fn pewpew(args: &StatusArgs) -> i32 {
     let cfg = match config::load(&args.config) {
         Ok(c) => c,
         Err(e) => {
@@ -142,58 +143,110 @@ pub fn status(args: &StatusArgs) -> i32 {
     };
     let state = v.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
     if !args.json {
-        let field = |k: &str| -> String {
-            match v.get(k) {
-                Some(x) => match x.as_str() {
-                    Some(t) => t.to_string(),
-                    None => x.to_string(),
-                },
-                None => "null".into(),
-            }
-        };
-        println!("state:        {state}");
-        println!("mode:         {}", field("mode"));
-        println!("laser:        {}", field("laser"));
-        println!("iface:        {}", field("iface"));
-        println!("run:          {}", field("run"));
-        println!("current_file: {}", field("current_file"));
-        println!("tx_packets:   {}", field("total_tx_packets"));
-        println!("last_packets: {}", field("last_run_packets"));
-        let zone_count = v.get("zone_count").and_then(|x| x.as_u64()).unwrap_or(0);
-        let device_count = v.get("device_count").and_then(|x| x.as_u64()).unwrap_or(0);
-        if zone_count > 0 || device_count > 0 {
-            println!("zones:        {}", field("zone_count"));
-            if device_count > 0 || v.get("device_cap").and_then(|x| x.as_u64()).unwrap_or(0) > 0 {
-                println!(
-                    "devices:      {} / {}",
-                    field("device_count"),
-                    field("device_cap")
-                );
-                println!("subnet cap:   {}", field("subnet_cap"));
-            }
-            if v.get("cycle").and_then(|x| x.as_u64()).unwrap_or(0) > 0 {
-                println!("cycle:        {}", field("cycle"));
-            }
-            if let Some(t) = v.get("last_threat_unix").and_then(|x| x.as_u64()) {
-                println!("last_threat:  {t}");
-            }
-            if let Some(zs) = v.get("zones").and_then(|x| x.as_array()) {
-                for z in zs {
-                    let c = z.get("cidr").and_then(|x| x.as_str()).unwrap_or("?");
-                    let n = z.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-                    let d = z.get("devices").and_then(|x| x.as_u64()).unwrap_or(0);
-                    println!("  {c:<18} {n} ({d} devices)");
-                }
-            }
-        }
-        println!("updated_unix: {}", field("updated_unix"));
-        if let Some(err) = v.get("last_error").and_then(|x| x.as_str()) {
-            println!("last_error:   {err}");
-        }
+        render_pewpew(&v, state);
     }
     match state {
         "replaying" | "gap" | "starting" => 0,
         "idle_no_pcaps" => 3,
+        // The skipped_* states (a capture deliberately not sent) and the clean
+        // stopping state are healthy, not failures.
+        "skipped_remap_failed" | "skipped_public_source" | "stopping" => 0,
         _ => 1,
     }
+}
+
+/// The human readout: a header, the wire-footprint-vs-plan group (red laser),
+/// the zone list, and the throughput-and-runtime group.
+fn render_pewpew(v: &serde_json::Value, state: &str) {
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str());
+    let u = |k: &str| v.get(k).and_then(|x| x.as_u64());
+    let f = |k: &str| v.get(k).and_then(|x| x.as_f64());
+    let laser = s("laser").unwrap_or("?");
+    let iface = s("iface").unwrap_or("?");
+    println!("turbolaser pewpew  [{state}]  {laser} on {iface}");
+
+    if laser == "red_laser" {
+        let device_count = u("device_count").unwrap_or(0);
+        let capture = u("capture_host_count").unwrap_or(0);
+        let total = u("total_wire_assets").unwrap_or(0);
+        let max_assets = u("max_assets").unwrap_or(0);
+        let target = u("target_devices").unwrap_or(0);
+        let sealed = v.get("sealed").and_then(|x| x.as_bool()).unwrap_or(false);
+        println!("  -- wire footprint vs plan --");
+        println!(
+            "    assets        : {total} / {max_assets}  ({device_count} fabricated, {capture} capture-derived)"
+        );
+        if target > 0 {
+            println!("    planned fleet : {target} fabricated  (sealed: {sealed})");
+        }
+        println!(
+            "    zones         : {} / {}",
+            u("zone_count").unwrap_or(0),
+            u("subnet_cap").unwrap_or(0)
+        );
+        // The wire must never exceed the plan, and a sealed fleet must match its
+        // target; either divergence is drift.
+        let drift = (max_assets > 0 && total > max_assets)
+            || (sealed && target > 0 && device_count != target);
+        println!(
+            "    drift         : {}",
+            if drift {
+                "DRIFT (wire diverges from plan)"
+            } else {
+                "none"
+            }
+        );
+        if let Some(c) = u("cycle").filter(|&c| c > 0) {
+            println!("    cycle         : {c}");
+        }
+        if let Some(t) = u("last_threat_unix") {
+            println!("    last threat   : {t}");
+        }
+    }
+
+    if let Some(zs) = v.get("zones").and_then(|x| x.as_array()) {
+        if !zs.is_empty() {
+            println!("  -- zones --");
+            for z in zs {
+                let c = z.get("cidr").and_then(|x| x.as_str()).unwrap_or("?");
+                let n = z.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                let d = z.get("devices").and_then(|x| x.as_u64()).unwrap_or(0);
+                println!("    {c:<18} {n} ({d} devices)");
+            }
+        }
+    }
+
+    println!("  -- throughput & runtime --");
+    println!("    run           : {}", u("run").unwrap_or(0));
+    if let Some(cf) = s("current_file") {
+        println!("    current file  : {cf}");
+    }
+    println!("    last packets  : {}", opt_u(v, "last_run_packets"));
+    println!("    tx packets    : {}", opt_u(v, "total_tx_packets"));
+    println!(
+        "    packets/sec   : {}",
+        f("pps")
+            .map(|p| format!("{p:.0}"))
+            .unwrap_or_else(|| "null".into())
+    );
+    if let Some(g) = f("next_gap_secs") {
+        println!("    next gap      : {g:.1}s");
+    }
+    let updated = u("updated_unix").unwrap_or(0);
+    let started = u("started_unix").unwrap_or(0);
+    if started > 0 && updated >= started {
+        println!("    uptime        : {}s", updated - started);
+    }
+    println!("    updated_unix  : {updated}");
+    if let Some(err) = s("last_error") {
+        println!("    last_error    : {err}");
+    }
+}
+
+/// A u64 status field as a string, or "null" when absent.
+fn opt_u(v: &serde_json::Value, k: &str) -> String {
+    v.get(k)
+        .and_then(|x| x.as_u64())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "null".into())
 }

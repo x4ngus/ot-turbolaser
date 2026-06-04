@@ -124,3 +124,94 @@ pub fn write_index(dir: &Path, entries: &[IndexEntry]) -> Result<(), String> {
     let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
     std::fs::write(&p, json).map_err(|e| format!("{}: {e}", p.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pcapio::{Capture, OwnedPacket};
+    use crate::proto::MutationReport;
+    use crate::reload::pipeline::RoundResult;
+    use pcap_file::pcap::PcapHeader;
+    use std::time::Duration;
+
+    fn cap_with_ts(secs: &[u64]) -> Capture {
+        Capture {
+            header: PcapHeader::default(),
+            packets: secs
+                .iter()
+                .map(|&s| OwnedPacket {
+                    ts: Duration::new(s, 0),
+                    orig_len: 0,
+                    data: vec![0u8; 14],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn build_dedups_mutations_and_computes_duration() {
+        let cap = cap_with_ts(&[1, 5]); // 4-second span
+        let m = MutationReport {
+            protocol: Protocol::Modbus,
+            field: "unit_id".into(),
+            original: 1,
+            new: 9,
+        };
+        let result = RoundResult {
+            mutations: vec![m.clone(), m.clone(), m], // the same rewrite, repeated
+            l3: None,
+            frames: 2,
+        };
+        let man = build("modbus", 0x10, "red_laser", &cap, &result);
+        assert_eq!(man.duration_secs, 4.0);
+        assert_eq!(
+            man.mutations.len(),
+            1,
+            "repeated identical rewrites collapse"
+        );
+        assert_eq!(man.seed_hex, "10");
+        assert_eq!(man.frames, 2);
+    }
+
+    #[test]
+    fn build_zero_duration_for_empty_capture() {
+        let cap = cap_with_ts(&[]);
+        let result = RoundResult {
+            mutations: vec![],
+            l3: None,
+            frames: 0,
+        };
+        let man = build("x", 0, "red_laser", &cap, &result);
+        assert_eq!(
+            man.duration_secs, 0.0,
+            "no packets means zero span, not infinity"
+        );
+    }
+
+    #[test]
+    fn index_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = vec![
+            IndexEntry {
+                file: "a.pcap".into(),
+                seed: 1,
+                frames: 10,
+                mutations: 2,
+            },
+            IndexEntry {
+                file: "b.pcap".into(),
+                seed: 2,
+                frames: 20,
+                mutations: 0,
+            },
+        ];
+        write_index(dir.path(), &entries).unwrap();
+        let loaded = load_index(dir.path());
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].file, "a.pcap");
+        assert_eq!(loaded[1].seed, 2);
+        // A missing index loads as empty, not an error.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(load_index(empty.path()).is_empty());
+    }
+}

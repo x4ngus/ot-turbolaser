@@ -120,3 +120,34 @@ oui = "00:80:63"
 cves = ["CVE-2020-6994"]    # HiOS RCE, fw < 07.0.03 (ICSA-20-091-01)
 sys_descr = "Hirschmann RSP20 HiOS-2A Rel. 07.0.02"
 sys_object_id = "1.3.6.1.4.1.248.14.1.1"
+
+[[profile]]
+vendor = "Cisco Systems"
+model = "IE-2000-8TC-G-E Industrial Ethernet Switch"
+firmware = "15.2(4)EA"
+protocol = "switch_snmp"
+purdue_level = 2
+oui = "00:00:0C"
+cves = ["CVE-2017-6736"]    # SNMP subsystem RCE, IOS/IOS XE (cisco-sa-20170629-snmp)
+sys_descr = "Cisco IOS Software, IE2000 Software (IE2000-UNIVERSALK9-M), Version 15.2(4)EA, RELEASE SOFTWARE (fc1)"
+sys_object_id = "1.3.6.1.4.1.9.1.1632"   # ciscoProducts arc; verify the exact sub-id per switch model
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-1500 CPU 1511-1 PN"
+firmware = "V2.8.1"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2020-15782"]   # memory protection bypass, S7-1200/1500 fw < V2.9.2 (ICSA-21-152-01)
+s7_order_number = "6ES7 511-1AK02-0AB0"
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-400 CPU 414-3 PN/DP"
+firmware = "V6.0.3"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2016-9159"]    # private-key/credential disclosure over port 102 (ICSA-16-348-05, S7-300/400)
+s7_order_number = "6ES7 414-3EM07-0AB0"

@@ -103,29 +103,56 @@ pub fn derive_zones(cap: &Capture, hints: &[Ipv4Net], oui: &OuiDb) -> Vec<Zone> 
         let Some(l) = parse_layout(&p.data) else {
             continue;
         };
-        if l.l3_kind != L3Kind::Ipv4 || p.data.len() < l.l3 + 20 {
-            continue;
+        if l.l3_kind == L3Kind::Ipv4 && p.data.len() >= l.l3 + 20 {
+            let src = Ipv4Addr::new(
+                p.data[l.l3 + 12],
+                p.data[l.l3 + 13],
+                p.data[l.l3 + 14],
+                p.data[l.l3 + 15],
+            );
+            let dst = Ipv4Addr::new(
+                p.data[l.l3 + 16],
+                p.data[l.l3 + 17],
+                p.data[l.l3 + 18],
+                p.data[l.l3 + 19],
+            );
+            if is_unicast(src) && p.data.len() >= 12 {
+                let mac = [
+                    p.data[6], p.data[7], p.data[8], p.data[9], p.data[10], p.data[11],
+                ];
+                host_mac.entry(src).or_insert(mac);
+            }
+            note(src, &mut hosts, &mut seen);
+            note(dst, &mut hosts, &mut seen);
+        } else if l3::is_arp_ipv4(&p.data, l.l3) {
+            // ARP binds a sender IP to its hardware address; group ARP-only hosts
+            // too so they land in a zone and are remapped like any other host.
+            let spa = Ipv4Addr::new(
+                p.data[l.l3 + 14],
+                p.data[l.l3 + 15],
+                p.data[l.l3 + 16],
+                p.data[l.l3 + 17],
+            );
+            let tpa = Ipv4Addr::new(
+                p.data[l.l3 + 24],
+                p.data[l.l3 + 25],
+                p.data[l.l3 + 26],
+                p.data[l.l3 + 27],
+            );
+            if is_unicast(spa) {
+                let sha = [
+                    p.data[l.l3 + 8],
+                    p.data[l.l3 + 9],
+                    p.data[l.l3 + 10],
+                    p.data[l.l3 + 11],
+                    p.data[l.l3 + 12],
+                    p.data[l.l3 + 13],
+                ];
+                host_mac.entry(spa).or_insert(sha);
+            }
+            note(spa, &mut hosts, &mut seen);
+            note(tpa, &mut hosts, &mut seen);
         }
-        let src = Ipv4Addr::new(
-            p.data[l.l3 + 12],
-            p.data[l.l3 + 13],
-            p.data[l.l3 + 14],
-            p.data[l.l3 + 15],
-        );
-        let dst = Ipv4Addr::new(
-            p.data[l.l3 + 16],
-            p.data[l.l3 + 17],
-            p.data[l.l3 + 18],
-            p.data[l.l3 + 19],
-        );
-        if is_unicast(src) && p.data.len() >= 12 {
-            let mac = [
-                p.data[6], p.data[7], p.data[8], p.data[9], p.data[10], p.data[11],
-            ];
-            host_mac.entry(src).or_insert(mac);
-        }
-        note(src, &mut hosts, &mut seen);
-        note(dst, &mut hosts, &mut seen);
     }
 
     // Group hosts by subnet, ordered by network address for stable output.

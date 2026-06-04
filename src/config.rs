@@ -82,6 +82,11 @@ pub struct L3Cfg {
     /// Apply the coherent L3 remap per run in red-laser mode.
     #[serde(default = "default_true")]
     pub remap: bool,
+    /// Rewrite Ethernet and ARP MAC addresses alongside IPv4 so each remapped
+    /// host has a stable, coherent MAC<->IP binding the sensor fuses into one
+    /// asset. On by default; only the red-laser remap honours it.
+    #[serde(default = "default_true")]
+    pub remap_mac: bool,
     /// Deprecated and unused as of v0.2.1: the in-process remap is mandatory in
     /// red laser, and a capture that cannot be remapped is skipped, never
     /// replayed raw. Retained so existing configs still parse; to be removed.
@@ -112,6 +117,7 @@ impl Default for L3Cfg {
     fn default() -> Self {
         Self {
             remap: true,
+            remap_mac: true,
             fallback: L3Fallback::default(),
             subnets: Vec::new(),
             zone_affinity: ZoneAffinity::default(),
@@ -391,6 +397,12 @@ pub struct SynthesisCfg {
     /// `--devices` overrides.
     #[serde(default = "default_target_devices")]
     pub target_devices: usize,
+    /// Total wire-asset cap: fabricated devices plus capture-derived assets.
+    /// Replayed capture hosts fill spare zone capacity up to this; surplus rides
+    /// existing assets, so the wire never exceeds the plan. Clamped to the device
+    /// hard cap; defaults to 256.
+    #[serde(default)]
+    pub max_assets: Option<usize>,
 }
 
 impl Default for SynthesisCfg {
@@ -403,6 +415,7 @@ impl Default for SynthesisCfg {
             cycle_every_n_runs: 0,
             max_devices: None,
             target_devices: default_target_devices(),
+            max_assets: None,
         }
     }
 }
@@ -501,17 +514,20 @@ impl Config {
         }
         self.rate.validate()?;
         self.gap.validate()?;
-        if self.weights.default < 0.0 {
-            return Err("weights.default must be >= 0".into());
+        if !self.weights.default.is_finite() || self.weights.default < 0.0 {
+            return Err("weights.default must be a finite value >= 0".into());
         }
         for g in &self.weights.globs {
-            if g.weight < 0.0 {
-                return Err(format!("weight for glob {} must be >= 0", g.pattern));
+            if !g.weight.is_finite() || g.weight < 0.0 {
+                return Err(format!(
+                    "weight for glob {} must be a finite value >= 0",
+                    g.pattern
+                ));
             }
         }
         for (f, w) in &self.weights.files {
-            if *w < 0.0 {
-                return Err(format!("weight for file {f} must be >= 0"));
+            if !w.is_finite() || *w < 0.0 {
+                return Err(format!("weight for file {f} must be a finite value >= 0"));
             }
         }
         if matches!(self.zones.max_subnets, Some(0)) {
@@ -529,15 +545,26 @@ impl Config {
         if self.synthesis.target_devices == 0 {
             return Err("synthesis.target_devices must be > 0".into());
         }
+        if matches!(self.synthesis.max_assets, Some(0)) {
+            return Err("synthesis.max_assets must be > 0".into());
+        }
         if self.threats.min_interval_secs > self.threats.max_interval_secs {
             return Err("threats.min_interval_secs must be <= threats.max_interval_secs".into());
         }
         for c in &self.threats.external_cidrs {
             let net = Ipv4Net::from_str(c)
                 .map_err(|_| format!("threats.external_cidrs entry {c} is not a valid CIDR"))?;
-            if net.network().is_private() {
+            let n = net.network();
+            let o0 = n.octets()[0];
+            let public_unicast = o0 != 0
+                && o0 != 127
+                && o0 < 224
+                && !n.is_private()
+                && !n.is_loopback()
+                && !n.is_link_local();
+            if !public_unicast {
                 return Err(format!(
-                    "threats.external_cidrs entry {c} is RFC1918; external threats must be public"
+                    "threats.external_cidrs entry {c} must be a public unicast range (not RFC1918, loopback, link-local, or multicast)"
                 ));
             }
         }

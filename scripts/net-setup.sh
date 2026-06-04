@@ -113,6 +113,22 @@ setup_tc() {
 }
 
 setup_ovs() {
+    # Refuse if the OVS bridge already enslaves a physical member that is not our
+    # designated sensor port (a pre-existing uplink), mirroring the tc path. The
+    # replay port is already required to be virtual by the global check above; a
+    # physical sensor port is the one allowed exception (mirror destination).
+    if ovs-vsctl br-exists "$BRIDGE" 2>/dev/null; then
+        local port
+        while read -r port; do
+            [[ -n "$port" ]] || continue
+            [[ "$port" == "$REPLAY" || "$port" == "$SENSOR" ]] && continue
+            if is_physical "$port"; then
+                echo "REFUSING: OVS bridge '$BRIDGE' already has a physical member '$port'." >&2
+                exit 3
+            fi
+        done < <(ovs-vsctl list-ports "$BRIDGE" 2>/dev/null || true)
+    fi
+
     ovs-vsctl --may-exist add-br "$BRIDGE"
     ovs-vsctl --may-exist add-port "$BRIDGE" "$REPLAY"
     ovs-vsctl --may-exist add-port "$BRIDGE" "$SENSOR"

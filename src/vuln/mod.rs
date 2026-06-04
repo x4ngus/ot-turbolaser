@@ -193,6 +193,27 @@ mod tests {
         assert!(has("CVE-2020-15782"), "Siemens S7-1200");
         assert!(has("CVE-2021-22681"), "Rockwell Logix");
         assert!(has("CVE-2018-7811"), "Schneider M340");
+        assert!(has("CVE-2017-6736"), "Cisco IOS");
+    }
+
+    #[test]
+    fn cisco_ios_profile_present_with_sys_object_id() {
+        let db = VulnDb::embedded().unwrap();
+        let cisco = db
+            .profiles()
+            .iter()
+            .find(|p| p.vendor.contains("Cisco"))
+            .expect("a Cisco IOS profile is present");
+        assert_eq!(cisco.protocol, ProfileProto::SwitchSnmp);
+        assert!(cisco.cves.iter().any(|c| c == "CVE-2017-6736"));
+        assert!(
+            cisco
+                .sys_object_id
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("1.3.6.1.4.1.9."),
+            "Cisco sysObjectID sits under the ciscoProducts arc"
+        );
     }
 
     #[test]

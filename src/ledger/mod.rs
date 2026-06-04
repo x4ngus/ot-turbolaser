@@ -10,7 +10,7 @@
 //! raise them, so the guarantee holds even if a config is wrong.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -22,10 +22,17 @@ pub const MAX_SUBNETS: usize = 10;
 /// No red-laser session ever fabricates more than this many devices.
 pub const MAX_DEVICES: usize = 2000;
 
-/// Current ledger schema version. Bumped to 2 in v0.2.1, which adds `sealed`
-/// and `target_devices`. Older (schema 1) files load via serde defaults; a
-/// newer file is refused on load rather than silently misread.
-pub const SCHEMA: u32 = 2;
+/// Current ledger schema version. Bumped to 3 in v0.2.2, which adds the
+/// capture-host registry (`capture_hosts`, `registry_generation`) and the
+/// recorded `max_assets` cap. Older files (schema 1 and 2) load via serde
+/// defaults; a newer file is refused on load rather than silently misread.
+pub const SCHEMA: u32 = 3;
+
+/// Default total wire-asset cap (fabricated devices plus capture-derived assets)
+/// when a config does not set one. Sized generously so a typical capture pool's
+/// hosts all register as distinct assets and surplus force-mapping (riding an
+/// existing device) is rarely reached.
+pub const DEFAULT_MAX_ASSETS: usize = 512;
 
 /// Resolve an effective cap from an optional config value: a config can lower a
 /// hard cap but never exceed it.
@@ -39,6 +46,15 @@ pub fn effective_subnet_cap(configured: Option<usize>) -> usize {
 pub fn effective_device_cap(configured: Option<usize>) -> usize {
     configured
         .map_or(MAX_DEVICES, |c| c.min(MAX_DEVICES))
+        .max(1)
+}
+
+/// Resolve the total wire-asset cap (fabricated devices plus capture-derived
+/// assets): the config value clamped to the device hard cap, defaulting to
+/// [`DEFAULT_MAX_ASSETS`]. Bounds the wire so it never exceeds the plan.
+pub fn effective_asset_cap(configured: Option<usize>) -> usize {
+    configured
+        .map_or(DEFAULT_MAX_ASSETS, |c| c.min(MAX_DEVICES))
         .max(1)
 }
 
@@ -67,6 +83,21 @@ pub struct Session {
     /// unsealed or legacy (schema 1) ledger.
     #[serde(default)]
     pub target_devices: usize,
+    /// Capture-derived assets: real replayed hosts registered as stable assets
+    /// inside the planned zones, with their own stable MAC and IP. They fill
+    /// spare zone capacity up to the asset cap; surplus capture hosts ride
+    /// existing assets instead. Not CVE-bearing; identity is whatever their
+    /// replayed traffic carries.
+    #[serde(default)]
+    pub capture_hosts: Vec<CaptureHostRecord>,
+    /// Bumped whenever the capture-host registry grows, so a remap cached against
+    /// an earlier registry state is recomputed rather than reused.
+    #[serde(default)]
+    pub registry_generation: u64,
+    /// Total wire-asset cap recorded at commit (fabricated plus capture-derived).
+    /// 0 on an unsealed or legacy ledger; resolved from config at runtime.
+    #[serde(default)]
+    pub max_assets: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +129,28 @@ pub struct PromotedHost {
     pub promoted_unix: u64,
 }
 
+/// A real host observed in a replayed capture, registered as a stable asset so
+/// it keeps one IP and MAC across runs and is counted against the plan. Unlike a
+/// `DeviceRecord` it carries no fabricated model/firmware/CVE: it is a genuine
+/// replayed host, just relocated into a planned zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureHostRecord {
+    /// The original capture IP this stable asset stands in for. The engine keys
+    /// on it so a repeated capture (or another capture reusing the address) maps
+    /// to the same asset every run.
+    #[serde(default)]
+    pub origin_ip: String,
+    pub ip: String,
+    pub mac: String,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub purdue_level: u8,
+    pub subnet_cidr: String,
+}
+
 impl Session {
     /// A fresh, empty session.
     pub fn new(seed: u64, now_unix: u64) -> Self {
@@ -112,6 +165,9 @@ impl Session {
             last_threat_unix: None,
             sealed: false,
             target_devices: 0,
+            capture_hosts: Vec::new(),
+            registry_generation: 0,
+            max_assets: 0,
         }
     }
 
@@ -184,6 +240,43 @@ impl Session {
         self.devices.len()
     }
 
+    pub fn capture_host_count(&self) -> usize {
+        self.capture_hosts.len()
+    }
+
+    /// Total distinct wire assets: fabricated devices plus capture-derived hosts.
+    /// This is what the plan caps and what the sensor should inventory.
+    pub fn total_wire_assets(&self) -> usize {
+        self.devices.len() + self.capture_hosts.len()
+    }
+
+    /// Register a capture-derived host as a stable asset, deduping by IP and
+    /// bounding the total wire-asset count at `cap`. Bumps the registry
+    /// generation on a real add so a stale remap cache is invalidated. Returns
+    /// false when the cap is reached or the IP is already registered.
+    pub fn register_capture_host(&mut self, rec: CaptureHostRecord, cap: usize) -> bool {
+        if self.total_wire_assets() >= cap {
+            return false;
+        }
+        if self.capture_hosts.iter().any(|h| h.ip == rec.ip) {
+            return false;
+        }
+        self.capture_hosts.push(rec);
+        self.registry_generation += 1;
+        true
+    }
+
+    /// Per-CIDR fabricated-device counts in one pass, so callers do not re-scan
+    /// all devices for each zone. Shared by the status heartbeat and the zone
+    /// renderers.
+    pub fn device_counts_by_subnet(&self) -> HashMap<&str, usize> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for d in &self.devices {
+            *counts.entry(d.subnet_cidr.as_str()).or_default() += 1;
+        }
+        counts
+    }
+
     /// True when this ledger was committed by `plan --commit` and the daemon
     /// must replay it verbatim without fabricating more devices.
     pub fn is_sealed(&self) -> bool {
@@ -214,11 +307,14 @@ impl Session {
         true
     }
 
-    /// Every IP already assigned to a device, for uniqueness checks.
+    /// Every IP already assigned to a device or a registered capture host, for
+    /// uniqueness checks. A new device or capture host never collides with one.
     pub fn used_ips(&self) -> HashSet<Ipv4Addr> {
         self.devices
             .iter()
-            .filter_map(|d| d.ip.parse::<Ipv4Addr>().ok())
+            .map(|d| d.ip.as_str())
+            .chain(self.capture_hosts.iter().map(|h| h.ip.as_str()))
+            .filter_map(|ip| ip.parse::<Ipv4Addr>().ok())
             .collect()
     }
 
@@ -276,6 +372,18 @@ mod tests {
             zone_name: "Zone".into(),
             purdue_level: 1,
             vendor: Some("Rockwell Automation".into()),
+        }
+    }
+
+    fn chost(ip: &str, cidr: &str) -> CaptureHostRecord {
+        CaptureHostRecord {
+            origin_ip: format!("172.16.0.{}", ip.rsplit('.').next().unwrap_or("1")),
+            ip: ip.into(),
+            mac: "02:00:00:11:22:33".into(),
+            vendor: None,
+            protocol: Some("modbus".into()),
+            purdue_level: 1,
+            subnet_cidr: cidr.into(),
         }
     }
 
@@ -399,6 +507,58 @@ mod tests {
         s.save_atomic(&path).unwrap();
         let loaded = Session::load(&path).unwrap().unwrap();
         assert!(loaded.is_sealed());
+        assert_eq!(loaded.target_devices, 64);
+    }
+
+    #[test]
+    fn register_capture_host_dedups_and_honours_cap() {
+        let mut s = Session::new(1, 0);
+        // Cap of 2 total wire assets; one fabricated device already present.
+        s.add_device(dev("10.0.0.5", "10.0.0.0/24"));
+        assert!(s.register_capture_host(chost("10.0.0.6", "10.0.0.0/24"), 2));
+        assert_eq!(s.total_wire_assets(), 2);
+        let gen = s.registry_generation;
+        // Cap reached: further registration refused, generation unchanged.
+        assert!(!s.register_capture_host(chost("10.0.0.7", "10.0.0.0/24"), 2));
+        assert_eq!(s.registry_generation, gen);
+        // Dedup by IP even under a larger cap.
+        assert!(!s.register_capture_host(chost("10.0.0.6", "10.0.0.0/24"), 10));
+        assert_eq!(s.capture_host_count(), 1);
+    }
+
+    #[test]
+    fn used_ips_unions_devices_and_capture_hosts() {
+        let mut s = Session::new(1, 0);
+        s.add_device(dev("10.0.0.5", "10.0.0.0/24"));
+        s.register_capture_host(chost("10.0.0.6", "10.0.0.0/24"), 100);
+        let used = s.used_ips();
+        assert!(used.contains(&"10.0.0.5".parse().unwrap()));
+        assert!(used.contains(&"10.0.0.6".parse().unwrap()));
+    }
+
+    #[test]
+    fn effective_asset_cap_defaults_and_clamps() {
+        assert_eq!(effective_asset_cap(None), DEFAULT_MAX_ASSETS);
+        assert_eq!(effective_asset_cap(Some(128)), 128);
+        assert_eq!(effective_asset_cap(Some(99_999)), MAX_DEVICES);
+        assert_eq!(effective_asset_cap(Some(0)), 1);
+    }
+
+    #[test]
+    fn schema_2_loads_with_empty_registry_and_upgrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        // A schema-2 ledger as v0.2.1 wrote it: sealed/target_devices, no registry.
+        let legacy = r#"{"schema":2,"created_unix":100,"seed":4660,"cycle":0,
+            "subnets":[],"devices":[],"promoted":[],"last_threat_unix":null,
+            "sealed":true,"target_devices":64}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = Session::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.schema, SCHEMA, "schema upgraded to 3 on load");
+        assert!(loaded.capture_hosts.is_empty(), "registry defaults empty");
+        assert_eq!(loaded.registry_generation, 0);
+        assert_eq!(loaded.max_assets, 0, "legacy max_assets defaults to 0");
+        assert!(loaded.sealed);
         assert_eq!(loaded.target_devices, 64);
     }
 }

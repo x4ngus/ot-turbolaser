@@ -34,9 +34,9 @@ reload pool="/opt/replay/pcaps/pool" variants="/opt/replay/pcaps/variants" n="8"
 up:
     turbolaser up
 
-# Show daemon status.
-status:
-    turbolaser status
+# Show the live fire-control readout (pew pew). `status` is a deprecated alias.
+pewpew:
+    turbolaser pewpew
 
 # Take the appliance down (stop + disable; the unit tears down the mirror).
 down:
