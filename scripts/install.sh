@@ -46,16 +46,35 @@ fi
 
 ln -sf "$PREFIX/bin/turbolaser" /usr/local/bin/turbolaser
 
+RESTARTED=0
 if [[ -d /etc/systemd/system ]]; then
     install -m 0644 systemd/ot-turbolaser.service /etc/systemd/system/ot-turbolaser.service
     systemctl daemon-reload || true
+    # On an upgrade of a running appliance, roll the daemon onto the freshly
+    # installed binary so the operator never has to restart by hand. A stale
+    # running binary (a plain start, not restart, after an upgrade) was a
+    # recurring deploy trap. A fresh install is left stopped: configure first,
+    # then fire.
+    if systemctl is-active --quiet ot-turbolaser; then
+        systemctl restart ot-turbolaser
+        RESTARTED=1
+    fi
 fi
 
-cat <<EOF
-installed to $PREFIX
+VERSION="$("$PREFIX/bin/turbolaser" --version 2>/dev/null || echo unknown)"
+if [[ "$RESTARTED" == 1 ]]; then
+    cat <<EOF
+upgraded $PREFIX -> $VERSION
+the running service was restarted onto the new binary.
+verify:  turbolaser pewpew
+EOF
+else
+    cat <<EOF
+installed to $PREFIX ($VERSION)
 next:
   1. edit $PREFIX/conf/replay.yaml (iface, net.sensor_port, mode)
   2. drop captures into $PREFIX/pcaps/pool
      and forge variants:  turbolaser reload --in <pcap> --out-dir $PREFIX/pcaps/variants --count 16
-  3. bring it up:  turbolaser up   (or: systemctl enable --now ot-turbolaser)
+  3. bring it up:  turbolaser fire   (or: systemctl enable --now ot-turbolaser)
 EOF
+fi

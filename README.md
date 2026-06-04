@@ -122,6 +122,12 @@ Without `just`, the steps are `scripts/bootstrap.sh`,
 `turbolaser reload --in <pcap> --out-dir <variants> --count 16`,
 `turbolaser plan --commit`, `turbolaser fire`, and `turbolaser pewpew`.
 
+To roll out a new version later, run `just deploy` (or
+`cargo build --release && sudo scripts/install.sh`). It builds, installs the
+binary to the service's own path, and restarts a running service onto the new
+binary in one step, so an upgrade never depends on remembering to reinstall to
+the right path or restart by hand.
+
 For a Proxmox deployment, see the [Proxmox guide](docs/proxmox.md).
 
 ## Commands
