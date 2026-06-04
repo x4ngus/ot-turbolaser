@@ -244,3 +244,128 @@ fn remap_into_session_caches_and_reuses() {
         "cache was reused, not rewritten"
     );
 }
+
+/// Build a tiny capture of `n` distinct src hosts in 192.168.{base}.0/24 all
+/// talking to one peer, written to `pool/<name>`.
+fn write_capture(pool: &Path, name: &str, base: u8, hosts: u8) -> std::path::PathBuf {
+    let mut packets = Vec::new();
+    for i in 1..=hosts {
+        let frame = eth::udp_frame(
+            [0x00, 0x00, 0xBC, 1, 2, i],
+            [0x00, 0x00, 0xBC, 9, 9, 9],
+            Ipv4Addr::new(192, 168, base, i),
+            Ipv4Addr::new(192, 168, base, 200),
+            50000,
+            44818,
+            b"x",
+        );
+        packets.push(OwnedPacket {
+            ts: Duration::new(1, 0),
+            orig_len: frame.len() as u32,
+            data: frame,
+        });
+    }
+    let cap = Capture {
+        header: PcapHeader::default(),
+        packets,
+    };
+    let p = pool.join(name);
+    pcapio::write(&p, &cap).unwrap();
+    p
+}
+
+#[test]
+fn reconcile_caps_assets_and_never_leaves_original_addresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    // Small fleet and a small total asset cap so the capture overflows it.
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 4\n  max_assets: 8",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0); // fabricate the small fleet and its zones
+
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = write_capture(&pool, "many.pcap", 50, 30); // 31 distinct hosts
+
+    let out = engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    let remapped = pcapio::read(&out).unwrap();
+    assert!(!remapped.packets.is_empty(), "frames survive the remap");
+    // Every address is inside a fabricated 10/8 zone; no original 192.168 leaks.
+    for p in &remapped.packets {
+        let s = [p.data[26], p.data[27], p.data[28], p.data[29]];
+        let d = [p.data[30], p.data[31], p.data[32], p.data[33]];
+        assert_eq!(s[0], 10, "src remapped into a fabricated zone: {s:?}");
+        assert_eq!(d[0], 10, "dst remapped into a fabricated zone: {d:?}");
+    }
+    // The total wire-asset count never exceeds the plan cap.
+    assert!(
+        engine.ledger().total_wire_assets() <= 8,
+        "total assets capped at the plan: {}",
+        engine.ledger().total_wire_assets()
+    );
+    assert!(
+        engine.ledger().capture_host_count() > 0,
+        "some capture hosts were registered"
+    );
+    // The registry persisted to disk.
+    let persisted = Session::load(&session).unwrap().unwrap();
+    assert_eq!(
+        persisted.capture_host_count(),
+        engine.ledger().capture_host_count()
+    );
+}
+
+#[test]
+fn reconcile_registers_same_origins_regardless_of_capture_order() {
+    let run = |swap: bool| -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let shm = dir.path().join("shm");
+        let session = dir.path().join("session.json");
+        let yaml = cfg_yaml(
+            dir.path(),
+            &shm,
+            &session,
+            "  identity_every_n_runs: 1\n  max_assets: 128",
+        );
+        let cfg_path = dir.path().join("replay.yaml");
+        std::fs::write(&cfg_path, yaml).unwrap();
+        let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+        let mut engine = SimulatorEngine::red(&cfg, 0);
+        engine.red_tick(0);
+        let pool = dir.path().join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        let a = write_capture(&pool, "a.pcap", 10, 3);
+        let b = write_capture(&pool, "b.pcap", 20, 3);
+        let (first, second) = if swap { (&b, &a) } else { (&a, &b) };
+        engine.remap_into_session(&cfg, first, &[]).unwrap();
+        engine.remap_into_session(&cfg, second, &[]).unwrap();
+        let mut origins: Vec<String> = engine
+            .ledger()
+            .capture_hosts
+            .iter()
+            .map(|h| h.origin_ip.clone())
+            .collect();
+        origins.sort();
+        origins
+    };
+    let normal = run(false);
+    assert_eq!(
+        normal,
+        run(true),
+        "the same origins register regardless of capture order"
+    );
+    assert!(
+        !normal.is_empty(),
+        "distinct hosts register under a generous cap"
+    );
+}

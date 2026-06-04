@@ -31,7 +31,10 @@ pub enum Command {
     Up(NetArgs),
     /// Stop and disable the appliance service (the unit tears down the mirror).
     Down(NetArgs),
-    /// Print the daemon status from the heartbeat file.
+    /// Print the live fire-control readout from the heartbeat file (pew pew).
+    Pewpew(StatusArgs),
+    /// Deprecated alias for `pewpew`, kept for one release.
+    #[command(hide = true)]
     Status(StatusArgs),
     /// Validate a config file without replaying.
     Check(CheckArgs),

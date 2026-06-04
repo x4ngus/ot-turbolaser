@@ -24,6 +24,8 @@ paths:
 # subnet structure intact while moving everything to fresh random subnets.
 l3:
   remap: true
+  remap_mac: true         # rewrite Ethernet/ARP MACs alongside IPs so each host
+                          # has one coherent MAC<->IP identity the sensor fuses
   fallback: none          # deprecated/no-op: a capture that cannot be remapped
                           # is skipped, never replayed with its original addresses
   subnets: []             # optional CIDR hints, e.g. ["192.168.10.0/24"]
@@ -94,6 +96,10 @@ no_pcaps_retry_secs: 30
 #                            # session saturates; sealed plans never cycle
 #   target_devices: 64       # fleet size `plan --commit` fabricates and seals
 #   max_devices: 2000        # hard cap, clamped to 2000
+#   max_assets: 512          # total wire assets (fabricated + capture-derived):
+#                            # replayed capture hosts fill spare zone capacity up
+#                            # to this, surplus rides existing assets, so the
+#                            # sensor's asset count stays bounded and == the plan
 #
 # threats:                   # external-threat host promotion (red laser only)
 #   enabled: true

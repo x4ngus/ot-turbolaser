@@ -12,7 +12,7 @@ use super::{OtMutator, Protocol};
 pub fn all() -> Vec<Box<dyn OtMutator>> {
     vec![
         Box::new(modbus::Modbus),
-        Box::new(enip::Enip),
+        Box::new(enip::Enip::new()),
         Box::new(s7comm::S7),
         Box::new(dnp3::Dnp3),
     ]

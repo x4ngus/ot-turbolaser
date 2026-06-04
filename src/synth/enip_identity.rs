@@ -127,7 +127,7 @@ mod tests {
         let f = ParsedFrame::parse(&mut reply).unwrap();
         // The reload ENIP reader recognises our reply as a List Identity.
         assert!(
-            Enip.matches(&f),
+            Enip::default().matches(&f),
             "reader must recognise the synthesized reply"
         );
         // And the vendor id we wrote is at the offset the reader reads.

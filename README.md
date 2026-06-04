@@ -81,8 +81,8 @@ run:
 - `turbolaser zones` shows the current map (green derives it from the captures;
   red reads the ledger).
 - `turbolaser reset` clears the ledger for a fresh plant.
-- `turbolaser status` reports the zone list, the device count against the cap, and
-  the last threat injection.
+- `turbolaser pewpew` reports the wire footprint against the plan, the zone list,
+  throughput, and the last threat injection (`status` is a deprecated alias).
 
 Pin `session.seed` in the config so plan and run agree. The plant, CVE profiles,
 external ranges, and zone affinity are all configurable; see the comments in
@@ -113,15 +113,14 @@ Then bring it online:
 
 ```
 just up               # set up the isolated bridge and mirror, start the service
-just status
+just pewpew
 ```
 
 Without `just`, the steps are `scripts/bootstrap.sh`,
 `turbolaser reload --in <pcap> --out-dir <variants> --count 16`,
-`turbolaser plan --commit`, `turbolaser up`, and `turbolaser status`.
+`turbolaser plan --commit`, `turbolaser up`, and `turbolaser pewpew`.
 
-For a Proxmox deployment, start with the
-[Proxmox quick start](docs/proxmox-quickstart.md).
+For a Proxmox deployment, see the [Proxmox guide](docs/proxmox.md).
 
 ## Sourcing captures
 
@@ -163,11 +162,10 @@ Two common layouts:
 
 ## Running in a Proxmox LXC
 
-For the short copy-and-paste path, see the
-[Proxmox quick start](docs/proxmox-quickstart.md). For the complete end-to-end
-walkthrough on a Dell R740, including CT template selection, host and guest
-network settings, and the host-side SPAN mirror, see
-[docs/proxmox-getting-started.md](docs/proxmox-getting-started.md).
+For the full walkthrough, see [docs/proxmox.md](docs/proxmox.md): a quick
+copy-and-paste path up front, then the complete end-to-end Dell R740 reference
+(CT template selection, host and guest network settings, and the host-side SPAN
+mirror).
 
 Use a privileged container (the daemon needs `CAP_NET_RAW` and `CAP_NET_ADMIN` for
 raw transmit and for `ip`/`tc`). Give the container two NICs on an isolated Linux
@@ -184,7 +182,7 @@ turbolaser reload --in /opt/replay/pcaps/pool/<cap>.pcap \
     --out-dir /opt/replay/pcaps/variants --count 16
 turbolaser plan --config /opt/replay/conf/replay.yaml --commit   # red laser: seal the plant
 turbolaser up
-turbolaser status
+turbolaser pewpew
 ```
 
 ## Verifying on the sensor

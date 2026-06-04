@@ -39,7 +39,7 @@ pub fn forge_round(src: &Capture, seed: u64, opts: &ReloadOptions) -> (Capture, 
     };
     let mut mapper = SeededMapper::from_seed(seed);
     let l3 = if opts.remap_l3 {
-        Some(l3::remap_capture(&mut cap, &opts.hints, seed))
+        Some(l3::remap_capture(&mut cap, &opts.hints, seed, true))
     } else {
         None
     };

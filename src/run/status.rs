@@ -12,17 +12,19 @@ pub struct Status {
     pub schema: u32,
     pub pid: u32,
     pub state: String,
-    /// Deprecated duplicate of `laser`, kept for one release. Carries the
-    /// canonical `red_laser`/`green_laser` value, not the old `variety`/`baseline`.
-    pub mode: String,
     pub laser: String,
     pub iface: String,
     pub run: u64,
     pub current_file: Option<String>,
     pub l3_seed: Option<u64>,
     pub rate_model: String,
+    /// Packets sent in the last completed run. Carried forward across iterations
+    /// so it is never null once a run has finished, even mid-replay or in a gap.
     pub last_run_packets: Option<u64>,
     pub total_tx_packets: Option<u64>,
+    /// Interface packets/sec between the last two heartbeats. None until two
+    /// samples exist or after a counter reset.
+    pub pps: Option<f64>,
     pub next_gap_secs: Option<f64>,
     pub last_error: Option<String>,
     // v0.2 zone and session exposure. Red laser fills these from the ledger;
@@ -31,6 +33,12 @@ pub struct Status {
     pub device_count: usize,
     pub device_cap: usize,
     pub subnet_cap: usize,
+    // v0.2.2 wire-footprint-vs-plan exposure (red laser).
+    pub capture_host_count: usize,
+    pub total_wire_assets: usize,
+    pub max_assets: usize,
+    pub target_devices: usize,
+    pub sealed: bool,
     pub cycle: u64,
     pub last_threat_unix: Option<u64>,
     pub zones: Vec<StatusZone>,

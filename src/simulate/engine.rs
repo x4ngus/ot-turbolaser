@@ -14,7 +14,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::config::{Config, OversizePolicy, ZoneAffinity};
-use crate::ledger::{self, DeviceRecord, Session};
+use crate::ledger::{self, CaptureHostRecord, DeviceRecord, Session};
 use crate::oui::OuiDb;
 use crate::pcapio::{self, Capture};
 use crate::proto::frame::{parse_layout, L3Kind, L4Kind};
@@ -121,17 +121,21 @@ impl SimulatorEngine {
         self.ledger.seed
     }
 
-    /// Remap a capture's hosts into the fabricated ledger zones (vendor/protocol
-    /// affinity, stable across runs via the session seed) and return the
-    /// remapped pcap path. With no fabricated zones yet it falls back to the
-    /// legacy random RFC1918 remap, still seeded on the session seed so
-    /// addresses no longer churn per run.
+    /// Remap a capture's hosts into the fabricated ledger zones and return the
+    /// remapped pcap path. Capture hosts are reconciled into the plan: a known
+    /// host reuses its stable asset, a new host fills spare zone capacity as a
+    /// registered asset while the total stays under the asset cap, and surplus
+    /// hosts ride existing fabricated devices, so the wire never exceeds the plan
+    /// and never carries an un-remapped address. With no fabricated zones yet it
+    /// falls back to the legacy seeded random remap.
     ///
-    /// The result is cached: the remap is deterministic for a given (capture,
-    /// session seed, affinity), so a repeated pick of the same capture reuses
-    /// the cached pcap with no re-read or recompute. The cache is byte-bounded.
+    /// The result is cached, keyed on the capture, session seed, affinity, and
+    /// the registry generation, so a repeat of the same capture reuses the cached
+    /// pcap once the registry has stabilised; while the registry is still filling
+    /// the generation changes and the remap is recomputed. The cache is
+    /// byte-bounded.
     pub fn remap_into_session(
-        &self,
+        &mut self,
         cfg: &Config,
         src: &Path,
         hints: &[Ipv4Net],
@@ -162,7 +166,8 @@ impl SimulatorEngine {
         let stem = src
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("capture");
+            .unwrap_or("capture")
+            .to_string();
         let mtime = meta
             .modified()
             .ok()
@@ -175,11 +180,15 @@ impl SimulatorEngine {
             ZoneAffinity::Protocol => 'p',
             ZoneAffinity::Off => 'o',
         };
-        let out = cache_dir.join(format!(
-            "{:016x}.{aff}.{mtime}.{size}.{stem}.pcap",
-            self.ledger.seed
-        ));
-        // Cache hit: identical (capture, seed, affinity) already remapped.
+        let seed = self.ledger.seed;
+        let cache_path = |generation: u64| {
+            cache_dir.join(format!(
+                "{seed:016x}.g{generation}.{aff}.{mtime}.{size}.{stem}.pcap"
+            ))
+        };
+        // Cache hit at the current generation: identical (capture, seed,
+        // affinity, registry) already remapped.
+        let out = cache_path(self.ledger.registry_generation);
         if out.is_file() {
             return Ok(out);
         }
@@ -187,22 +196,77 @@ impl SimulatorEngine {
         let mut cap = pcapio::read(src)?;
         let zones = self.zone_targets();
         if zones.is_empty() {
-            l3::remap_capture(&mut cap, hints, self.ledger.seed);
+            // No fabricated zones yet (first run, before fabrication): the legacy
+            // seeded random remap, still safe (it drops any unsafe frame).
+            l3::remap_capture(&mut cap, hints, seed, cfg.l3.remap_mac);
         } else {
             let groups = self.capture_groups(&cap, hints);
-            l3::remap_capture_into_zones(
+            let cap_assets = ledger::effective_asset_cap(cfg.synthesis.max_assets);
+            let registered = self.registered_origins();
+            let device_macs = self.device_mac_map();
+            let budget = cap_assets.saturating_sub(self.ledger.total_wire_assets());
+            let (_summary, new_assets) = l3::reconcile_capture_into_zones(
                 &mut cap,
                 &groups,
                 &zones,
                 cfg.l3.zone_affinity,
-                self.ledger.seed,
+                seed,
+                cfg.l3.remap_mac,
+                &registered,
+                &device_macs,
+                budget,
             );
+            for a in new_assets {
+                let rec = CaptureHostRecord {
+                    origin_ip: a.origin.to_string(),
+                    ip: a.ip.to_string(),
+                    mac: fmt_mac(a.mac),
+                    vendor: a.vendor,
+                    protocol: a.protocol,
+                    purdue_level: a.purdue_level,
+                    subnet_cidr: a.subnet_cidr,
+                };
+                if self.ledger.register_capture_host(rec, cap_assets) {
+                    self.dirty = true;
+                }
+            }
+            self.persist_if_dirty();
         }
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("mkdir {}: {e}", cache_dir.display()))?;
+        // Write under the (possibly advanced) generation so the next identical
+        // pick reuses this file once the registry has settled.
+        let out = cache_path(self.ledger.registry_generation);
         pcapio::write(&out, &cap)?;
         evict_remap_cache(&cache_dir, &out);
         Ok(out)
+    }
+
+    /// Origin IP (u32) -> assigned in-zone IP (u32) for every registered capture
+    /// host: the lookup that keeps a host on the same asset every run.
+    fn registered_origins(&self) -> HashMap<u32, u32> {
+        self.ledger
+            .capture_hosts
+            .iter()
+            .filter_map(|h| {
+                let o = h.origin_ip.parse::<Ipv4Addr>().ok()?;
+                let n = h.ip.parse::<Ipv4Addr>().ok()?;
+                Some((u32::from(o), u32::from(n)))
+            })
+            .collect()
+    }
+
+    /// Fabricated device IP (u32) -> its real vendor MAC, so a surplus capture
+    /// host that rides a device carries that device's MAC, not a stable LAA MAC.
+    fn device_mac_map(&self) -> HashMap<u32, [u8; 6]> {
+        self.ledger
+            .devices
+            .iter()
+            .filter_map(|d| {
+                let ip = d.ip.parse::<Ipv4Addr>().ok()?;
+                Some((u32::from(ip), parse_mac(&d.mac)))
+            })
+            .collect()
     }
 
     /// Per-zone remap targets from the ledger: each zone's CIDR, vendor, level,
@@ -340,7 +404,16 @@ impl SimulatorEngine {
         if !self.threats_enabled || !self.scheduler.due(now) {
             return None;
         }
-        let mut cap = pcapio::read(file).ok()?;
+        let mut cap = match pcapio::read(file) {
+            Ok(c) => c,
+            Err(e) => {
+                // Reschedule even on a read failure, so a persistently unreadable
+                // candidate does not retry every iteration once the timer is due.
+                self.scheduler.reschedule(now, &mut self.sim_rng);
+                log::warn!("threat promotion: could not read {}: {e}", file.display());
+                return None;
+            }
+        };
         let record = threat::promote_host(
             &mut cap,
             &self.external_cidrs,
@@ -374,7 +447,9 @@ impl SimulatorEngine {
         Some(out)
     }
 
-    /// Render a rotating window of devices as protocol-assertion frames.
+    /// Render a rotating window of devices as protocol-assertion frames, plus a
+    /// gratuitous ARP per capture-derived asset so the sensor binds each one's
+    /// MAC and IP even between replays of its source capture.
     fn build_assertions(&mut self) -> Vec<Vec<u8>> {
         let n = self.ledger.devices.len();
         if n == 0 || !self.device_identity {
@@ -405,6 +480,13 @@ impl SimulatorEngine {
         for model in missing {
             if self.warned_models.insert(model.clone()) {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
+            }
+        }
+        // Bind each capture-derived asset's MAC and IP with a gratuitous ARP, so
+        // the sensor fuses it into one asset even between replays of its capture.
+        for h in &self.ledger.capture_hosts {
+            if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+                frames.push(arp::gratuitous(parse_mac(&h.mac), ip));
             }
         }
         self.announce_cursor = (start + count) % n;
@@ -566,6 +648,13 @@ fn parse_mac(s: &str) -> [u8; 6] {
         m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
     }
     m
+}
+
+fn fmt_mac(m: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        m[0], m[1], m[2], m[3], m[4], m[5]
+    )
 }
 
 /// First two integer groups of a firmware string as a major/minor pair.

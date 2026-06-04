@@ -128,6 +128,7 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
     let mut s = Session::new(seed, now_unix());
     let added = devices::fabricate(&mut s, &vuln, &params, target, &mut rng);
     s.target_devices = target;
+    s.max_assets = ledger::effective_asset_cap(cfg.synthesis.max_assets);
 
     // --commit persists this fabricated session as the authoritative ledger the
     // daemon replays verbatim. A bare `plan` only previews.
@@ -273,7 +274,9 @@ fn render_green(zones: &[zones::Zone], json: bool) {
 }
 
 fn render_session(s: &Session, json: bool) {
-    let count = |cidr: &str| s.devices.iter().filter(|d| d.subnet_cidr == cidr).count();
+    // One O(devices) pass for per-zone counts, not a re-scan per zone.
+    let counts = s.device_counts_by_subnet();
+    let count = |cidr: &str| counts.get(cidr).copied().unwrap_or(0);
     if json {
         let arr: Vec<_> = s
             .subnets

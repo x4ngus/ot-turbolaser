@@ -33,7 +33,11 @@ fn addresses(ip: Ipv4Addr) -> Vec<u8> {
     v
 }
 
-/// Internet checksum over the CDP message, used in the CDP header.
+/// CDP checksum over the CDP message. Like the internet checksum, but with
+/// Cisco's odd-length quirk: a trailing odd byte whose high bit is set is
+/// sign-extended (added as 0xFF00 | byte) rather than left-shifted, matching
+/// what a strict CDP dissector validates. For ASCII trailing bytes the two
+/// agree.
 fn checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     let mut i = 0;
@@ -42,7 +46,12 @@ fn checksum(data: &[u8]) -> u16 {
         i += 2;
     }
     if i < data.len() {
-        sum += (data[i] as u32) << 8;
+        let b = data[i];
+        if (b as i8) < 0 {
+            sum += 0xFF00 | b as u32; // sign-extend a negative trailing byte
+        } else {
+            sum += (b as u32) << 8;
+        }
     }
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
