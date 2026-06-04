@@ -510,6 +510,22 @@ pub struct NewCaptureAsset {
     pub subnet_cidr: String,
 }
 
+/// The fabricated world and remap policy a reconciliation runs against, bundled
+/// so the call site stays legible. `zones` are the fabricated ledger zones to
+/// place into; `registered` maps an already-known origin IP to its stable asset
+/// IP so it reuses that asset; `device_macs` overrides the MAC for a host that
+/// rides a fabricated device; `budget` is how many new assets may still be
+/// registered before the total wire-asset cap.
+pub struct ReconcileCtx<'a> {
+    pub zones: &'a [ZoneTarget],
+    pub affinity: ZoneAffinity,
+    pub seed: u64,
+    pub remap_mac: bool,
+    pub registered: &'a HashMap<u32, u32>,
+    pub device_macs: &'a HashMap<u32, [u8; 6]>,
+    pub budget: usize,
+}
+
 /// Reconcile a capture's hosts into the fabricated zones under a fixed total
 /// asset budget (fill-then-map), in deterministic host order. A host whose origin
 /// IP is already registered reuses its stable asset. Otherwise, while the budget
@@ -517,22 +533,22 @@ pub struct NewCaptureAsset {
 /// offset-preserving IP and stable MAC); once the budget is spent it rides an
 /// existing fabricated device (that device's IP and real vendor MAC). So the wire
 /// never grows past the plan and never carries an un-remapped address. Applies
-/// the remap (with `device_macs` overriding the MAC for hosts that ride a
+/// the remap (with `ctx.device_macs` overriding the MAC for hosts that ride a
 /// fabricated device) and drops any unsafe frame. Returns the summary and the new
 /// assets the caller must register. Deterministic for a given (capture, zones,
 /// seed, registry).
-#[allow(clippy::too_many_arguments)]
 pub fn reconcile_capture_into_zones(
     cap: &mut Capture,
     groups: &[CaptureGroup],
-    zones: &[ZoneTarget],
-    affinity: ZoneAffinity,
-    seed: u64,
-    remap_mac: bool,
-    registered: &HashMap<u32, u32>,
-    device_macs: &HashMap<u32, [u8; 6]>,
-    mut budget: usize,
+    ctx: &ReconcileCtx,
 ) -> (RemapSummary, Vec<NewCaptureAsset>) {
+    let zones = ctx.zones;
+    let affinity = ctx.affinity;
+    let seed = ctx.seed;
+    let remap_mac = ctx.remap_mac;
+    let registered = ctx.registered;
+    let device_macs = ctx.device_macs;
+    let mut budget = ctx.budget;
     if zones.is_empty() {
         return (
             RemapSummary {
@@ -900,6 +916,26 @@ mod tests {
         }
     }
 
+    /// A reconciliation context with the test defaults (affinity Both, MAC remap
+    /// on); the call sites vary only zones, registry, device MACs, seed, budget.
+    fn rctx<'a>(
+        zones: &'a [ZoneTarget],
+        registered: &'a HashMap<u32, u32>,
+        device_macs: &'a HashMap<u32, [u8; 6]>,
+        seed: u64,
+        budget: usize,
+    ) -> ReconcileCtx<'a> {
+        ReconcileCtx {
+            zones,
+            affinity: ZoneAffinity::Both,
+            seed,
+            remap_mac: true,
+            registered,
+            device_macs,
+            budget,
+        }
+    }
+
     #[test]
     fn reconcile_places_by_vendor_preserves_convo_and_is_stable() {
         let mk = || {
@@ -929,17 +965,8 @@ mod tests {
         let macs = HashMap::new();
 
         let mut a = mk();
-        let (sum, new_assets) = reconcile_capture_into_zones(
-            &mut a,
-            &groups,
-            &zones,
-            ZoneAffinity::Both,
-            0x1234,
-            true,
-            &reg,
-            &macs,
-            100,
-        );
+        let (sum, new_assets) =
+            reconcile_capture_into_zones(&mut a, &groups, &rctx(&zones, &reg, &macs, 0x1234, 100));
         assert_eq!(sum.host_count, 2);
         assert_eq!(new_assets.len(), 2, "two hosts registered as new assets");
 
@@ -953,17 +980,7 @@ mod tests {
 
         // Deterministic across runs with the same seed and registry.
         let mut b = mk();
-        reconcile_capture_into_zones(
-            &mut b,
-            &groups,
-            &zones,
-            ZoneAffinity::Both,
-            0x1234,
-            true,
-            &reg,
-            &macs,
-            100,
-        );
+        reconcile_capture_into_zones(&mut b, &groups, &rctx(&zones, &reg, &macs, 0x1234, 100));
         assert_eq!(
             a.packets[0].data, b.packets[0].data,
             "stable per (capture, seed)"
@@ -985,17 +1002,8 @@ mod tests {
             &["192.168.1.5", "192.168.1.6"],
         )];
         let zones = vec![zt("10.70.0.0/24", Some("ACME"), 1, None, &["10.70.0.5"])];
-        reconcile_capture_into_zones(
-            &mut cap,
-            &groups,
-            &zones,
-            ZoneAffinity::Both,
-            7,
-            true,
-            &HashMap::new(),
-            &HashMap::new(),
-            100,
-        );
+        let (reg, macs) = (HashMap::new(), HashMap::new());
+        reconcile_capture_into_zones(&mut cap, &groups, &rctx(&zones, &reg, &macs, 7, 100));
         let (s0, d0) = addrs(&cap.packets[0].data);
         assert_eq!(s0[..3], [10, 70, 0]);
         assert_ne!(s0, [10, 70, 0, 5], "reserved device IP not reused");
@@ -1029,17 +1037,8 @@ mod tests {
                 &[],
             ),
         ];
-        reconcile_capture_into_zones(
-            &mut cap,
-            &groups,
-            &zones,
-            ZoneAffinity::Both,
-            99,
-            true,
-            &HashMap::new(),
-            &HashMap::new(),
-            100,
-        );
+        let (reg, macs) = (HashMap::new(), HashMap::new());
+        reconcile_capture_into_zones(&mut cap, &groups, &rctx(&zones, &reg, &macs, 99, 100));
         let (s0, _d0) = addrs(&cap.packets[0].data);
         assert_eq!(
             s0[..3],
@@ -1065,17 +1064,9 @@ mod tests {
         let mut macs = HashMap::new();
         macs.insert(dev_ip, dev_mac);
         // Budget 0: no new assets; surplus hosts ride the device.
-        let (_sum, new_assets) = reconcile_capture_into_zones(
-            &mut cap,
-            &groups,
-            &zones,
-            ZoneAffinity::Both,
-            7,
-            true,
-            &HashMap::new(),
-            &macs,
-            0,
-        );
+        let reg = HashMap::new();
+        let (_sum, new_assets) =
+            reconcile_capture_into_zones(&mut cap, &groups, &rctx(&zones, &reg, &macs, 7, 0));
         assert!(
             new_assets.is_empty(),
             "no new assets when the budget is zero"
@@ -1110,17 +1101,9 @@ mod tests {
             u32::from(Ipv4Addr::new(192, 168, 1, 5)),
             u32::from(Ipv4Addr::new(10, 70, 0, 50)),
         );
-        let (_sum, new_assets) = reconcile_capture_into_zones(
-            &mut cap,
-            &groups,
-            &zones,
-            ZoneAffinity::Both,
-            7,
-            true,
-            &reg,
-            &HashMap::new(),
-            100,
-        );
+        let macs = HashMap::new();
+        let (_sum, new_assets) =
+            reconcile_capture_into_zones(&mut cap, &groups, &rctx(&zones, &reg, &macs, 7, 100));
         let (s0, _d0) = addrs(&cap.packets[0].data);
         assert_eq!(
             s0,

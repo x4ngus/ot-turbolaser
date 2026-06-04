@@ -1,8 +1,10 @@
 //! Command line surface for the turbolaser binary.
 //!
-//! The gun metaphor maps onto the subcommands. `run` fires packets at the
-//! sensor. `reload` hand-loads the rounds, the variant pcaps, ahead of time.
-//! `up`, `down`, and `status` operate the appliance.
+//! The fire-control metaphor maps onto the subcommands. `fire` (alias `up`)
+//! brings the appliance online and `halt` (alias `down`) stands it down; in
+//! between, the systemd unit runs `run`, the replay daemon loop. `reload`
+//! hand-loads the rounds, the variant pcaps, ahead of time, and `pewpew` prints
+//! the live fire-control readout.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -23,13 +25,18 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run the replay daemon loop (fire).
+    /// Run the replay daemon loop. The systemd unit invokes this; operators use
+    /// `fire` and `halt`.
     Run(RunArgs),
     /// Forge variant pcaps from a source capture (reload the magazine).
     Reload(ReloadArgs),
-    /// Enable and start the appliance service (the unit sets up the mirror).
+    /// Bring the appliance online: enable and start the service, which sets up
+    /// the mirror. Alias: fire.
+    #[command(visible_alias = "fire")]
     Up(NetArgs),
-    /// Stop and disable the appliance service (the unit tears down the mirror).
+    /// Take the appliance offline: stop and disable the service, which tears down
+    /// the mirror. Alias: halt.
+    #[command(visible_alias = "halt")]
     Down(NetArgs),
     /// Print the live fire-control readout from the heartbeat file (pew pew).
     Pewpew(StatusArgs),

@@ -209,7 +209,7 @@ mode (the exact step is sensor-specific).
 ## 8. Open fire and confirm hits
 
 ```
-turbolaser up
+turbolaser fire          # alias for `turbolaser up`; `halt` (or `down`) stands down
 turbolaser pewpew
 journalctl -u ot-turbolaser -f
 ```

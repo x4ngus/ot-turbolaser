@@ -164,8 +164,18 @@ impl SimulatorEngine {
                 "capture is {size} bytes, over the {MAX_SHM_BYTES} byte tmpfs budget (on_oversize=skip)"
             ));
         }
-        // Oversize captures spill to a disk dir beside the source so the tmpfs
-        // budget is never exceeded; normal captures cache on tmpfs.
+        // Remap cache layering, in one place so the moving parts are legible:
+        //   1. location: tmpfs (`remap-cache`) normally, or a disk-spill dir
+        //      beside the source for oversize captures, so the tmpfs budget holds.
+        //   2. filename key: cache-format version + session seed + affinity +
+        //      source mtime/size/stem + registry generation. A hit means the same
+        //      capture, plan, and registry already produced this exact remap.
+        //   3. registry generation bumps while the asset registry is still
+        //      filling, so the remap recomputes until the plan stabilises, then
+        //      reuses; the version invalidates every entry on an upgrade.
+        //   4. size bound: an LRU eviction (oldest first, never the just-written
+        //      file) keeps each dir under its byte budget, driven by a running
+        //      estimate so a hit does not re-walk the directory.
         let cache_dir = if to_disk {
             src.parent()
                 .map(|d| d.join(".turbolaser-remap"))
@@ -215,17 +225,16 @@ impl SimulatorEngine {
             let registered = self.registered_origins();
             let device_macs = self.device_mac_map();
             let budget = cap_assets.saturating_sub(self.ledger.total_wire_assets());
-            let (_summary, new_assets) = l3::reconcile_capture_into_zones(
-                &mut cap,
-                &groups,
-                &zones,
-                cfg.l3.zone_affinity,
+            let ctx = l3::ReconcileCtx {
+                zones: &zones,
+                affinity: cfg.l3.zone_affinity,
                 seed,
-                cfg.l3.remap_mac,
-                &registered,
-                &device_macs,
+                remap_mac: cfg.l3.remap_mac,
+                registered: &registered,
+                device_macs: &device_macs,
                 budget,
-            );
+            };
+            let (_summary, new_assets) = l3::reconcile_capture_into_zones(&mut cap, &groups, &ctx);
             for a in new_assets {
                 let rec = CaptureHostRecord {
                     origin_ip: a.origin.to_string(),
