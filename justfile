@@ -7,10 +7,19 @@ set shell := ["bash", "-uc"]
 default:
     @just --list
 
-# Build release and install the binary, unit, and default config (needs sudo).
+# First-time install: build release and lay down the binary, unit, and default
+# config (needs sudo). Leaves the service stopped so you configure first.
 bootstrap:
     cargo build --release
     sudo scripts/install.sh
+
+# Roll out a new version in one step: build, install to the service's own path,
+# and (if the service is already running) restart it onto the new binary. This
+# is the upgrade path; no manual binary-copy or restart needed.
+deploy:
+    cargo build --release
+    sudo scripts/install.sh
+    turbolaser --version
 
 # Validate the installed config.
 check:

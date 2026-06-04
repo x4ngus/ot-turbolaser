@@ -94,8 +94,15 @@ cargo build --release
 
 `bootstrap.sh --build` installs the tcpreplay suite, iproute2, and the Rust
 toolchain; `--tests` adds tshark for `reload --validate`. `install.sh` puts the
-binary at `/opt/replay/bin/turbolaser`, links it onto PATH, installs the systemd
-unit, and creates the pcap folders.
+binary at `/opt/replay/bin/turbolaser` (the path the systemd unit runs), links it
+onto PATH, installs the systemd unit, and creates the pcap folders.
+
+To upgrade later, pull and run `cargo build --release && sudo scripts/install.sh`
+(or `just deploy`). The installer writes the new binary to that same
+`/opt/replay/bin/turbolaser` path and, if the service is already running,
+restarts it onto the new binary. Do not copy the binary to `/usr/local/bin` by
+hand: that path is a symlink to the service binary, and overwriting it leaves the
+running daemon on the old code.
 
 ## 4. Set the targeting solution (configure)
 
