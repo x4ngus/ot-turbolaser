@@ -61,6 +61,10 @@ pub struct SimulatorEngine {
     /// Models already warned about missing from the vuln DB, so the warning
     /// logs once rather than on every announce.
     warned_models: HashSet<String>,
+    /// Running size estimate per remap cache dir, so a cache miss only walks the
+    /// directory on first use or when the estimate crosses the budget, not every
+    /// time.
+    remap_cache_bytes: HashMap<PathBuf, u64>,
     dirty: bool,
 }
 
@@ -107,6 +111,7 @@ impl SimulatorEngine {
             sim_rng,
             announce_cursor: 0,
             warned_models: HashSet::new(),
+            remap_cache_bytes: HashMap::new(),
             dirty: false,
             ledger: session,
         }
@@ -238,7 +243,33 @@ impl SimulatorEngine {
         // pick reuses this file once the registry has settled.
         let out = cache_path(self.ledger.registry_generation);
         pcapio::write(&out, &cap)?;
-        evict_remap_cache(&cache_dir, &out);
+        // The tmpfs cache is bounded by the shm budget; the disk-spill dir can
+        // hold multi-gigabyte oversize remaps, so it gets its own larger bound
+        // (two max-size remaps) rather than the tmpfs budget.
+        let budget = if to_disk {
+            cfg.l3.max_remap_bytes.saturating_mul(2)
+        } else {
+            MAX_SHM_BYTES
+        };
+        // Only walk the cache dir on first use or when the running estimate
+        // crosses the budget; otherwise just add the byte count of what we wrote.
+        let written = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        let projected = match self.remap_cache_bytes.get(&cache_dir) {
+            Some(prev) => prev.saturating_add(written),
+            None => dir_total_bytes(&cache_dir),
+        };
+        let total = if projected > budget {
+            evict_remap_cache(&cache_dir, &out, budget)
+        } else {
+            projected
+        };
+        self.remap_cache_bytes.insert(cache_dir.clone(), total);
+        if to_disk {
+            log::info!(
+                "remap disk-spill cache {} now {total} bytes (budget {budget})",
+                cache_dir.display()
+            );
+        }
         Ok(out)
     }
 
@@ -685,40 +716,79 @@ fn client_addr(subnet_cidr: &str) -> Ipv4Addr {
         .unwrap_or(Ipv4Addr::new(10, 0, 0, 250))
 }
 
-/// Bound the remap cache: evict oldest entries until the directory's total size
-/// is within the tmpfs budget, never removing the entry just written.
-fn evict_remap_cache(dir: &Path, keep: &Path) {
+/// Total size in bytes of the regular files directly in `dir`. 0 if unreadable.
+fn dir_total_bytes(dir: &Path) -> u64 {
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
+        return 0;
     };
-    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
-    let mut total = 0u64;
-    for e in rd.flatten() {
-        let Ok(meta) = e.metadata() else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        total += meta.len();
-        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        entries.push((e.path(), meta.len(), mtime));
+    rd.flatten()
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Indices to evict, oldest first, to bring `total` within `budget`, never
+/// evicting `keep_idx`. Pure, so the policy is unit-tested without a filesystem.
+fn plan_evictions(
+    entries: &[(u64, std::time::SystemTime)],
+    total: u64,
+    budget: u64,
+    keep_idx: usize,
+) -> Vec<usize> {
+    if total <= budget {
+        return Vec::new();
     }
-    if total <= MAX_SHM_BYTES {
-        return;
-    }
-    entries.sort_by_key(|(_, _, mtime)| *mtime); // oldest first
-    for (path, sz, _) in entries {
-        if total <= MAX_SHM_BYTES {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| entries[i].1); // oldest first
+    let mut remaining = total;
+    let mut evict = Vec::new();
+    for i in order {
+        if remaining <= budget {
             break;
         }
-        if path == keep {
+        if i == keep_idx {
             continue;
         }
-        if std::fs::remove_file(&path).is_ok() {
-            total -= sz;
+        remaining -= entries[i].0;
+        evict.push(i);
+    }
+    evict
+}
+
+/// Bound a remap cache directory: evict oldest entries (never the one just
+/// written) until the total size is within `budget`. Returns the resulting
+/// total. Reads the directory once; the per-miss check that decides whether to
+/// call this at all is the engine's running size estimate.
+fn evict_remap_cache(dir: &Path, keep: &Path, budget: u64) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut meta: Vec<(u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    let mut keep_idx = usize::MAX;
+    for e in rd.flatten() {
+        let Ok(m) = e.metadata() else {
+            continue;
+        };
+        if !m.is_file() {
+            continue;
+        }
+        let path = e.path();
+        if path == keep {
+            keep_idx = paths.len();
+        }
+        total += m.len();
+        meta.push((m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
+        paths.push(path);
+    }
+    for i in plan_evictions(&meta, total, budget, keep_idx) {
+        if std::fs::remove_file(&paths[i]).is_ok() {
+            total -= meta[i].0;
         }
     }
+    total
 }
 
 /// Dominant OT protocol per capture host-group, voted from observed service
@@ -843,5 +913,22 @@ mod tests {
             3,
             "beacons off leaves arp + the snmp exchange"
         );
+    }
+
+    #[test]
+    fn plan_evictions_removes_oldest_until_within_budget_and_keeps_keep() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let at = |s| UNIX_EPOCH + Duration::from_secs(s);
+        // Four 10-byte files, ages 1..4 (index 0 oldest); keep is the oldest.
+        let entries = vec![(10, at(1)), (10, at(2)), (10, at(3)), (10, at(4))];
+        let evict = plan_evictions(&entries, 40, 25, 0);
+        // Drop oldest non-keep until <= 25: idx 1 then idx 2 (total 20).
+        assert_eq!(evict, vec![1, 2]);
+        assert!(
+            !evict.contains(&0),
+            "the just-written file is never evicted"
+        );
+        // Under budget evicts nothing.
+        assert!(plan_evictions(&entries, 20, 25, 0).is_empty());
     }
 }
