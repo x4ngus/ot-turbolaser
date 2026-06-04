@@ -30,14 +30,20 @@ reload pool="/opt/replay/pcaps/pool" variants="/opt/replay/pcaps/variants" n="8"
     done
     [[ $found -eq 1 ]] || echo "no captures in {{pool}}"
 
-# Bring the appliance up (enable + start; the unit sets up the mirror).
+# Bring the appliance online (enable + start; the unit sets up the mirror).
+# `just up` is an alias.
+fire:
+    turbolaser fire
 up:
-    turbolaser up
+    turbolaser fire
 
 # Show the live fire-control readout (pew pew). `status` is a deprecated alias.
 pewpew:
     turbolaser pewpew
 
-# Take the appliance down (stop + disable; the unit tears down the mirror).
+# Take the appliance offline (stop + disable; the unit tears down the mirror).
+# `just down` is an alias.
+halt:
+    turbolaser halt
 down:
-    turbolaser down
+    turbolaser halt

@@ -22,9 +22,11 @@ pub struct Status {
     /// so it is never null once a run has finished, even mid-replay or in a gap.
     pub last_run_packets: Option<u64>,
     pub total_tx_packets: Option<u64>,
-    /// Interface packets/sec between the last two heartbeats. None until two
-    /// samples exist or after a counter reset.
+    /// Achieved send rate of the last completed run, from tcpreplay's own stats
+    /// (sub-second accurate). Carried forward so a between-send heartbeat keeps
+    /// the last real rate rather than showing zero. None until a run reports one.
     pub pps: Option<f64>,
+    pub mbps: Option<f64>,
     pub next_gap_secs: Option<f64>,
     pub last_error: Option<String>,
     // v0.2 zone and session exposure. Red laser fills these from the ledger;

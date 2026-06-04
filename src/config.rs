@@ -111,6 +111,12 @@ pub struct L3Cfg {
     /// carries a public (non-RFC1918) source address. On by default.
     #[serde(default = "default_true")]
     pub guard_public_sources: bool,
+    /// Drop any frame whose on-wire length exceeds this before replay. An
+    /// oversized capture frame (a TSO/GSO segment captured before NIC
+    /// segmentation) otherwise makes tcpreplay abort the whole run with EMSGSIZE.
+    /// Default 1514 (standard Ethernet); raise to ~9014 only on a jumbo bridge.
+    #[serde(default = "default_max_frame_bytes")]
+    pub max_frame_bytes: usize,
 }
 
 impl Default for L3Cfg {
@@ -124,6 +130,7 @@ impl Default for L3Cfg {
             max_remap_bytes: default_max_remap_bytes(),
             on_oversize: OversizePolicy::default(),
             guard_public_sources: true,
+            max_frame_bytes: default_max_frame_bytes(),
         }
     }
 }
@@ -171,6 +178,12 @@ pub struct RateCfg {
     pub pps: Option<f64>,
     pub pps_multi: Option<u32>,
     pub mbps: Option<f64>,
+    /// Per-run fixed Mbps band. With `model: mbps`, when both bounds are set each
+    /// run draws one fixed rate uniformly in [mbps_min, mbps_max]: the wire holds
+    /// a steady rate within a run and fluctuates run to run, matching a busy
+    /// operational link. Takes precedence over a bare `mbps`.
+    pub mbps_min: Option<f64>,
+    pub mbps_max: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -190,8 +203,30 @@ impl RateCfg {
             RateModel::Original | RateModel::Topspeed => Ok(()),
             RateModel::Multiplier => require_positive("rate.multiplier", self.multiplier).map(drop),
             RateModel::Pps => require_positive("rate.pps", self.pps).map(drop),
-            RateModel::Mbps => require_positive("rate.mbps", self.mbps).map(drop),
+            RateModel::Mbps => match (self.mbps_min, self.mbps_max) {
+                (Some(lo), Some(hi)) => {
+                    require_positive("rate.mbps_min", Some(lo))?;
+                    require_positive("rate.mbps_max", Some(hi))?;
+                    if hi < lo {
+                        return Err("rate.mbps_max must be >= rate.mbps_min".into());
+                    }
+                    Ok(())
+                }
+                (None, None) => require_positive("rate.mbps", self.mbps).map(drop),
+                _ => Err("rate.mbps band needs both mbps_min and mbps_max".into()),
+            },
         }
+    }
+
+    /// The fixed Mbps value to use for a non-banded mbps config: the bare `mbps`,
+    /// or the band midpoint when only a band is set. Used by [`to_args`]; the run
+    /// loop instead samples the band per run via [`to_args_for_run`].
+    fn mbps_value(&self) -> f64 {
+        self.mbps
+            .unwrap_or_else(|| match (self.mbps_min, self.mbps_max) {
+                (Some(lo), Some(hi)) => (lo + hi) / 2.0,
+                _ => 0.0,
+            })
     }
 
     /// Build the tcpreplay rate flags. Call [`RateCfg::validate`] first; the
@@ -208,8 +243,22 @@ impl RateCfg {
                 }
                 v
             }
-            RateModel::Mbps => vec![format!("--mbps={}", self.mbps.unwrap())],
+            RateModel::Mbps => vec![format!("--mbps={}", self.mbps_value())],
         }
+    }
+
+    /// Rate flags for one run. For a banded mbps model each run draws its own
+    /// fixed rate in [mbps_min, mbps_max] (so the wire fluctuates run to run);
+    /// every other model is identical to [`to_args`] and consumes no entropy.
+    pub fn to_args_for_run(&self, rng: &mut impl rand::Rng) -> Vec<String> {
+        if self.model == RateModel::Mbps {
+            if let (Some(lo), Some(hi)) = (self.mbps_min, self.mbps_max) {
+                if hi >= lo {
+                    return vec![format!("--mbps={}", rng.gen_range(lo..=hi))];
+                }
+            }
+        }
+        self.to_args()
     }
 }
 
@@ -629,6 +678,11 @@ fn default_identity_every() -> u64 {
 fn default_target_devices() -> usize {
     64
 }
+fn default_max_frame_bytes() -> usize {
+    // Standard Ethernet: 14-byte header + 1500 MTU. Frames over this abort a
+    // tcpreplay run with EMSGSIZE, so they are dropped before replay.
+    1514
+}
 fn default_max_remap_bytes() -> u64 {
     2 * 1024 * 1024 * 1024
 }
@@ -665,6 +719,8 @@ mod tests {
             pps,
             pps_multi: None,
             mbps,
+            mbps_min: None,
+            mbps_max: None,
         }
     }
 
@@ -704,6 +760,32 @@ mod tests {
         assert!(rate(RateModel::Original, None, None, None)
             .validate()
             .is_ok());
+    }
+
+    #[test]
+    fn mbps_band_validates_and_samples_in_range() {
+        use rand::SeedableRng;
+        let mut banded = rate(RateModel::Mbps, None, None, None);
+        banded.mbps_min = Some(9.0);
+        banded.mbps_max = Some(11.0);
+        assert!(banded.validate().is_ok(), "a full band validates");
+        // A bare midpoint when no rng is sampled.
+        assert_eq!(banded.to_args(), vec!["--mbps=10"]);
+        // Every sampled run rate stays inside the band.
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1);
+        for _ in 0..256 {
+            let args = banded.to_args_for_run(&mut rng);
+            let v: f64 = args[0].strip_prefix("--mbps=").unwrap().parse().unwrap();
+            assert!((9.0..=11.0).contains(&v), "sampled rate {v} in band");
+        }
+        // Half a band is rejected; a non-mbps model never consumes entropy.
+        let mut half = rate(RateModel::Mbps, None, None, None);
+        half.mbps_min = Some(9.0);
+        assert!(half.validate().is_err(), "half a band is rejected");
+        assert_eq!(
+            rate(RateModel::Original, None, None, None).to_args_for_run(&mut rng),
+            Vec::<String>::new()
+        );
     }
 
     fn gap(dist: GapDist) -> GapCfg {

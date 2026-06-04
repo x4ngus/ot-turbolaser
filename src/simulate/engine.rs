@@ -36,6 +36,11 @@ const ANNOUNCE_WINDOW: usize = 256;
 const CLIENT_MAC: [u8; 6] = [0x00, 0x50, 0x56, 0x00, 0x00, 0x01];
 /// Skip the L3 remap for captures larger than this, to bound tmpfs use.
 const MAX_SHM_BYTES: u64 = 256 * 1024 * 1024;
+/// Remap cache format version, embedded in the cache filename. Bump it whenever
+/// the remap output changes so an upgrade invalidates every stale cached pcap
+/// rather than replaying old content under an unchanged key. v2: plan-coherence
+/// drop, canonical Ethernet header, and the over-MTU drop (v0.2.3).
+const REMAP_CACHE_VERSION: u32 = 2;
 
 pub struct SimulatorEngine {
     pub ledger: Session,
@@ -159,8 +164,18 @@ impl SimulatorEngine {
                 "capture is {size} bytes, over the {MAX_SHM_BYTES} byte tmpfs budget (on_oversize=skip)"
             ));
         }
-        // Oversize captures spill to a disk dir beside the source so the tmpfs
-        // budget is never exceeded; normal captures cache on tmpfs.
+        // Remap cache layering, in one place so the moving parts are legible:
+        //   1. location: tmpfs (`remap-cache`) normally, or a disk-spill dir
+        //      beside the source for oversize captures, so the tmpfs budget holds.
+        //   2. filename key: cache-format version + session seed + affinity +
+        //      source mtime/size/stem + registry generation. A hit means the same
+        //      capture, plan, and registry already produced this exact remap.
+        //   3. registry generation bumps while the asset registry is still
+        //      filling, so the remap recomputes until the plan stabilises, then
+        //      reuses; the version invalidates every entry on an upgrade.
+        //   4. size bound: an LRU eviction (oldest first, never the just-written
+        //      file) keeps each dir under its byte budget, driven by a running
+        //      estimate so a hit does not re-walk the directory.
         let cache_dir = if to_disk {
             src.parent()
                 .map(|d| d.join(".turbolaser-remap"))
@@ -188,7 +203,7 @@ impl SimulatorEngine {
         let seed = self.ledger.seed;
         let cache_path = |generation: u64| {
             cache_dir.join(format!(
-                "{seed:016x}.g{generation}.{aff}.{mtime}.{size}.{stem}.pcap"
+                "v{REMAP_CACHE_VERSION}.{seed:016x}.g{generation}.{aff}.{mtime}.{size}.{stem}.pcap"
             ))
         };
         // Cache hit at the current generation: identical (capture, seed,
@@ -210,17 +225,16 @@ impl SimulatorEngine {
             let registered = self.registered_origins();
             let device_macs = self.device_mac_map();
             let budget = cap_assets.saturating_sub(self.ledger.total_wire_assets());
-            let (_summary, new_assets) = l3::reconcile_capture_into_zones(
-                &mut cap,
-                &groups,
-                &zones,
-                cfg.l3.zone_affinity,
+            let ctx = l3::ReconcileCtx {
+                zones: &zones,
+                affinity: cfg.l3.zone_affinity,
                 seed,
-                cfg.l3.remap_mac,
-                &registered,
-                &device_macs,
+                remap_mac: cfg.l3.remap_mac,
+                registered: &registered,
+                device_macs: &device_macs,
                 budget,
-            );
+            };
+            let (_summary, new_assets) = l3::reconcile_capture_into_zones(&mut cap, &groups, &ctx);
             for a in new_assets {
                 let rec = CaptureHostRecord {
                     origin_ip: a.origin.to_string(),
@@ -236,6 +250,16 @@ impl SimulatorEngine {
                 }
             }
             self.persist_if_dirty();
+        }
+        // Drop frames over the link MTU so one oversized capture frame cannot
+        // abort the tcpreplay run (EMSGSIZE) and send zero packets.
+        let oversize = l3::drop_oversize_frames(&mut cap, cfg.l3.max_frame_bytes);
+        if oversize > 0 {
+            log::warn!(
+                "remap: dropped {oversize} frame(s) over {} bytes from {}",
+                cfg.l3.max_frame_bytes,
+                src.display()
+            );
         }
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("mkdir {}: {e}", cache_dir.display()))?;

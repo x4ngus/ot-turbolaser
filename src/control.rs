@@ -229,6 +229,12 @@ fn render_pewpew(v: &serde_json::Value, state: &str) {
             .map(|p| format!("{p:.0}"))
             .unwrap_or_else(|| "null".into())
     );
+    println!(
+        "    throughput    : {}",
+        f("mbps")
+            .map(|m| format!("{m:.1} Mbps"))
+            .unwrap_or_else(|| "null".into())
+    );
     if let Some(g) = f("next_gap_secs") {
         println!("    next gap      : {g:.1}s");
     }

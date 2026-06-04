@@ -62,10 +62,10 @@ pub fn run(args: &RunArgs) -> i32 {
     let started = now_unix();
     let mut run_counter: u64 = 0;
     // Carried across iterations: the last completed run's packet count (so the
-    // heartbeat is never null once a run finishes) and the previous tx sample
-    // (so pps can be derived from the delta).
+    // heartbeat is never null once a run finishes) and the tx-rate sampler (so
+    // pps reflects the last real send rate, not a zero sampled between sends).
     let mut last_packets: Option<u64> = None;
-    let mut prev_tx: Option<(u64, u64)> = None;
+    let mut pps_state = PpsState::new();
 
     // Red laser drives a persistent simulator (zones, devices, identity
     // assertions). Green laser only reads the OUI table to label derived zones.
@@ -86,7 +86,7 @@ pub fn run(args: &RunArgs) -> i32 {
 
     let mut s = base_status(&cfg, started, 0, last_packets);
     s.state = "starting".into();
-    write(&cfg, &mut s, &mut prev_tx);
+    write(&cfg, &mut s, &mut pps_state);
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -105,7 +105,7 @@ pub fn run(args: &RunArgs) -> i32 {
                 );
                 let mut s = base_status(&cfg, started, run_counter, last_packets);
                 s.state = "idle_no_pcaps".into();
-                write(&cfg, &mut s, &mut prev_tx);
+                write(&cfg, &mut s, &mut pps_state);
                 signal::interruptible_sleep(cfg.no_pcaps_retry_secs as f64, &shutdown);
                 continue;
             }
@@ -131,7 +131,7 @@ pub fn run(args: &RunArgs) -> i32 {
                         let mut s = base_status(&cfg, started, run_counter, last_packets);
                         s.state = "skipped_remap_failed".into();
                         s.last_error = Some(err);
-                        write(&cfg, &mut s, &mut prev_tx);
+                        write(&cfg, &mut s, &mut pps_state);
                         let secs = gap::sample_gap(&cfg.gap, &mut loop_rng);
                         signal::interruptible_sleep(secs, &shutdown);
                         run_counter += 1;
@@ -165,7 +165,7 @@ pub fn run(args: &RunArgs) -> i32 {
             );
             let mut s = base_status(&cfg, started, run_counter, last_packets);
             s.state = "skipped_public_source".into();
-            write(&cfg, &mut s, &mut prev_tx);
+            write(&cfg, &mut s, &mut pps_state);
             let secs = gap::sample_gap(&cfg.gap, &mut loop_rng);
             signal::interruptible_sleep(secs, &shutdown);
             run_counter += 1;
@@ -183,9 +183,13 @@ pub fn run(args: &RunArgs) -> i32 {
         s.current_file = Some(chosen.display().to_string());
         s.l3_seed = l3_seed_used;
         apply_sim_status(&mut s, &cfg, engine.as_ref(), &chosen, &oui, &hints);
-        write(&cfg, &mut s, &mut prev_tx);
+        write(&cfg, &mut s, &mut pps_state);
 
-        match replay::run_once(&cfg.iface, file_to_send, &cfg.rate.to_args(), &watchdog) {
+        // One fixed rate for this whole run (capture plus identity burst). A
+        // banded mbps model draws a fresh rate per run so the wire fluctuates.
+        let rate_args = cfg.rate.to_args_for_run(&mut loop_rng);
+
+        match replay::run_once(&cfg.iface, file_to_send, &rate_args, &watchdog) {
             Ok(res) if res.success => {
                 info!("run={run_counter} done: {}", res.detail);
                 // Carry the count forward only on a successful parse, so a parse
@@ -194,6 +198,9 @@ pub fn run(args: &RunArgs) -> i32 {
                     last_packets = res.packets;
                 }
                 s.last_run_packets = last_packets;
+                // Record the achieved rate from tcpreplay's own stats; the
+                // heartbeat reports it (held until the next run updates it).
+                pps_state.record(res.pps, res.mbps);
             }
             Ok(res) => {
                 error!("run={run_counter} tcpreplay failed: {}", res.detail);
@@ -215,7 +222,7 @@ pub fn run(args: &RunArgs) -> i32 {
         // a second short burst on the same wire, then refresh the heartbeat.
         if let Some(e) = engine.as_mut() {
             if let Some(p) = e.red_tick(run_counter) {
-                match replay::run_once(&cfg.iface, &p, &cfg.rate.to_args(), &watchdog) {
+                match replay::run_once(&cfg.iface, &p, &rate_args, &watchdog) {
                     Ok(res) if res.success => {
                         info!("run={run_counter} identities sent: {}", res.detail)
                     }
@@ -227,7 +234,7 @@ pub fn run(args: &RunArgs) -> i32 {
         }
         if engine.is_some() {
             apply_sim_status(&mut s, &cfg, engine.as_ref(), &chosen, &oui, &hints);
-            write(&cfg, &mut s, &mut prev_tx);
+            write(&cfg, &mut s, &mut pps_state);
         }
 
         if args.once {
@@ -238,7 +245,7 @@ pub fn run(args: &RunArgs) -> i32 {
         info!("run={run_counter} inter-run gap {secs:.3}s");
         s.state = "gap".into();
         s.next_gap_secs = Some(secs);
-        write(&cfg, &mut s, &mut prev_tx);
+        write(&cfg, &mut s, &mut pps_state);
         signal::interruptible_sleep(secs, &shutdown);
 
         run_counter += 1;
@@ -246,7 +253,7 @@ pub fn run(args: &RunArgs) -> i32 {
 
     let mut s = base_status(&cfg, started, run_counter, last_packets);
     s.state = "stopping".into();
-    write(&cfg, &mut s, &mut prev_tx);
+    write(&cfg, &mut s, &mut pps_state);
     info!("turbolaser stopped");
     0
 }
@@ -258,28 +265,49 @@ fn init_logger() {
         .try_init();
 }
 
-fn write(cfg: &Config, s: &mut Status, prev_tx: &mut Option<(u64, u64)>) {
+fn write(cfg: &Config, s: &mut Status, rates: &mut PpsState) {
     s.updated_unix = now_unix();
     s.total_tx_packets = read_tx_packets(&cfg.iface);
-    if let Some(tx) = s.total_tx_packets {
-        s.pps = pps(*prev_tx, tx, s.updated_unix);
-        *prev_tx = Some((tx, s.updated_unix));
-    }
+    s.pps = rates.pps;
+    s.mbps = rates.mbps;
     if let Err(e) = status::write_atomic(&cfg.paths.status_file, s) {
         warn!("could not write status file: {e}");
     }
 }
 
-/// Instantaneous packets/sec from the previous (tx, unix) sample to the current
-/// one. None without a prior sample, with no elapsed time, or after a counter
-/// reset (current tx below the previous).
-fn pps(prev: Option<(u64, u64)>, tx: u64, now: u64) -> Option<f64> {
-    let (ptx, pt) = prev?;
-    let dt = now.saturating_sub(pt);
-    if dt == 0 || tx < ptx {
-        return None;
+/// The last completed run's achieved rate, taken from tcpreplay's own per-run
+/// stats. The heartbeat is written several times per run (before the send, after
+/// it, during the gap), and a NIC-counter rate sampled at whole-second
+/// resolution rounds a sub-second run to zero. Sourcing the rate from the run
+/// and holding the last positive reading keeps `pewpew` showing the real send
+/// rate while replay is healthy, rather than a misleading zero.
+struct PpsState {
+    pps: Option<f64>,
+    mbps: Option<f64>,
+}
+
+impl PpsState {
+    fn new() -> Self {
+        Self {
+            pps: None,
+            mbps: None,
+        }
     }
-    Some((tx - ptx) as f64 / dt as f64)
+
+    /// Record a completed run's measured rate, keeping the last positive reading
+    /// so a parse miss or a zero-packet run does not blank the display.
+    fn record(&mut self, pps: Option<f64>, mbps: Option<f64>) {
+        if let Some(p) = pps {
+            if p > 0.0 {
+                self.pps = Some(p);
+            }
+        }
+        if let Some(m) = mbps {
+            if m > 0.0 {
+                self.mbps = Some(m);
+            }
+        }
+    }
 }
 
 fn base_status(cfg: &Config, started: u64, run: u64, last_packets: Option<u64>) -> Status {
@@ -296,6 +324,7 @@ fn base_status(cfg: &Config, started: u64, run: u64, last_packets: Option<u64>) 
         last_run_packets: last_packets,
         total_tx_packets: None,
         pps: None,
+        mbps: None,
         next_gap_secs: None,
         last_error: None,
         zone_count: 0,
@@ -484,6 +513,7 @@ mod tests {
         assert!(json.contains("\"schema\":3"));
         for key in [
             "pps",
+            "mbps",
             "capture_host_count",
             "total_wire_assets",
             "max_assets",
@@ -497,15 +527,26 @@ mod tests {
     }
 
     #[test]
-    fn pps_needs_two_samples_and_handles_resets() {
-        assert_eq!(pps(None, 1000, 10), None, "no prior sample");
-        assert_eq!(pps(Some((1000, 10)), 1000, 10), None, "no time elapsed");
-        assert_eq!(pps(Some((1000, 10)), 500, 20), None, "counter reset");
+    fn pps_state_holds_last_positive_rate_across_runs() {
+        let mut st = PpsState::new();
+        assert_eq!(st.pps, None, "no rate before any run");
+        st.record(Some(2500.0), Some(10.0));
+        assert_eq!(st.pps, Some(2500.0));
+        assert_eq!(st.mbps, Some(10.0));
+        // A run that reported no rate (parse miss, zero-packet) keeps the last.
+        st.record(None, None);
+        assert_eq!(st.pps, Some(2500.0), "missing rate holds the last reading");
+        assert_eq!(st.mbps, Some(10.0));
+        // A zero reading is ignored; a fresh positive run updates the display.
+        st.record(Some(0.0), Some(0.0));
         assert_eq!(
-            pps(Some((1000, 10)), 3000, 12),
-            Some(1000.0),
-            "2000 packets over 2 seconds"
+            st.pps,
+            Some(2500.0),
+            "a zero rate does not blank the display"
         );
+        st.record(Some(3000.0), Some(11.0));
+        assert_eq!(st.pps, Some(3000.0));
+        assert_eq!(st.mbps, Some(11.0));
     }
 
     #[test]

@@ -209,7 +209,7 @@ mode (the exact step is sensor-specific).
 ## 8. Open fire and confirm hits
 
 ```
-turbolaser up
+turbolaser fire          # alias for `turbolaser up`; `halt` (or `down`) stands down
 turbolaser pewpew
 journalctl -u ot-turbolaser -f
 ```
@@ -351,16 +351,27 @@ ovs-vsctl -- --id=@p get Port veth910i1 \
   ```
 
   You should see Modbus, DNP3, S7comm, or EtherNet/IP, with source and
-  destination addresses in the fabricated internal subnets.
+  destination addresses in the fabricated internal subnets. Every source MAC and
+  IP must belong to a planned zone: no original capture addresses, no foreign
+  vendor MACs, and no broadcast-domain chatter from the source network. The
+  appliance drops any frame it cannot make fully plan-coherent before replay.
 
 - In the CT, `turbolaser pewpew` shows the live readout. Check that:
   - `drift` is `none` (the wire matches the sealed plan),
   - `last packets` is non-null and `packets/sec` is live during a replay,
   - the assets line stays at or under the plan cap (fabricated + capture-derived).
 
-- In Dragos, confirm the assets categorise by vendor (no MAC-only fragments), the
-  asset count matches the plan, and CVEs attribute to the fabricated devices. The
-  zones should match the subnets `turbolaser zones` printed.
+  The default rate is a fixed Mbps band (`rate.model: mbps`, `mbps_min`/
+  `mbps_max` in `conf/replay.yaml`): each run replays at one fixed rate sampled
+  in the band, so the sensor sees a sustained ~10 Mbps that fluctuates run to
+  run rather than the captures' own (sparse) timing. Widen the band or raise the
+  gap for a burstier profile; on a jumbo bridge raise `l3.max_frame_bytes`.
+
+- In Dragos, confirm the assets categorise by vendor (no MAC-only or IP-only
+  fragments), every asset carries a matching MAC and IP, the asset count matches
+  the plan, and CVEs attribute to the fabricated devices. The zones should match
+  the subnets `turbolaser zones` printed, with nothing in an RFC1918 or External
+  catch-all.
 
 ## Safety and troubleshooting
 
@@ -378,6 +389,15 @@ ovs-vsctl -- --id=@p get Port veth910i1 \
   capture it cannot safely rewrite (oversize, or one that would leak a real
   address) rather than putting real addresses on the wire. Drop in another
   capture, or shrink the oversized one.
+- **Throughput is low or a run sends zero packets.** `journalctl -u
+  ot-turbolaser | grep done:` may show `Unable to process unsupported DLT type`
+  or `Message too long (errno = 90)` on older builds: the first is a source pcap
+  with a non-canonical link-type header, the second an oversized (TSO/jumbo)
+  frame, and either makes tcpreplay abort that run. The appliance now normalizes
+  every replayed pcap to canonical Ethernet and drops frames over
+  `l3.max_frame_bytes`, so both are handled. If the sensor still sees a low rate,
+  confirm `rate.model: mbps` with a `mbps_min`/`mbps_max` band (not `original`,
+  which paces to the captures' own slow timing) and that the `gap` is short.
 - **Service fails with `226/NAMESPACE`.** The shipped unit is LXC-safe. On an
   older unit, add a drop-in disabling the filesystem hardening
   (`ProtectSystem=no`, `ProtectHome=no`, `ProtectKernelTunables=no`,

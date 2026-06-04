@@ -26,30 +26,39 @@ l3:
   remap: true
   remap_mac: true         # rewrite Ethernet/ARP MACs alongside IPs so each host
                           # has one coherent MAC<->IP identity the sensor fuses
-  fallback: none          # deprecated/no-op: a capture that cannot be remapped
-                          # is skipped, never replayed with its original addresses
   subnets: []             # optional CIDR hints, e.g. ["192.168.10.0/24"]
   zone_affinity: both     # both | vendor | protocol | off: how replayed hosts
                           # are placed into the fabricated control-system zones
   max_remap_bytes: 2147483648   # 2 GiB; a larger capture is skipped, never raw
   on_oversize: remap_to_disk    # remap_to_disk | skip, when over the tmpfs budget
   guard_public_sources: true    # refuse a public source on the wire if remap is off
+  max_frame_bytes: 1514         # drop frames larger than this before replay so a
+                                # jumbo/TSO capture frame cannot abort a run with
+                                # EMSGSIZE; raise to ~9014 only on a jumbo bridge
 
-# Replay rate. Default honours the capture's own timing.
+# Replay rate. The appliance ships a fixed Mbps band: each run picks one fixed
+# rate uniformly in [mbps_min, mbps_max], so the wire holds a steady rate within
+# a run and fluctuates run to run, matching a busy operational OT link. This is
+# what the sensor should see at ~10 Mbps, not the capture's own (sparse) timing.
 rate:
-  model: original         # original | multiplier | pps | mbps | topspeed
-  # For another model, set 'model' and add its parameter:
+  model: mbps             # original | multiplier | pps | mbps | topspeed
+  mbps_min: 9.0           # per-run fixed-rate floor
+  mbps_max: 11.0          # per-run fixed-rate ceiling
+  # For a single fixed rate, drop the band and set: mbps: 10.0
+  # Other models:
+  #   model: original     ->  honour the capture's own timing (slow for OT pcaps)
   #   model: multiplier   ->  multiplier: 2.0
   #   model: pps          ->  pps: 200   (optional pps_multi: 1)
-  #   model: mbps         ->  mbps: 10.0
   #   model: topspeed     ->  no parameter
 
-# Inter-run gap distribution.
+# Inter-run gap distribution. Kept short so replays are near-continuous and the
+# sensor sees a sustained rate within the Mbps band above; raise mean_secs for a
+# burstier, lower-time-average profile.
 gap:
   dist: exp_poisson       # exp_poisson | trunc_normal
-  mean_secs: 5.0
-  min_secs: 0.5           # optional clamp (skews the tail)
-  max_secs: 60.0
+  mean_secs: 0.5
+  min_secs: 0.1           # optional clamp (skews the tail)
+  max_secs: 3.0
   # For trunc_normal instead:
   #   dist: trunc_normal
   #   mean_secs: 8.0
