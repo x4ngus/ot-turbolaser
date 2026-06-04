@@ -36,6 +36,11 @@ const ANNOUNCE_WINDOW: usize = 256;
 const CLIENT_MAC: [u8; 6] = [0x00, 0x50, 0x56, 0x00, 0x00, 0x01];
 /// Skip the L3 remap for captures larger than this, to bound tmpfs use.
 const MAX_SHM_BYTES: u64 = 256 * 1024 * 1024;
+/// Remap cache format version, embedded in the cache filename. Bump it whenever
+/// the remap output changes so an upgrade invalidates every stale cached pcap
+/// rather than replaying old content under an unchanged key. v2: plan-coherence
+/// drop, canonical Ethernet header, and the over-MTU drop (v0.2.3).
+const REMAP_CACHE_VERSION: u32 = 2;
 
 pub struct SimulatorEngine {
     pub ledger: Session,
@@ -188,7 +193,7 @@ impl SimulatorEngine {
         let seed = self.ledger.seed;
         let cache_path = |generation: u64| {
             cache_dir.join(format!(
-                "{seed:016x}.g{generation}.{aff}.{mtime}.{size}.{stem}.pcap"
+                "v{REMAP_CACHE_VERSION}.{seed:016x}.g{generation}.{aff}.{mtime}.{size}.{stem}.pcap"
             ))
         };
         // Cache hit at the current generation: identical (capture, seed,
@@ -236,6 +241,16 @@ impl SimulatorEngine {
                 }
             }
             self.persist_if_dirty();
+        }
+        // Drop frames over the link MTU so one oversized capture frame cannot
+        // abort the tcpreplay run (EMSGSIZE) and send zero packets.
+        let oversize = l3::drop_oversize_frames(&mut cap, cfg.l3.max_frame_bytes);
+        if oversize > 0 {
+            log::warn!(
+                "remap: dropped {oversize} frame(s) over {} bytes from {}",
+                cfg.l3.max_frame_bytes,
+                src.display()
+            );
         }
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("mkdir {}: {e}", cache_dir.display()))?;

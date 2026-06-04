@@ -21,6 +21,10 @@ use std::str::FromStr;
 const RFC1918_10_BASE: u32 = 0x0A00_0000; // 10.0.0.0
 const DEFAULT_PREFIX: u8 = 24;
 
+/// Standard Ethernet frame ceiling (14-byte header + 1500 MTU). A frame above
+/// this aborts a tcpreplay run with EMSGSIZE, so offline forging drops over it.
+pub const STANDARD_FRAME_BYTES: usize = 1514;
+
 /// What the remap did, for the round manifest and logs.
 pub struct RemapSummary {
     pub host_count: usize,
@@ -165,14 +169,13 @@ pub fn remap_capture(
     }
 
     // 4. Rewrite each packet's addresses (and MACs) through the bijection, then
-    // drop any frame that would still carry a real or public address. No MAC
-    // overrides here: every host gets its stable per-host MAC.
+    // drop any frame that is not fully plan-coherent. No MAC overrides here:
+    // every host gets its stable per-host MAC.
     apply_host_map(cap, &map, &HashMap::new(), seed, remap_mac);
-    let dropped = drop_unsafe_frames(cap);
+    let valid: HashSet<u32> = map.values().copied().collect();
+    let dropped = drop_incoherent_frames(cap, &valid);
     if dropped > 0 {
-        log::warn!(
-            "remap: dropped {dropped} unsafe frame(s) (IPv6, truncated, or unmapped-public)"
-        );
+        log::warn!("remap: dropped {dropped} non-plan frame(s) (L2/IPv6/unmapped)");
     }
 
     let subnets = groups
@@ -299,22 +302,42 @@ fn remap_arp_addrs(
     }
 }
 
-/// Fail-closed output guard. After the remap, keep a frame only if it cannot put
-/// a real or public address on the wire: an IPv4 packet that is not snaplen
-/// truncated and whose src and dst are both non-public, a handled IPv4 ARP whose
-/// protocol addresses are both non-public, or a pure L2 frame with no IP. IPv6
-/// and other unhandled L3 are never remapped, so they are dropped. Returns the
-/// number of frames dropped.
-pub(crate) fn drop_unsafe_frames(cap: &mut Capture) -> usize {
+/// Drop any frame whose on-wire length exceeds `max_frame` bytes. An oversized
+/// capture frame (a TSO/GSO segment recorded before NIC segmentation, common in
+/// host-side captures) otherwise makes tcpreplay abort the whole run with
+/// EMSGSIZE and send nothing. Returns the number of frames dropped.
+pub fn drop_oversize_frames(cap: &mut Capture, max_frame: usize) -> usize {
     let before = cap.packets.len();
-    cap.packets.retain(|p| frame_is_safe(&p.data));
+    cap.packets.retain(|p| p.data.len() <= max_frame);
     before - cap.packets.len()
 }
 
-fn frame_is_safe(buf: &[u8]) -> bool {
+/// Fail-closed output guard enforcing plan==wire. After the remap, keep a frame
+/// only if it is provably plan-coherent: an IPv4 (or IPv4 ARP) frame whose
+/// source is a remapped plan host, so its address and rewritten MAC both belong
+/// to the plan, and whose destination is a plan host or a non-host group address
+/// (multicast, broadcast, zero). Everything else is dropped: pure L2 chatter
+/// (STP/CDP/LLDP/LACP, foreign ARP), IPv6, and any frame still carrying an
+/// original address or MAC. The synth burst supplies coherent L2 and identity
+/// traffic for the plan, so nothing real leaks and the sensor sees only planned
+/// assets. `valid` is the set of legitimate post-remap unicast addresses (the
+/// remap's new addresses). Returns the number of frames dropped.
+pub(crate) fn drop_incoherent_frames(cap: &mut Capture, valid: &HashSet<u32>) -> usize {
+    let before = cap.packets.len();
+    cap.packets
+        .retain(|p| frame_is_plan_coherent(&p.data, valid));
+    before - cap.packets.len()
+}
+
+fn frame_is_plan_coherent(buf: &[u8], valid: &HashSet<u32>) -> bool {
     let Some(l) = frame::parse_layout(buf) else {
         return false;
     };
+    // A remappable unicast address must be one we mapped into the plan; a
+    // non-host address (multicast, broadcast, zero, loopback) passes unchanged.
+    let dst_ok = |a: u32| !is_remappable(a) || valid.contains(&a);
+    // A frame's source must be a plan host, so its rewritten MAC is a plan MAC.
+    let src_is_plan = |a: u32| is_remappable(a) && valid.contains(&a);
     match l.l3_kind {
         L3Kind::Ipv4 => {
             if buf.len() < l.l3 + 20 {
@@ -326,45 +349,43 @@ fn frame_is_safe(buf: &[u8]) -> bool {
             if l.l3 + ip_total > buf.len() {
                 return false;
             }
-            let src = Ipv4Addr::new(
+            let src = u32::from_be_bytes([
                 buf[l.l3 + 12],
                 buf[l.l3 + 13],
                 buf[l.l3 + 14],
                 buf[l.l3 + 15],
-            );
-            let dst = Ipv4Addr::new(
+            ]);
+            let dst = u32::from_be_bytes([
                 buf[l.l3 + 16],
                 buf[l.l3 + 17],
                 buf[l.l3 + 18],
                 buf[l.l3 + 19],
-            );
-            !is_public_unicast(src) && !is_public_unicast(dst)
+            ]);
+            src_is_plan(src) && dst_ok(dst)
         }
         L3Kind::Other => {
             if l.l3 < 2 {
                 return false;
             }
             match u16::from_be_bytes([buf[l.l3 - 2], buf[l.l3 - 1]]) {
-                0x86dd => false, // IPv6 is never remapped; drop so no real addr leaks
-                0x0806 => {
-                    if !is_arp_ipv4(buf, l.l3) {
-                        return true; // non-IPv4 ARP carries no IPv4 address to leak
-                    }
-                    let spa = Ipv4Addr::new(
+                0x0806 if is_arp_ipv4(buf, l.l3) => {
+                    let spa = u32::from_be_bytes([
                         buf[l.l3 + 14],
                         buf[l.l3 + 15],
                         buf[l.l3 + 16],
                         buf[l.l3 + 17],
-                    );
-                    let tpa = Ipv4Addr::new(
+                    ]);
+                    let tpa = u32::from_be_bytes([
                         buf[l.l3 + 24],
                         buf[l.l3 + 25],
                         buf[l.l3 + 26],
                         buf[l.l3 + 27],
-                    );
-                    !is_public_unicast(spa) && !is_public_unicast(tpa)
+                    ]);
+                    src_is_plan(spa) && dst_ok(tpa)
                 }
-                _ => true, // pure L2 (STP/LLDP/CDP/LACP/...) carries no IP address
+                // Pure L2 (STP/LLDP/CDP/LACP), IPv6, and non-IPv4 ARP are not
+                // plan-coherent; the synth burst provides our own L2 identity.
+                _ => false,
             }
         }
     }
@@ -582,11 +603,10 @@ pub fn reconcile_capture_into_zones(
     }
 
     apply_host_map(cap, &map, device_macs, seed, remap_mac);
-    let dropped = drop_unsafe_frames(cap);
+    let valid: HashSet<u32> = map.values().copied().collect();
+    let dropped = drop_incoherent_frames(cap, &valid);
     if dropped > 0 {
-        log::warn!(
-            "remap: dropped {dropped} unsafe frame(s) (IPv6, truncated, or unmapped-public)"
-        );
+        log::warn!("remap: dropped {dropped} non-plan frame(s) (L2/IPv6/unmapped)");
     }
     (
         RemapSummary {
@@ -1227,32 +1247,96 @@ mod tests {
         );
     }
 
+    fn pkt(data: Vec<u8>) -> OwnedPacket {
+        OwnedPacket {
+            ts: Duration::new(1, 0),
+            orig_len: data.len() as u32,
+            data,
+        }
+    }
+
     #[test]
-    fn drop_unsafe_frames_drops_ipv6_and_keeps_clean_ipv4() {
-        // One clean private IPv4 UDP frame plus one IPv6 frame (ethertype 0x86dd).
-        let ipv4 = udp([10, 0, 0, 1], [10, 0, 0, 2]);
+    fn drop_incoherent_keeps_only_plan_frames() {
+        // valid = the two legitimate post-remap plan addresses.
+        let valid: HashSet<u32> = [
+            u32::from(Ipv4Addr::new(10, 0, 0, 1)),
+            u32::from(Ipv4Addr::new(10, 0, 0, 2)),
+        ]
+        .into_iter()
+        .collect();
+        // Coherent plan conversation (both endpoints in the plan).
+        let good = udp([10, 0, 0, 1], [10, 0, 0, 2]);
+        // An IPv4 frame from an unmapped host still carries an original address.
+        let unmapped = udp([192, 168, 0, 134], [10, 0, 0, 2]);
+        // Pure-L2 LLDP (ethertype 0x88cc) carrying a foreign source MAC.
+        let mut lldp = vec![
+            0x01, 0x80, 0xc2, 0, 0, 0x0e, 0x00, 0xe0, 0x62, 0x60, 0x35, 0xd0, 0x88, 0xcc,
+        ];
+        lldp.extend(std::iter::repeat_n(0u8, 46));
+        // IPv6 (ethertype 0x86dd) is never remapped.
         let mut ipv6 = vec![0x52, 0x54, 0, 0, 0, 1, 0x52, 0x54, 0, 0, 0, 2, 0x86, 0xdd];
-        ipv6.extend(std::iter::repeat_n(0u8, 40)); // minimal IPv6 header, addresses 0
-        ipv6[14] = 0x60; // version 6
-        ipv6[22] = 0x20; // a global-ish src first byte (2000::/3)
+        ipv6.extend(std::iter::repeat_n(0u8, 40));
+        ipv6[14] = 0x60;
+        ipv6[22] = 0x20;
         let mut cap = Capture {
             header: PcapHeader::default(),
-            packets: vec![
-                OwnedPacket {
-                    ts: Duration::new(1, 0),
-                    orig_len: 0,
-                    data: ipv4,
-                },
-                OwnedPacket {
-                    ts: Duration::new(1, 0),
-                    orig_len: 0,
-                    data: ipv6,
-                },
-            ],
+            packets: vec![pkt(good), pkt(unmapped), pkt(lldp), pkt(ipv6)],
         };
-        let dropped = drop_unsafe_frames(&mut cap);
-        assert_eq!(dropped, 1, "the IPv6 frame is dropped");
-        assert_eq!(cap.packets.len(), 1, "the clean IPv4 frame is kept");
+        let dropped = drop_incoherent_frames(&mut cap, &valid);
+        assert_eq!(dropped, 3, "unmapped, L2, and IPv6 frames are all dropped");
+        assert_eq!(
+            cap.packets.len(),
+            1,
+            "only the coherent plan frame survives"
+        );
+    }
+
+    #[test]
+    fn drop_oversize_removes_over_mtu() {
+        let small = udp([10, 0, 0, 1], [10, 0, 0, 2]);
+        let big = {
+            let mut b = udp([10, 0, 0, 1], [10, 0, 0, 2]);
+            b.resize(1600, 0);
+            b
+        };
+        let mut cap = Capture {
+            header: PcapHeader::default(),
+            packets: vec![pkt(small), pkt(big)],
+        };
+        assert_eq!(drop_oversize_frames(&mut cap, STANDARD_FRAME_BYTES), 1);
+        assert_eq!(cap.packets.len(), 1, "the over-MTU frame is dropped");
+    }
+
+    #[test]
+    fn remap_capture_emits_only_plan_addresses_and_macs() {
+        // A real conversation plus a foreign-MAC LLDP frame with no IP.
+        let conv = udp([192, 168, 7, 10], [192, 168, 7, 20]);
+        let foreign_oui = [0x00, 0xe0, 0x62, 0x60, 0x35, 0xd0];
+        let mut lldp = vec![0x01, 0x80, 0xc2, 0, 0, 0x0e];
+        lldp.extend_from_slice(&foreign_oui);
+        lldp.extend_from_slice(&[0x88, 0xcc]);
+        lldp.extend(std::iter::repeat_n(0u8, 46));
+        let mut cap = Capture {
+            header: PcapHeader::default(),
+            packets: vec![pkt(conv), pkt(lldp)],
+        };
+        remap_capture(&mut cap, &[], 1234, true);
+        assert_eq!(cap.packets.len(), 1, "the foreign-MAC L2 frame is dropped");
+        let f = &cap.packets[0].data;
+        let (s, d) = addrs(f);
+        assert_ne!(
+            s,
+            [192, 168, 7, 10],
+            "source address remapped off the original"
+        );
+        assert_ne!(
+            d,
+            [192, 168, 7, 20],
+            "dest address remapped off the original"
+        );
+        assert_eq!(f[6] & 0x02, 0x02, "source MAC is locally administered");
+        assert_eq!(f[6] & 0x01, 0x00, "source MAC is unicast");
+        assert_ne!(&f[6..12], &foreign_oui, "no original OUI on the wire");
     }
 
     #[test]

@@ -36,7 +36,13 @@ pub fn read(path: &Path) -> Result<Capture, String> {
 
 pub fn write(path: &Path, cap: &Capture) -> Result<(), String> {
     let file = File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
-    let mut wtr = PcapWriter::with_header(file, cap.header)
+    // Always emit a canonical classic Ethernet, microsecond-resolution header
+    // rather than echoing the source. Some source captures carry non-canonical
+    // link-type bits (FCS or pseudo-header flags) that tcpreplay rejects at load
+    // ("unsupported DLT type: Ethernet (0x1)") even though Wireshark tolerates
+    // them; a clean header keeps every file we emit replayable. Per-packet
+    // timestamps live on the packets, so they are unaffected.
+    let mut wtr = PcapWriter::with_header(file, PcapHeader::default())
         .map_err(|e| format!("pcap write {}: {e}", path.display()))?;
     for p in &cap.packets {
         let pkt = PcapPacket::new(p.ts, p.orig_len, &p.data);

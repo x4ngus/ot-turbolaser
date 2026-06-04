@@ -60,6 +60,9 @@ pub fn forge_round(src: &Capture, seed: u64, opts: &ReloadOptions) -> (Capture, 
             }
         }
     }
+    // A forged variant is replayed directly, so drop any over-MTU frame here too,
+    // matching the run-loop remap, so tcpreplay never aborts on an oversized frame.
+    l3::drop_oversize_frames(&mut cap, l3::STANDARD_FRAME_BYTES);
     let frames = cap.packets.len();
     (
         cap,
