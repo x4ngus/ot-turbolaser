@@ -3,10 +3,12 @@
 //! A passive sensor (Dragos) binds MAC to IP from ARP, the canonical L2/L3
 //! resolution, not from the Ethernet header of an arbitrary L3 frame (in a
 //! routed network that source MAC could be a router, not the address owner). So
-//! every asset we want fused into one entry needs an ARP presence. A real
-//! request/reply exchange is the binding a sensor trusts most: the requester's
-//! sender fields bind it, and the replier's sender fields bind it. ARP carries
-//! no checksum.
+//! every asset we want fused into one entry needs an ARP presence. The form the
+//! sensor associates from most reliably on a SPAN is a gratuitous ARP response
+//! (an unsolicited broadcast "ip is at mac"); a unicast solicited reply must be
+//! paired with a request the sensor also saw, which is fragile. Every ARP frame
+//! is padded to the 60-byte Ethernet minimum (a 42-byte runt is rejected). ARP
+//! carries no checksum.
 
 use std::net::Ipv4Addr;
 
@@ -83,11 +85,13 @@ pub fn resolve(
     )
 }
 
-/// A gratuitous ARP announcement (RFC 5227): an ARP request with sender and
-/// target protocol address both the host's own, broadcast. Kept for callers that
-/// want a single self-announcement rather than a full exchange.
+/// A gratuitous ARP response (reply, oper=2) announcing "ip is at mac" to
+/// broadcast, padded to 60 bytes by `arp`. This unsolicited broadcast is the
+/// self-announcement a passive sensor associates MAC<->IP from; a unicast
+/// solicited reply (which the sensor must pair with a request) binds far less
+/// reliably on a SPAN. The sensor builds the association from this frame alone.
 pub fn gratuitous(mac: [u8; 6], ip: Ipv4Addr) -> Vec<u8> {
-    arp(BROADCAST, OP_REQUEST, mac, ip, ZERO_MAC, ip)
+    arp(BROADCAST, OP_REPLY, mac, ip, mac, ip)
 }
 
 #[cfg(test)]
@@ -113,6 +117,22 @@ mod tests {
         assert_eq!(&f[14 + 14..14 + 18], &[10, 1, 0, 250], "SPA = sender ip");
         assert_eq!(&f[14 + 18..14 + 24], &ZERO_MAC, "THA zero in a request");
         assert_eq!(&f[14 + 24..14 + 28], &[10, 1, 0, 5], "TPA = target ip");
+    }
+
+    #[test]
+    fn gratuitous_is_a_padded_broadcast_response_binding_mac_to_ip() {
+        let mac = [0x00, 0x0e, 0x8c, 1, 2, 3];
+        let f = gratuitous(mac, Ipv4Addr::new(10, 1, 0, 5));
+        assert_eq!(&f[0..6], &BROADCAST, "gratuitous is broadcast");
+        assert_eq!(&f[6..12], &mac, "eth src is the announcer");
+        assert_eq!(oper(&f), OP_REPLY, "it is an ARP response (oper=2)");
+        assert_eq!(&f[14 + 8..14 + 14], &mac, "SHA = mac");
+        assert_eq!(
+            &f[14 + 14..14 + 18],
+            &[10, 1, 0, 5],
+            "SPA = ip (ip is at mac)"
+        );
+        assert_eq!(f.len(), 60, "padded to the Ethernet minimum, never a runt");
     }
 
     #[test]
