@@ -185,8 +185,11 @@ pub fn run(args: &RunArgs) -> i32 {
         apply_sim_status(&mut s, &cfg, engine.as_ref(), &chosen, &oui, &hints);
         write(&cfg, &mut s, &mut pps_state);
 
-        // One fixed rate for this whole run (capture plus identity burst). A
-        // banded mbps model draws a fresh rate per run so the wire fluctuates.
+        // The capture replays at this run's sampled rate; a banded mbps model
+        // draws a fresh one per run so the wire fluctuates. The identity burst is
+        // not sent at this rate (see below): it is self-paced by its own frame
+        // timestamps, so the ARP bindings do not arrive as a microburst the
+        // sensor drops before it can form the associations.
         let rate_args = cfg.rate.to_args_for_run(&mut loop_rng);
 
         match replay::run_once(&cfg.iface, file_to_send, &rate_args, &watchdog) {
@@ -219,10 +222,14 @@ pub fn run(args: &RunArgs) -> i32 {
         }
 
         // Red laser: fabricate and fire device identities and switch beacons as
-        // a second short burst on the same wire, then refresh the heartbeat.
+        // a second short burst on the same wire, then refresh the heartbeat. The
+        // burst is replayed at its own frame timing (empty rate args, so
+        // tcpreplay honours the pcap timestamps spaced a millisecond apart)
+        // rather than the capture's line rate, so the ARP resolutions arrive
+        // paced over the burst instead of as one microburst the sensor drops.
         if let Some(e) = engine.as_mut() {
             if let Some(p) = e.red_tick(run_counter, now_unix()) {
-                match replay::run_once(&cfg.iface, &p, &rate_args, &watchdog) {
+                match replay::run_once(&cfg.iface, &p, &[], &watchdog) {
                     Ok(res) if res.success => {
                         info!("run={run_counter} identities sent: {}", res.detail)
                     }
