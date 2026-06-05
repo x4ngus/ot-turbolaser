@@ -436,9 +436,17 @@ pub struct SynthesisCfg {
     pub switch_beacons: bool,
     #[serde(default = "default_true")]
     pub device_identity: bool,
-    /// Re-announce device identity every Nth run. 1 means every run.
+    /// Re-announce device identity every Nth run. 1 means every run. The wall
+    /// clock cadence below is the primary throttle; this is a secondary gate.
     #[serde(default = "default_identity_every")]
     pub identity_every_n_runs: u64,
+    /// Minimum seconds between identity bursts, so the plant reads as periodic
+    /// discovery rather than a scan storm. Each burst opens fresh client-side
+    /// connections (new ephemeral ports), so a sensor sees distinct, parseable
+    /// scans it can attribute, instead of one identical conversation it folds and
+    /// never re-reads. Default 25s.
+    #[serde(default = "default_announce_interval")]
+    pub announce_interval_secs: u64,
     /// Re-label zones with fresh names every Nth run once an unsealed session is
     /// saturated, so a long-running feed keeps evolving. 0 disables (default).
     /// Sealed (committed-plan) sessions never cycle.
@@ -468,6 +476,7 @@ impl Default for SynthesisCfg {
             switch_beacons: true,
             device_identity: true,
             identity_every_n_runs: default_identity_every(),
+            announce_interval_secs: default_announce_interval(),
             cycle_every_n_runs: 0,
             max_devices: None,
             target_devices: default_target_devices(),
@@ -692,6 +701,9 @@ fn default_zone_prefix() -> u8 {
 }
 fn default_identity_every() -> u64 {
     1
+}
+fn default_announce_interval() -> u64 {
+    25
 }
 fn default_target_devices() -> usize {
     64

@@ -105,6 +105,11 @@ no_pcaps_retry_secs: 30
 #   switch_beacons: true     # LLDP/CDP/SNMP switch conduits between zones
 #   device_identity: true    # ENIP/Modbus/S7 identity assertions carrying CVEs
 #   identity_every_n_runs: 1
+#   announce_interval_secs: 25  # min seconds between identity bursts: periodic
+#                            # discovery, not a scan storm. Each burst opens fresh
+#                            # client connections (new ephemeral ports) so the
+#                            # sensor sees distinct, parseable scans it attributes,
+#                            # not one identical conversation it folds and ignores
 #   cycle_every_n_runs: 0    # >0 re-labels zones every N runs once an unsealed
 #                            # session saturates; sealed plans never cycle
 #   target_devices: 64       # fleet size `plan --commit` fabricates and seals
