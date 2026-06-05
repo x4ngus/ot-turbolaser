@@ -192,10 +192,20 @@ fn pick_profile<'a>(
 }
 
 /// A MAC from the profile's vendor OUI plus random low bytes, so devices in a
-/// zone are distinct assets while keeping the vendor-identifying prefix.
+/// zone are distinct assets while keeping the vendor-identifying prefix. With no
+/// vendor OUI, fall back to a globally-administered unicast OUI (not a
+/// locally-administered one): a passive sensor (Dragos) ignores LAA MACs for
+/// asset association, so an LAA address would never bind MAC<->IP and the device
+/// would stay MAC-less.
 fn make_mac(profile: &DeviceProfile, rng: &mut ChaCha8Rng) -> [u8; 6] {
-    let oui = profile.oui_prefix().unwrap_or([0x02, 0x00, 0x00]);
-    [oui[0], oui[1], oui[2], rng.gen(), rng.gen(), rng.gen()]
+    match profile.oui_prefix() {
+        Some(oui) => [oui[0], oui[1], oui[2], rng.gen(), rng.gen(), rng.gen()],
+        None => {
+            // Globally administered (0x02 clear), unicast (0x01 clear).
+            let b0 = rng.gen::<u8>() & 0xFC;
+            [b0, rng.gen(), rng.gen(), rng.gen(), rng.gen(), rng.gen()]
+        }
+    }
 }
 
 fn fmt_mac(m: [u8; 6]) -> String {
