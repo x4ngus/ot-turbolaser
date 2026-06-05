@@ -395,6 +395,75 @@ fn reconcile_registers_same_origins_regardless_of_capture_order() {
     );
 }
 
+/// The remap rewrites L3 headers but not payloads, so a discovery frame (NBNS,
+/// DHCP, DNS, SSDP) embeds the original host address in its payload even after
+/// the header is remapped, and a sensor reads it as a phantom asset on the
+/// original address. This is the 4SICS field leak (192.168.10.131 surfacing as a
+/// bound asset). Confirm no original address survives the remap anywhere.
+#[test]
+fn remap_drops_payload_embedded_original_addresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_assets: 64",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0, 0); // fabricate the plant so the into-zones remap runs
+
+    let owned = |data: Vec<u8>| OwnedPacket {
+        ts: Duration::new(1, 0),
+        orig_len: data.len() as u32,
+        data,
+    };
+    // An OT conversation enumerates .5 and .9 (so both become remap map keys),
+    // plus a NBNS-style broadcast from .5 whose payload embeds .9's original IP.
+    let conv = eth::udp_frame(
+        [0x00, 0x00, 0xbc, 1, 1, 1],
+        [0x00, 0x00, 0xbc, 2, 2, 2],
+        Ipv4Addr::new(192, 168, 50, 5),
+        Ipv4Addr::new(192, 168, 50, 9),
+        50001,
+        502,
+        b"poll",
+    );
+    let mut nbns = eth::udp_frame(
+        [0x00, 0x00, 0xbc, 1, 1, 1],
+        [0xff; 6],
+        Ipv4Addr::new(192, 168, 50, 5),
+        Ipv4Addr::new(255, 255, 255, 255),
+        137,
+        137,
+        b"NAME",
+    );
+    nbns.extend_from_slice(&[192, 168, 50, 9]); // original peer IP embedded in payload
+    let cap = Capture {
+        header: PcapHeader::default(),
+        packets: vec![owned(conv), owned(nbns)],
+    };
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = pool.join("nbns.pcap");
+    pcapio::write(&src, &cap).unwrap();
+
+    let out = engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    let remapped = pcapio::read(&out).unwrap();
+    for p in &remapped.packets {
+        for orig in [[192u8, 168, 50, 5], [192, 168, 50, 9]] {
+            assert!(
+                !p.data.windows(4).any(|w| w == orig),
+                "original address {orig:?} leaked into the wire (header or payload)"
+            );
+        }
+    }
+}
+
 /// First-principles wire check: feed the red-laser remap a capture that mixes OT
 /// conversations with the exact junk that leaked in the field (a foreign-MAC LLDP
 /// frame, an IPv6 frame, an oversize frame, a broadcast ARP) and confirm the wire
@@ -526,13 +595,14 @@ fn wire_carries_only_planned_coherent_frames() {
     }
 }
 
-/// Every asset must be bound via a real ARP resolution (request + reply), the
-/// binding a passive sensor trusts. Each asset is resolved exactly once per burst
-/// (one conversation at the sensor, not a per-tick gratuitous flood), and OT
-/// protocol frames are present alongside. Regression guard for the binding
-/// collapse (assets surfacing IP-only) when gratuitous ARP was minimised.
+/// Every asset (device and capture host) must be bound MAC<->IP via an LLDP
+/// announcement: the chassis-ID TLV carries the MAC, the management-address TLV
+/// the IP. That is the binding a passive sensor (Dragos) trusts; it does not bind
+/// from ARP or bare L3 frames. Exactly one LLDP per asset, the burst emits no ARP
+/// (it did not bind across three versions), and OT sessions ride alongside.
+/// Regression guard for the binding collapse where assets surfaced IP-only.
 #[test]
-fn synth_burst_resolves_every_asset_via_arp_pairs() {
+fn synth_burst_lldp_binds_every_asset() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -558,33 +628,26 @@ fn synth_burst_resolves_every_asset_via_arp_pairs() {
 
     let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
-    // ARP operation: field at offset 20-21, after the 14-byte Ethernet header.
-    let oper = |d: &[u8]| -> Option<u16> {
-        (d.len() >= 22 && u16::from_be_bytes([d[12], d[13]]) == 0x0806)
-            .then(|| u16::from_be_bytes([d[20], d[21]]))
-    };
-    let requests = cap
+    let ethertype = |d: &[u8]| (d.len() >= 14).then(|| u16::from_be_bytes([d[12], d[13]]));
+    let lldp = cap
         .packets
         .iter()
-        .filter(|p| oper(&p.data) == Some(1))
+        .filter(|p| ethertype(&p.data) == Some(0x88cc))
         .count();
-    let replies = cap
+    let arp = cap
         .packets
         .iter()
-        .filter(|p| oper(&p.data) == Some(2))
+        .filter(|p| ethertype(&p.data) == Some(0x0806))
         .count();
     let assets = engine.ledger().device_count() + engine.ledger().capture_host_count();
-    // One resolution per asset: a request and its reply. Both ends bind, and it
-    // counts as one conversation at the sensor, not a per-host broadcast flood.
-    assert_eq!(requests, replies, "every ARP is a request/reply pair");
     assert_eq!(
-        replies, assets,
-        "every asset resolved exactly once: {replies} replies vs {assets} assets"
+        lldp, assets,
+        "exactly one LLDP binding per asset: {lldp} lldp vs {assets} assets"
     );
+    assert_eq!(arp, 0, "the burst emits no ARP (LLDP binds instead): {arp}");
     let total = cap.packets.len();
-    let arp = requests + replies;
     assert!(
-        total - arp >= engine.ledger().device_count(),
-        "OT protocol sessions present alongside the ARP: {total} total, {arp} arp"
+        total - lldp >= engine.ledger().device_count(),
+        "OT protocol sessions ride alongside the bindings: {total} total, {lldp} lldp"
     );
 }
