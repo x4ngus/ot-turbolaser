@@ -526,12 +526,13 @@ fn wire_carries_only_planned_coherent_frames() {
     }
 }
 
-/// The identity burst must stay an OT protocol feed, not an ARP broadcast: with
-/// far more capture hosts than the refresh window, only a small rotating window
-/// of gratuitous ARPs is emitted, and OT protocol frames dominate. Regression
-/// guard for the ARP flood that drowned the sensor's analytic engine.
+/// Every asset must be bound via a real ARP resolution (request + reply), the
+/// binding a passive sensor trusts. Each asset is resolved exactly once per burst
+/// (one conversation at the sensor, not a per-tick gratuitous flood), and OT
+/// protocol frames are present alongside. Regression guard for the binding
+/// collapse (assets surfacing IP-only) when gratuitous ARP was minimised.
 #[test]
-fn synth_burst_is_arp_light_not_a_broadcast_flood() {
+fn synth_burst_resolves_every_asset_via_arp_pairs() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -548,7 +549,6 @@ fn synth_burst_is_arp_light_not_a_broadcast_flood() {
     let mut engine = SimulatorEngine::red(&cfg, 0);
     engine.red_tick(0, 0); // fabricate the fleet and zones
 
-    // Register far more capture hosts than the ARP refresh window (8).
     let pool = dir.path().join("pool");
     std::fs::create_dir_all(&pool).unwrap();
     let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
@@ -558,25 +558,33 @@ fn synth_burst_is_arp_light_not_a_broadcast_flood() {
 
     let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
-    let arp = cap
+    // ARP operation: field at offset 20-21, after the 14-byte Ethernet header.
+    let oper = |d: &[u8]| -> Option<u16> {
+        (d.len() >= 22 && u16::from_be_bytes([d[12], d[13]]) == 0x0806)
+            .then(|| u16::from_be_bytes([d[20], d[21]]))
+    };
+    let requests = cap
         .packets
         .iter()
-        .filter(|p| p.data.len() >= 14 && u16::from_be_bytes([p.data[12], p.data[13]]) == 0x0806)
+        .filter(|p| oper(&p.data) == Some(1))
         .count();
+    let replies = cap
+        .packets
+        .iter()
+        .filter(|p| oper(&p.data) == Some(2))
+        .count();
+    let assets = engine.ledger().device_count() + engine.ledger().capture_host_count();
+    // One resolution per asset: a request and its reply. Both ends bind, and it
+    // counts as one conversation at the sensor, not a per-host broadcast flood.
+    assert_eq!(requests, replies, "every ARP is a request/reply pair");
+    assert_eq!(
+        replies, assets,
+        "every asset resolved exactly once: {replies} replies vs {assets} assets"
+    );
     let total = cap.packets.len();
+    let arp = requests + replies;
     assert!(
-        arp < hosts,
-        "ARP is rotated, not one per host: {arp} arp vs {hosts} hosts"
-    );
-    // Only a small rotating capture-host window emits ARP; fabricated devices are
-    // not ARP'd at all (they bind from their sessions). So ARP stays tiny and is
-    // never one record per host at the sensor.
-    assert!(
-        arp <= 8,
-        "ARP refresh window stays small (capture-host only): {arp}"
-    );
-    assert!(
-        total - arp >= 8,
-        "OT protocol frames dominate the burst: {total} total, {arp} arp"
+        total - arp >= engine.ledger().device_count(),
+        "OT protocol sessions present alongside the ARP: {total} total, {arp} arp"
     );
 }
