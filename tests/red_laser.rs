@@ -595,14 +595,15 @@ fn wire_carries_only_planned_coherent_frames() {
     }
 }
 
-/// Every asset (device and capture host) must be bound MAC<->IP via an LLDP
-/// announcement: the chassis-ID TLV carries the MAC, the management-address TLV
-/// the IP. That is the binding a passive sensor (Dragos) trusts; it does not bind
-/// from ARP or bare L3 frames. Exactly one LLDP per asset, the burst emits no ARP
-/// (it did not bind across three versions), and OT sessions ride alongside.
-/// Regression guard for the binding collapse where assets surfaced IP-only.
+/// Every asset (device and capture host) must be bound MAC<->IP by an ARP
+/// response: the zone client asks who has the asset IP, the asset answers "ip is
+/// at mac" (oper=2, SHA=mac, SPA=ip). The sensor associates MAC<->IP only from
+/// such ARP responses. Every ARP frame must be padded to the 60-byte Ethernet
+/// minimum (a 42-byte runt is rejected). One request/reply pair per asset, OT
+/// sessions alongside. Regression guard for the binding collapse (IP-only assets)
+/// and the runt-ARP that a sensor would not trust.
 #[test]
-fn synth_burst_lldp_binds_every_asset() {
+fn synth_burst_binds_every_asset_via_padded_arp_responses() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -628,26 +629,29 @@ fn synth_burst_lldp_binds_every_asset() {
 
     let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
-    let ethertype = |d: &[u8]| (d.len() >= 14).then(|| u16::from_be_bytes([d[12], d[13]]));
-    let lldp = cap
-        .packets
-        .iter()
-        .filter(|p| ethertype(&p.data) == Some(0x88cc))
-        .count();
-    let arp = cap
-        .packets
-        .iter()
-        .filter(|p| ethertype(&p.data) == Some(0x0806))
-        .count();
+    let is_arp = |d: &[u8]| d.len() >= 22 && u16::from_be_bytes([d[12], d[13]]) == 0x0806;
+    // ARP opcode at offset 20-21 (after the 14-byte Ethernet header).
+    let oper = |d: &[u8]| u16::from_be_bytes([d[20], d[21]]);
+    let arp: Vec<&OwnedPacket> = cap.packets.iter().filter(|p| is_arp(&p.data)).collect();
+    let replies = arp.iter().filter(|p| oper(&p.data) == 2).count();
     let assets = engine.ledger().device_count() + engine.ledger().capture_host_count();
+    // One ARP response (the binding) per asset.
     assert_eq!(
-        lldp, assets,
-        "exactly one LLDP binding per asset: {lldp} lldp vs {assets} assets"
+        replies, assets,
+        "one ARP response per asset: {replies} replies vs {assets} assets"
     );
-    assert_eq!(arp, 0, "the burst emits no ARP (LLDP binds instead): {arp}");
+    // Every ARP frame is padded to the 60-byte Ethernet minimum, never a runt.
+    for p in &arp {
+        assert!(
+            p.data.len() >= 60,
+            "ARP frame padded to 60 bytes, not a {}-byte runt",
+            p.data.len()
+        );
+    }
     let total = cap.packets.len();
     assert!(
-        total - lldp >= engine.ledger().device_count(),
-        "OT protocol sessions ride alongside the bindings: {total} total, {lldp} lldp"
+        total - arp.len() >= engine.ledger().device_count(),
+        "OT protocol sessions ride alongside the bindings: {total} total, {} arp",
+        arp.len()
     );
 }
