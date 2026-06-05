@@ -19,7 +19,7 @@ use crate::oui::OuiDb;
 use crate::pcapio::{self, Capture};
 use crate::proto::frame::{parse_layout, L3Kind, L4Kind};
 use crate::proto::l3;
-use crate::synth::{self, arp, cdp, enip_identity, lldp, modbus_devid, s7_szl, snmp};
+use crate::synth::{self, cdp, enip_identity, lldp, modbus_devid, s7_szl, snmp};
 use crate::threat::{self, ThreatScheduler};
 use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
 
@@ -577,15 +577,19 @@ impl SimulatorEngine {
             let vuln = &self.vuln;
             for k in 0..count {
                 let dev = &devices[(start + k) % n];
-                // Resolve the device first: the zone client asks who has the
-                // device IP, the device answers. The exchange binds both MAC<->IP
-                // at the sensor, which a session alone does not.
+                // Bind the device MAC<->IP with an LLDP announcement: the chassis
+                // ID carries the MAC and the management-address TLV the IP. That is
+                // the binding a passive sensor (Dragos) trusts; it does not bind
+                // from ARP or from bare L3 frames. This is how the switches already
+                // bind, extended to every device.
                 if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
-                    let c_ip = client_addr(&dev.subnet_cidr);
-                    let c_mac = l3::stable_mac(seed, u32::from(c_ip));
-                    let (req, rep) = arp::resolve(c_mac, c_ip, parse_mac(&dev.mac), dev_ip);
-                    frames.push(req);
-                    frames.push(rep);
+                    let descr = format!("{} {} {}", dev.vendor, dev.model, dev.firmware);
+                    frames.push(lldp::beacon(
+                        parse_mac(&dev.mac),
+                        dev_ip,
+                        clamp_str(&dev.model, 255),
+                        clamp_str(&descr, 255),
+                    ));
                 }
                 // Own the profile so a missing-model fallback and the vuln borrow
                 // do not tangle; a device is never silently dropped.
@@ -610,17 +614,13 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Resolve every capture host so the sensor binds its MAC<->IP. Each is a
-        // single request/reply exchange (one conversation record at the sensor),
-        // not a per-host broadcast flood; the host's own replayed traffic does not
-        // bind it because the sensor does not infer MAC<->IP from L3 frames.
+        // Bind every capture host the same way, with an LLDP announcement carrying
+        // its MAC and IP. Its replayed L3 traffic does not bind it (the sensor does
+        // not infer MAC<->IP from L3 frames), so without this it stays IP-only.
         for h in &self.ledger.capture_hosts {
             if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                let c_ip = client_addr(&h.subnet_cidr);
-                let c_mac = l3::stable_mac(seed, u32::from(c_ip));
-                let (req, rep) = arp::resolve(c_mac, c_ip, parse_mac(&h.mac), ip);
-                frames.push(req);
-                frames.push(rep);
+                let vendor = h.vendor.as_deref().unwrap_or("OT device");
+                frames.push(lldp::beacon(parse_mac(&h.mac), ip, vendor, vendor));
             }
         }
         self.announce_cursor = (start + count) % n;
@@ -719,13 +719,10 @@ fn assertions_for_device(
                 .sys_descr
                 .clone()
                 .unwrap_or_else(|| format!("{} {}", dev.vendor, dev.model));
+            // LLDP for the switch is emitted with every device's binding in
+            // build_assertions; here only the Cisco-style CDP beacon is added, on
+            // the beacon cadence, as switch-specific colour.
             if switch_beacons {
-                frames.push(lldp::beacon(
-                    dev_mac,
-                    dev_ip,
-                    clamp_str(&dev.model, 511),
-                    clamp_str(&descr, 511),
-                ));
                 frames.push(cdp::beacon(
                     dev_mac,
                     dev_ip,
@@ -1059,10 +1056,12 @@ mod tests {
             .find(|p| p.protocol == ProfileProto::SwitchSnmp)
             .unwrap();
         let d = dev("switch_snmp", &p.model, &p.firmware);
+        // LLDP binding is emitted for every device in build_assertions, not here;
+        // the switch branch adds CDP (on the beacon cadence) plus the SNMP fetch.
         assert_eq!(
             assertions_for_device(&d, p, true, 1337, 0).len(),
-            4,
-            "lldp + cdp + snmp request/response"
+            3,
+            "cdp + snmp request/response"
         );
         assert_eq!(
             assertions_for_device(&d, p, false, 1337, 0).len(),

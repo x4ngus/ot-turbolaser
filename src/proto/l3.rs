@@ -177,6 +177,11 @@ pub fn remap_capture(
     if dropped > 0 {
         log::warn!("remap: dropped {dropped} non-plan frame(s) (L2/IPv6/unmapped)");
     }
+    let originals: HashSet<u32> = map.keys().copied().collect();
+    let leaked = drop_payload_leak_frames(cap, &originals);
+    if leaked > 0 {
+        log::warn!("remap: dropped {leaked} frame(s) leaking an original address in a payload");
+    }
 
     let subnets = groups
         .iter()
@@ -321,6 +326,31 @@ pub fn drop_arp_frames(cap: &mut Capture) -> usize {
     cap.packets.retain(|p| match frame::parse_layout(&p.data) {
         Some(l) if l.l3 >= 2 => u16::from_be_bytes([p.data[l.l3 - 2], p.data[l.l3 - 1]]) != 0x0806,
         _ => true,
+    });
+    before - cap.packets.len()
+}
+
+/// Drop any frame that still carries an original (pre-remap) host address
+/// anywhere in its bytes. The remap rewrites L3 and ARP headers but never
+/// application payloads, so a discovery protocol (NBNS, BROWSER, DHCP, DNS, SSDP,
+/// or the ENIP socket-address field) can carry the host's original address in its
+/// payload even after the header is correctly remapped. A passive sensor reads
+/// that payload and fabricates a phantom asset on the original (often public)
+/// address, which is exactly the leak the header-only coherence guard cannot see.
+/// `originals` are the pre-remap host addresses (the remap's map keys); the
+/// surviving frames' headers already hold plan addresses, so a match can only be
+/// a payload leak. Fail closed: drop the frame rather than emit an original
+/// address. Returns the number of frames dropped.
+pub fn drop_payload_leak_frames(cap: &mut Capture, originals: &HashSet<u32>) -> usize {
+    if originals.is_empty() {
+        return 0;
+    }
+    let patterns: HashSet<[u8; 4]> = originals.iter().map(|a| a.to_be_bytes()).collect();
+    let before = cap.packets.len();
+    cap.packets.retain(|p| {
+        !p.data
+            .windows(4)
+            .any(|w| patterns.contains(&[w[0], w[1], w[2], w[3]]))
     });
     before - cap.packets.len()
 }
@@ -636,6 +666,11 @@ pub fn reconcile_capture_into_zones(
     let dropped = drop_incoherent_frames(cap, &valid);
     if dropped > 0 {
         log::warn!("remap: dropped {dropped} non-plan frame(s) (L2/IPv6/unmapped)");
+    }
+    let originals: HashSet<u32> = map.keys().copied().collect();
+    let leaked = drop_payload_leak_frames(cap, &originals);
+    if leaked > 0 {
+        log::warn!("remap: dropped {leaked} frame(s) leaking an original address in a payload");
     }
     (
         RemapSummary {
@@ -1322,6 +1357,38 @@ mod tests {
         assert_eq!(
             frame::parse_layout(&cap.packets[0].data).unwrap().l3_kind,
             L3Kind::Ipv4
+        );
+    }
+
+    #[test]
+    fn drop_payload_leak_removes_embedded_original_addresses() {
+        // The original host 192.168.10.131 was remapped; its address must not
+        // survive in any payload (a NBNS/DHCP/DNS frame embeds it even after the
+        // header is remapped to a plan address).
+        let originals: HashSet<u32> = [u32::from(Ipv4Addr::new(192, 168, 10, 131))]
+            .into_iter()
+            .collect();
+        // A plan-addressed frame (header 10.x) carrying the original address in
+        // its payload, and a clean plan frame with no embedded original.
+        let mut leaky = udp([10, 0, 0, 1], [10, 0, 0, 2]);
+        leaky.extend_from_slice(&[192, 168, 10, 131]); // payload leak
+        let clean = udp([10, 0, 0, 1], [10, 0, 0, 2]);
+        let mut cap = Capture {
+            header: PcapHeader::default(),
+            packets: vec![pkt(leaky), pkt(clean)],
+        };
+        assert_eq!(
+            drop_payload_leak_frames(&mut cap, &originals),
+            1,
+            "the frame leaking an original address in its payload is dropped"
+        );
+        assert_eq!(cap.packets.len(), 1, "the clean plan frame is kept");
+        assert!(
+            !cap.packets[0]
+                .data
+                .windows(4)
+                .any(|w| w == [192, 168, 10, 131]),
+            "no original address survives anywhere in the output"
         );
     }
 
