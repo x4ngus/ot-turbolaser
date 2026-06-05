@@ -773,15 +773,22 @@ fn splitmix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// A stable, locally-administered unicast MAC for a remapped host, derived from
+/// A stable, globally-administered unicast MAC for a remapped host, derived from
 /// the session seed and the host's new IP. Deterministic per (seed, ip) so a
-/// host keeps one MAC every run and distinct hosts get distinct MACs. Not
-/// vendor-matched: octet 0 is forced locally-administered (bit 1 set) and
-/// unicast (bit 0 clear), so it never collides with a real vendor OUI.
+/// host keeps one MAC every run and distinct hosts get distinct MACs. Octet 0 is
+/// forced globally-administered (locally-administered bit CLEARED) and unicast
+/// (multicast bit clear). This matters: a passive sensor (Dragos) ignores
+/// locally-administered MACs for asset association, so an LAA address never binds
+/// MAC<->IP from ARP and the host stays IP-only (the field defect: thousands of
+/// LAA ARP frames on the wire, zero associations). A globally-administered
+/// address is treated as real hardware and binds. The hash-derived OUI is
+/// usually unallocated, so the sensor shows an unknown vendor, which is fine for
+/// a generic host; the segment is isolated, so there is no real hardware to
+/// collide with.
 pub(crate) fn stable_mac(seed: u64, ip: u32) -> [u8; 6] {
     let h = splitmix64(seed ^ u64::from(ip).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let b = h.to_be_bytes();
-    [(b[0] & 0xFC) | 0x02, b[1], b[2], b[3], b[4], b[5]]
+    [b[0] & 0xFC, b[1], b[2], b[3], b[4], b[5]]
 }
 
 /// Pick a random network of the given prefix within 10/8 that does not overlap
@@ -1216,19 +1223,22 @@ mod tests {
     }
 
     #[test]
-    fn stable_mac_is_laa_unicast_and_deterministic() {
+    fn stable_mac_is_globally_administered_unicast_and_deterministic() {
         let a = stable_mac(7, u32::from(Ipv4Addr::new(10, 1, 2, 3)));
         let b = stable_mac(7, u32::from(Ipv4Addr::new(10, 1, 2, 3)));
         let c = stable_mac(7, u32::from(Ipv4Addr::new(10, 1, 2, 4)));
         assert_eq!(a, b, "same (seed, ip) yields the same MAC");
         assert_ne!(a, c, "different IPs yield different MACs");
         assert_eq!(a[0] & 0x01, 0, "unicast (group bit clear)");
-        assert_eq!(a[0] & 0x02, 0x02, "locally administered (LAA bit set)");
+        // Globally-administered: a passive sensor ignores LAA MACs for asset
+        // association, so an LAA address would never bind MAC<->IP from ARP.
+        assert_eq!(a[0] & 0x02, 0, "globally administered (LAA bit clear)");
     }
 
     #[test]
     fn apply_host_map_rewrites_ipv4_macs_and_preserves_broadcast_dst() {
-        // Unicast src->dst: both MACs become stable LAA, IP checksums stay valid.
+        // Unicast src->dst: both MACs become stable globally-administered, IP
+        // checksums stay valid.
         let mut uni = cap_from(&[([192, 168, 5, 10], [192, 168, 5, 20])]);
         let seed: u64 = 13;
         // Capture the post-remap new IPs by running the full remap, then re-derive
@@ -1419,7 +1429,11 @@ mod tests {
             [192, 168, 7, 20],
             "dest address remapped off the original"
         );
-        assert_eq!(f[6] & 0x02, 0x02, "source MAC is locally administered");
+        assert_eq!(
+            f[6] & 0x02,
+            0x00,
+            "source MAC is globally administered (the sensor ignores LAA MACs)"
+        );
         assert_eq!(f[6] & 0x01, 0x00, "source MAC is unicast");
         assert_ne!(&f[6..12], &foreign_oui, "no original OUI on the wire");
     }

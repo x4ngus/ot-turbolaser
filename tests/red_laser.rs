@@ -497,8 +497,9 @@ fn remap_drops_payload_embedded_original_addresses() {
 /// conversations with the exact junk that leaked in the field (a foreign-MAC LLDP
 /// frame, an IPv6 frame, an oversize frame, a broadcast ARP) and confirm the wire
 /// carries only planned, coherent frames: every address in a fabricated 10/8
-/// zone, every source MAC locally administered (no foreign OUI), nothing over the
-/// MTU, no L2 or IPv6 chatter. tshark then confirms the surviving bytes dissect
+/// zone, every source MAC globally administered (a stable plan MAC, no foreign
+/// OUI), nothing over the MTU, no L2 or IPv6 chatter. tshark then confirms the
+/// surviving bytes dissect
 /// clean. This is the plan==wire and unionised-asset guarantee on real output.
 #[test]
 fn wire_carries_only_planned_coherent_frames() {
@@ -602,9 +603,15 @@ fn wire_carries_only_planned_coherent_frames() {
         assert_ne!(ethertype, 0x86dd, "no IPv6 on the wire");
         assert_ne!(ethertype, 0x88cc, "no LLDP/L2 chatter on the wire");
         assert_ne!(ethertype, 0x0806, "capture ARP is thinned, not replayed");
-        // Source MAC is locally administered (a stable plan MAC), never a foreign
-        // OUI carried over from the capture.
-        assert_eq!(d[6] & 0x02, 0x02, "source MAC is locally administered");
+        // Source MAC is globally administered (a stable plan MAC), never a
+        // foreign OUI carried over from the capture. Globally administered
+        // matters: a passive sensor ignores LAA MACs for asset association, so an
+        // LAA source MAC would never bind MAC<->IP.
+        assert_eq!(
+            d[6] & 0x02,
+            0x00,
+            "source MAC is globally administered (the sensor ignores LAA MACs)"
+        );
         assert_ne!(&d[6..9], &foreign[..], "no foreign source OUI on the wire");
         assert_eq!(ethertype, 0x0800, "only IPv4 OT traffic on the wire");
         assert_eq!(d[26], 10, "IPv4 source in a planned 10/8 zone");
