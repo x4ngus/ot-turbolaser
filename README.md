@@ -60,9 +60,11 @@ In red laser the fabricated plant includes:
   (EtherNet/IP List Identity over UDP; Modbus 0x2B/0x0E and S7comm SZL over a full
   TCP handshake, COTP and S7 setup, and a graceful teardown), each opened from a
   fresh ephemeral client port so the sensor sees a distinct, attributable scan.
-  Every asset is bound MAC-to-IP by an ARP response ("ip is at mac"), padded to
-  the standard 60-byte Ethernet frame, which is the only association a passive
-  sensor trusts (the source MAC of an L3 frame could be a router, so it is not);
+  Every asset is bound MAC-to-IP by a solicited ARP reply (a per-zone
+  engineering station asks "who has ip?", the asset answers "ip is at mac"
+  unicast), padded to the 60-byte Ethernet minimum, which is the association a
+  passive sensor trusts (the source MAC of an L3 frame could be a router, so it
+  is not, and an unsolicited gratuitous broadcast it does not bind from);
   switches add LLDP/CDP. The fabricated fleet spreads across every carrier
   protocol, so none is left unrepresented. The remap also drops any frame whose
   payload still carries an original address (NBNS/DHCP/DNS embed them), so a
