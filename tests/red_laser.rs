@@ -85,7 +85,7 @@ synthesis:
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
     let pcap = engine
-        .red_tick(0)
+        .red_tick(0, 0)
         .expect("first tick should fabricate and emit identities");
 
     // Devices were fabricated and the ledger persisted.
@@ -139,7 +139,7 @@ fn unsealed_saturated_session_cycles_zone_names() {
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
-    engine.red_tick(0); // fabricates up to the cap; nothing to cycle yet
+    engine.red_tick(0, 0); // fabricates up to the cap; nothing to cycle yet
     assert_eq!(engine.ledger().cycle, 0, "no cycle while still fabricating");
     let before: Vec<String> = engine
         .ledger()
@@ -148,7 +148,7 @@ fn unsealed_saturated_session_cycles_zone_names() {
         .map(|s| s.zone_name.clone())
         .collect();
 
-    engine.red_tick(1); // saturated (added == 0) at the cadence -> cycle
+    engine.red_tick(1, 60); // saturated (added == 0) at the cadence -> cycle
     assert_eq!(
         engine.ledger().cycle,
         1,
@@ -186,8 +186,8 @@ fn sealed_session_never_cycles() {
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
     let before = engine.ledger().subnets[0].zone_name.clone();
-    engine.red_tick(1);
-    engine.red_tick(2);
+    engine.red_tick(1, 60);
+    engine.red_tick(2, 120);
     assert_eq!(engine.ledger().cycle, 0, "sealed session never cycles");
     assert_eq!(
         engine.ledger().subnets[0].zone_name,
@@ -207,7 +207,7 @@ fn remap_into_session_caches_and_reuses() {
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
-    engine.red_tick(0); // fabricate zones so the remap uses the into-zones path
+    engine.red_tick(0, 0); // fabricate zones so the remap uses the into-zones path
 
     // A tiny capture with one remappable conversation.
     let pool = dir.path().join("pool");
@@ -316,7 +316,7 @@ fn reconcile_caps_assets_and_never_leaves_original_addresses() {
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
-    engine.red_tick(0); // fabricate the small fleet and its zones
+    engine.red_tick(0, 0); // fabricate the small fleet and its zones
 
     let pool = dir.path().join("pool");
     std::fs::create_dir_all(&pool).unwrap();
@@ -366,7 +366,7 @@ fn reconcile_registers_same_origins_regardless_of_capture_order() {
         std::fs::write(&cfg_path, yaml).unwrap();
         let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
         let mut engine = SimulatorEngine::red(&cfg, 0);
-        engine.red_tick(0);
+        engine.red_tick(0, 0);
         let pool = dir.path().join("pool");
         std::fs::create_dir_all(&pool).unwrap();
         let a = write_capture(&pool, "a.pcap", 10, 3);
@@ -418,7 +418,7 @@ fn wire_carries_only_planned_coherent_frames() {
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
-    engine.red_tick(0); // fabricate the plant so the into-zones remap runs
+    engine.red_tick(0, 0); // fabricate the plant so the into-zones remap runs
 
     let foreign = [0x00, 0x1c, 0x06]; // a real vendor OUI (not locally administered)
     let udp = |sm: [u8; 6], s: Ipv4Addr, d: Ipv4Addr, dport: u16, pay: &[u8]| {
@@ -546,9 +546,9 @@ fn synth_burst_is_arp_light_not_a_broadcast_flood() {
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
     let mut engine = SimulatorEngine::red(&cfg, 0);
-    engine.red_tick(0); // fabricate the fleet and zones
+    engine.red_tick(0, 0); // fabricate the fleet and zones
 
-    // Register far more capture hosts than the ARP refresh window (16).
+    // Register far more capture hosts than the ARP refresh window (8).
     let pool = dir.path().join("pool");
     std::fs::create_dir_all(&pool).unwrap();
     let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
@@ -556,7 +556,7 @@ fn synth_burst_is_arp_light_not_a_broadcast_flood() {
     let hosts = engine.ledger().capture_host_count();
     assert!(hosts > 40, "many capture hosts registered: {hosts}");
 
-    let pcap = engine.red_tick(1).expect("identity burst");
+    let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
     let arp = cap
         .packets
@@ -568,11 +568,12 @@ fn synth_burst_is_arp_light_not_a_broadcast_flood() {
         arp < hosts,
         "ARP is rotated, not one per host: {arp} arp vs {hosts} hosts"
     );
-    // The two rotating windows bound ARP: capture-host (16) + device (16). Both
-    // are small and rotate, so the wire is never an ARP broadcast.
+    // Only a small rotating capture-host window emits ARP; fabricated devices are
+    // not ARP'd at all (they bind from their sessions). So ARP stays tiny and is
+    // never one record per host at the sensor.
     assert!(
-        arp <= 32,
-        "ARP refresh windows stay small (capture + device): {arp}"
+        arp <= 8,
+        "ARP refresh window stays small (capture-host only): {arp}"
     );
     assert!(
         total - arp >= 8,

@@ -32,17 +32,15 @@ const FABRICATE_BATCH: usize = 16;
 /// How many devices to re-announce per iteration, cycling through the ledger, so
 /// each identity pcap stays small.
 const ANNOUNCE_WINDOW: usize = 256;
-/// How many capture-host MAC<->IP bindings to refresh per iteration via
-/// gratuitous ARP, cycling through the registry. Kept small so the wire stays an
-/// OT protocol feed rather than an ARP broadcast: announcing every host each tick
-/// floods a passive sensor with ARP and leaves hosts MAC-only when their IP
-/// traffic is not concurrently replaying. Each host re-announces as its window
-/// comes round, which is enough to keep the binding fresh between capture fires.
-const CAPTURE_ARP_WINDOW: usize = 16;
-/// How many fabricated devices to re-bind per iteration via a rotating
-/// gratuitous ARP, as a backup to the identity session (which already carries
-/// the device MAC<->IP). Small and rotating so it never floods.
-const DEVICE_ARP_WINDOW: usize = 16;
+/// How many capture-host MAC<->IP bindings to refresh per burst via gratuitous
+/// ARP, cycling through the registry. A small backstop for receive-only hosts
+/// (those that never source a frame the sensor could bind from); hosts that do
+/// source traffic bind from their own frames. Each gratuitous ARP is its own
+/// conversation record at the sensor, so this is kept small on purpose:
+/// announcing every host floods the sensor's protocol histogram with ARP.
+/// Fabricated devices are not ARP'd at all; they bind from their identity
+/// sessions.
+const CAPTURE_ARP_WINDOW: usize = 8;
 /// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
 /// are periodic (tens of seconds), so emitting them every sub-second tick is
 /// both unrealistic and a needless share of the wire; spacing them keeps OT
@@ -82,9 +80,15 @@ pub struct SimulatorEngine {
     /// Cursor into the capture-host registry for the rotating gratuitous-ARP
     /// refresh window, so each host re-announces in turn rather than all at once.
     capture_arp_cursor: usize,
-    /// Cursor into the fabricated device list for the rotating device gratuitous
-    /// ARP backup-binding window.
-    device_arp_cursor: usize,
+    /// Minimum seconds between identity bursts (periodic discovery cadence).
+    announce_interval_secs: u64,
+    /// Wall-clock time of the last identity burst, for the cadence gate.
+    last_announce_unix: Option<u64>,
+    /// Count of identity bursts so far, used as the per-scan nonce that varies
+    /// each device's ephemeral client port (and thus its TCP ISN), so every burst
+    /// is a fresh, separately parseable connection rather than an identical one
+    /// the sensor folds and never re-reads.
+    announce_count: u64,
     /// Models already warned about missing from the vuln DB, so the warning
     /// logs once rather than on every announce.
     warned_models: HashSet<String>,
@@ -144,7 +148,9 @@ impl SimulatorEngine {
             sim_rng,
             announce_cursor: 0,
             capture_arp_cursor: 0,
-            device_arp_cursor: 0,
+            announce_interval_secs: cfg.synthesis.announce_interval_secs,
+            last_announce_unix: None,
+            announce_count: 0,
             warned_models: HashSet::new(),
             remap_cache_bytes: HashMap::new(),
             dirty: false,
@@ -426,9 +432,10 @@ impl SimulatorEngine {
     }
 
     /// One red-laser iteration: grow the device set within caps, then build the
-    /// identity/beacon pcap for this round's announce window. Returns the tmpfs
-    /// pcap to fire, or None when there is nothing to announce.
-    pub fn red_tick(&mut self, run: u64) -> Option<PathBuf> {
+    /// identity/beacon pcap for this round's announce window. `now` is the current
+    /// unix time, for the periodic-discovery cadence. Returns the tmpfs pcap to
+    /// fire, or None when there is nothing to announce this tick.
+    pub fn red_tick(&mut self, run: u64, now: u64) -> Option<PathBuf> {
         if !self.synth_enabled {
             return None;
         }
@@ -470,8 +477,20 @@ impl SimulatorEngine {
             self.dirty = true;
         }
 
-        let frames = if run.is_multiple_of(self.identity_every) {
-            self.build_assertions(run)
+        // Announce on a wall-clock cadence so the plant reads as periodic
+        // discovery, not a scan storm. Each burst increments the nonce so every
+        // device opens a fresh client connection (new ephemeral port and ISN),
+        // giving the sensor a distinct, parseable scan to attribute rather than
+        // one identical conversation it folds and never re-reads.
+        let cadence_due = match self.last_announce_unix {
+            Some(t) => now.saturating_sub(t) >= self.announce_interval_secs,
+            None => true,
+        };
+        let frames = if run.is_multiple_of(self.identity_every) && cadence_due {
+            self.last_announce_unix = Some(now);
+            let nonce = self.announce_count;
+            self.announce_count = self.announce_count.wrapping_add(1);
+            self.build_assertions(run, nonce)
         } else {
             Vec::new()
         };
@@ -545,13 +564,14 @@ impl SimulatorEngine {
         Some(out)
     }
 
-    /// Render a rotating window of devices as protocol-assertion frames (each
-    /// device's session carries its MAC and IP, the primary binding), plus small
-    /// rotating windows of gratuitous ARP for devices and capture hosts as a
-    /// backup binding. Switch beacons fire only on a cadence. Kept ARP-light and
-    /// OT-dominant on purpose: the wire is an OT protocol feed, not an ARP or
-    /// beacon broadcast.
-    fn build_assertions(&mut self, run: u64) -> Vec<Vec<u8>> {
+    /// Render a rotating window of devices as protocol-assertion frames. Each
+    /// device's session carries its MAC and IP, so it binds without a separate
+    /// ARP; `nonce` varies the client ephemeral port (and ISN) so each burst is a
+    /// fresh, separately parseable connection. A small rotating capture-host
+    /// gratuitous ARP is the only ARP emitted, as a binding backstop for
+    /// receive-only hosts. Switch beacons fire only on a cadence. Kept ARP-light
+    /// and OT-dominant on purpose: the wire is an OT protocol feed.
+    fn build_assertions(&mut self, run: u64, nonce: u64) -> Vec<Vec<u8>> {
         let n = self.ledger.devices.len();
         if n == 0 || !self.device_identity {
             return Vec::new();
@@ -578,30 +598,19 @@ impl SimulatorEngine {
                         fallback_profile(dev)
                     }
                 };
-                frames.extend(assertions_for_device(dev, &profile, switch_beacons, seed));
+                frames.extend(assertions_for_device(
+                    dev,
+                    &profile,
+                    switch_beacons,
+                    seed,
+                    nonce,
+                ));
             }
         }
         for model in missing {
             if self.warned_models.insert(model.clone()) {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
-        }
-        // Backup MAC<->IP binding for a small rotating window of fabricated
-        // devices. The identity session already carries each device's binding;
-        // this guarantees it even if a session is missed, and was removed in
-        // v0.2.4 (which left identity-only devices MAC-less when their session
-        // was discarded). Small and rotating so it never floods.
-        {
-            let devices = &self.ledger.devices;
-            let take = DEVICE_ARP_WINDOW.min(n);
-            let start_d = self.device_arp_cursor % n;
-            for k in 0..take {
-                let dev = &devices[(start_d + k) % n];
-                if let Ok(ip) = dev.ip.parse::<Ipv4Addr>() {
-                    frames.push(arp::gratuitous(parse_mac(&dev.mac), ip));
-                }
-            }
-            self.device_arp_cursor = (start_d + take) % n;
         }
         // Refresh a small rotating window of capture-host MAC<->IP bindings, not
         // all of them, so the burst stays an OT protocol feed instead of an ARP
@@ -629,11 +638,16 @@ impl SimulatorEngine {
 /// `seed` derives the per-zone engineering-station MAC so the querying client is
 /// a distinct, coherent asset in each zone rather than one MAC multi-homed across
 /// every zone (which a sensor cannot fuse, and which polluted attribution).
+/// `nonce` (the burst counter) varies the client ephemeral port per scan so each
+/// burst is a fresh connection the sensor parses anew, instead of one identical
+/// 4-tuple it folds into a single conversation and never re-reads (which left the
+/// device unattributed and surfacing only as an L2/MAC-only asset).
 fn assertions_for_device(
     dev: &DeviceRecord,
     profile: &DeviceProfile,
     switch_beacons: bool,
     seed: u64,
+    nonce: u64,
 ) -> Vec<Vec<u8>> {
     let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() else {
         return Vec::new();
@@ -643,7 +657,9 @@ fn assertions_for_device(
     // A stable per-zone engineering-station MAC, not one global CLIENT_MAC across
     // all zones: a multi-homed MAC is unbindable and pollutes the asset model.
     let client_mac = l3::stable_mac(seed, u32::from(client_ip));
-    let client_port = 50000u16;
+    // A fresh ephemeral client port per scan, so each connection is a distinct
+    // 4-tuple (one ephemeral port per connection, like a real client).
+    let client_port = ephemeral_port(nonce, dev_ip);
 
     let mut frames: Vec<Vec<u8>> = Vec::new();
 
@@ -694,7 +710,14 @@ fn assertions_for_device(
             let (major, minor) = parse_version(&dev.firmware);
             let order = profile.s7_order_number.as_deref().unwrap_or(&dev.model);
             frames.extend(s7_szl::exchange(
-                client_mac, dev_mac, client_ip, dev_ip, 2000, order, major, minor,
+                client_mac,
+                dev_mac,
+                client_ip,
+                dev_ip,
+                client_port,
+                order,
+                major,
+                minor,
             ));
         }
         ProfileProto::SwitchSnmp => {
@@ -717,14 +740,15 @@ fn assertions_for_device(
                     &dev.model,
                 ));
             }
+            let request_id = 0x1000u32.wrapping_add(nonce as u32 & 0x0fff);
             let (a, b) = snmp::exchange(
                 client_mac,
                 dev_mac,
                 client_ip,
                 dev_ip,
-                43210,
+                client_port,
                 "public",
-                0x1234,
+                request_id,
                 &descr,
                 profile.sys_object_id.as_deref(),
             );
@@ -733,6 +757,16 @@ fn assertions_for_device(
         }
     }
     frames
+}
+
+/// A fresh ephemeral client port in the IANA dynamic range (49152-65535), varied
+/// per burst (`nonce`) and per device, so every scan is a distinct 4-tuple a
+/// sensor treats as a new conversation to parse, instead of the same connection
+/// re-opening forever (which it folds into one record and never re-reads).
+fn ephemeral_port(nonce: u64, dev_ip: Ipv4Addr) -> u16 {
+    let h = nonce.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ u64::from(u32::from(dev_ip)).wrapping_mul(0x2545_F491_4F6C_DD1D);
+    49152 + (h % 16384) as u16
 }
 
 /// Truncate a string to at most `max` bytes at a char boundary, so a builder's
@@ -1005,7 +1039,7 @@ mod tests {
             .find(|p| p.protocol == ProfileProto::Enip)
             .unwrap();
         let d = dev("enip", &p.model, &p.firmware);
-        let frames = assertions_for_device(&d, p, true, 1337);
+        let frames = assertions_for_device(&d, p, true, 1337, 0);
         assert_eq!(frames.len(), 2, "List Identity request + reply over UDP");
         // List Identity is UDP/44818 (ethertype 0x0800); the device binds from
         // the connectionless reply, which a sensor reads without a session.
@@ -1032,14 +1066,53 @@ mod tests {
             .unwrap();
         let d = dev("switch_snmp", &p.model, &p.firmware);
         assert_eq!(
-            assertions_for_device(&d, p, true, 1337).len(),
+            assertions_for_device(&d, p, true, 1337, 0).len(),
             4,
             "lldp + cdp + snmp request/response"
         );
         assert_eq!(
-            assertions_for_device(&d, p, false, 1337).len(),
+            assertions_for_device(&d, p, false, 1337, 0).len(),
             2,
             "beacons off leaves the snmp exchange"
+        );
+    }
+
+    #[test]
+    fn ephemeral_port_varies_per_burst_and_device() {
+        let a = Ipv4Addr::new(10, 0, 0, 5);
+        let b = Ipv4Addr::new(10, 0, 0, 6);
+        assert!(
+            (49152..=65535).contains(&ephemeral_port(0, a)),
+            "in the IANA dynamic range"
+        );
+        assert_ne!(
+            ephemeral_port(0, a),
+            ephemeral_port(1, a),
+            "a new burst uses a new ephemeral port for the same device"
+        );
+        assert_ne!(
+            ephemeral_port(0, a),
+            ephemeral_port(0, b),
+            "distinct devices use distinct ports within a burst"
+        );
+    }
+
+    #[test]
+    fn successive_scans_are_distinct_connections() {
+        let vuln = VulnDb::embedded().unwrap();
+        let p = vuln
+            .profiles()
+            .iter()
+            .find(|p| p.protocol == ProfileProto::Modbus)
+            .unwrap();
+        let d = dev("modbus", &p.model, &p.firmware);
+        // Two bursts (nonce 0 and 1) must differ on the wire, so a sensor sees a
+        // fresh connection each scan rather than one it folds and never re-reads.
+        let burst0 = assertions_for_device(&d, p, false, 1337, 0);
+        let burst1 = assertions_for_device(&d, p, false, 1337, 1);
+        assert_ne!(
+            burst0, burst1,
+            "successive scans are distinct connections (fresh port and ISN)"
         );
     }
 

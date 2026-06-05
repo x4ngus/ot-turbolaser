@@ -221,7 +221,7 @@ pub fn run(args: &RunArgs) -> i32 {
         // Red laser: fabricate and fire device identities and switch beacons as
         // a second short burst on the same wire, then refresh the heartbeat.
         if let Some(e) = engine.as_mut() {
-            if let Some(p) = e.red_tick(run_counter) {
+            if let Some(p) = e.red_tick(run_counter, now_unix()) {
                 match replay::run_once(&cfg.iface, &p, &rate_args, &watchdog) {
                     Ok(res) if res.success => {
                         info!("run={run_counter} identities sent: {}", res.detail)
