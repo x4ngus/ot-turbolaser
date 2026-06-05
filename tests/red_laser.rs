@@ -51,6 +51,35 @@ fn tshark(path: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Parse a colon-separated MAC string to bytes (test helper).
+fn parse_mac6(s: &str) -> [u8; 6] {
+    let mut m = [0u8; 6];
+    for (i, part) in s.split(':').enumerate().take(6) {
+        m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
+    }
+    m
+}
+
+/// One ARP frame's salient fields: (eth_dst, opcode, sender_mac, sender_ip).
+type ArpView = ([u8; 6], u16, [u8; 6], [u8; 4]);
+
+/// The ARP frames in a capture, as (eth_dst, opcode, sender_mac, sender_ip).
+fn arp_frames(cap: &Capture) -> Vec<ArpView> {
+    cap.packets
+        .iter()
+        .filter(|p| p.data.len() >= 42 && u16::from_be_bytes([p.data[12], p.data[13]]) == 0x0806)
+        .map(|p| {
+            let mut dst = [0u8; 6];
+            dst.copy_from_slice(&p.data[0..6]);
+            let oper = u16::from_be_bytes([p.data[20], p.data[21]]);
+            let mut sha = [0u8; 6];
+            sha.copy_from_slice(&p.data[22..28]);
+            let spa = [p.data[28], p.data[29], p.data[30], p.data[31]];
+            (dst, oper, sha, spa)
+        })
+        .collect()
+}
+
 #[test]
 fn red_tick_fabricates_and_emits_dissectable_identities() {
     let dir = tempfile::tempdir().unwrap();
@@ -651,13 +680,6 @@ fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
     // The set of bindings the replies carry: (sender MAC, sender IP) of each
     // reply, i.e. "this IP is at this MAC". Sender hardware addr at ARP offset 8
     // (frame 22-28), sender protocol addr at ARP offset 14 (frame 28-32).
-    let parse_mac6 = |s: &str| -> [u8; 6] {
-        let mut m = [0u8; 6];
-        for (i, part) in s.split(':').enumerate().take(6) {
-            m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
-        }
-        m
-    };
     let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp
         .iter()
         .filter(|p| oper(&p.data) == 2)
@@ -708,4 +730,73 @@ fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
         "OT protocol sessions ride alongside the bindings: {total} total, {} arp",
         arp.len()
     );
+}
+
+/// With a large capture-host fleet the ARP must rotate through a bounded window
+/// per burst, not resolve every host at once. Resolving the whole fleet in one
+/// burst is a multi-thousand-frame ARP microburst that chokes the replay and
+/// overruns the sensor (so few associations form and the capture is starved):
+/// the v0.2.11 field defect. Over a few rotations every host is still bound.
+#[test]
+fn capture_host_arp_rotates_through_a_window_and_covers_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 512",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0, 0); // fabricate the fleet and zones
+
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    // ~200 hosts in one /24, well over the per-burst ARP window.
+    let src = write_capture(&pool, "many.pcap", 60, 200);
+    engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    let hosts = engine.ledger().capture_host_count();
+    assert!(hosts > 150, "a large host fleet: {hosts}");
+
+    // Resolve over several bursts, advancing the wall clock past the cadence gate
+    // each time, and collect every binding the replies carry.
+    let mut bound: std::collections::HashSet<([u8; 6], [u8; 4])> = std::collections::HashSet::new();
+    let mut max_replies_in_a_burst = 0usize;
+    for i in 1..=8u64 {
+        let pcap = engine.red_tick(i, i * 60).expect("burst");
+        let cap = pcapio::read(&pcap).unwrap();
+        let replies: Vec<_> = arp_frames(&cap)
+            .into_iter()
+            .filter(|(_, op, _, _)| *op == 2)
+            .collect();
+        max_replies_in_a_burst = max_replies_in_a_burst.max(replies.len());
+        for (_, _, sha, spa) in replies {
+            bound.insert((sha, spa));
+        }
+        let _ = std::fs::remove_file(&pcap);
+    }
+
+    // No single burst resolves the whole fleet: the per-burst ARP stays well
+    // below the host count (the anti-flood property the window guarantees).
+    assert!(
+        max_replies_in_a_burst < hosts,
+        "a burst never resolves the whole fleet at once: {max_replies_in_a_burst} replies vs {hosts} hosts"
+    );
+
+    // Every capture host is bound within a few rotations.
+    for h in &engine.ledger().capture_hosts {
+        let m = parse_mac6(&h.mac);
+        let a: Ipv4Addr = h.ip.parse().expect("host ip parses");
+        assert!(
+            bound.contains(&(m, a.octets())),
+            "capture host {} / {} is bound over the rotations",
+            h.ip,
+            h.mac
+        );
+    }
 }
