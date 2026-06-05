@@ -807,3 +807,68 @@ fn capture_host_arp_rotates_through_a_window_and_covers_all() {
         );
     }
 }
+
+/// The ARP must be peer-to-peer: within a subnet each host resolves a single
+/// peer, so no host probes many addresses. A single station broadcasting
+/// "who-has" for the whole subnet (drawing a flood of replies at itself) is an
+/// ARP-scan / cache-poisoning signature a security sensor will not associate
+/// MAC<->IP from. That was the field defect: only the stations bound; every host
+/// the station scanned stayed split. Regression guard: no requester probes more
+/// than a couple of distinct IPs across a full ring rotation.
+#[test]
+fn arp_is_peer_to_peer_no_single_host_scans_the_subnet() {
+    use std::collections::{HashMap, HashSet};
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 512",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0, 0);
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = write_capture(&pool, "many.pcap", 60, 200); // ~200 hosts in one /24
+    engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    assert!(
+        engine.ledger().capture_host_count() > 150,
+        "a large host fleet"
+    );
+
+    // Across enough bursts to cover a full rotation, count the distinct target
+    // IPs each requester probes. ARP request: sender MAC (SHA) at frame 22-28,
+    // target protocol address (TPA) at 38-42.
+    let mut asked: HashMap<[u8; 6], HashSet<[u8; 4]>> = HashMap::new();
+    for i in 1..=6u64 {
+        let pcap = engine.red_tick(i, i * 60).expect("burst");
+        let cap = pcapio::read(&pcap).unwrap();
+        for p in &cap.packets {
+            let d = &p.data;
+            if d.len() >= 42
+                && u16::from_be_bytes([d[12], d[13]]) == 0x0806
+                && u16::from_be_bytes([d[20], d[21]]) == 1
+            {
+                let mut sha = [0u8; 6];
+                sha.copy_from_slice(&d[22..28]);
+                asked
+                    .entry(sha)
+                    .or_default()
+                    .insert([d[38], d[39], d[40], d[41]]);
+            }
+        }
+        let _ = std::fs::remove_file(&pcap);
+    }
+    assert!(!asked.is_empty(), "ARP requests were emitted");
+    let max_probed = asked.values().map(|s| s.len()).max().unwrap_or(0);
+    assert!(
+        max_probed <= 2,
+        "no host ARP-scans the subnet: the busiest requester probed {max_probed} IPs (a ring probes 1; a station-hub would probe the whole window)"
+    );
+}
