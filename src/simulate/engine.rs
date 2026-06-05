@@ -577,18 +577,14 @@ impl SimulatorEngine {
             let vuln = &self.vuln;
             for k in 0..count {
                 let dev = &devices[(start + k) % n];
-                // Bind the device MAC<->IP with an ARP exchange: the zone client
-                // asks who has the device IP, the device answers "dev_ip is at
-                // dev_mac". The sensor associates MAC<->IP ONLY from such ARP
-                // responses (the source MAC of an L3 frame is untrusted, it could
-                // be a router), so this exchange is what makes the device one
-                // asset instead of a separate MAC entry and IP entry.
+                // Bind the device MAC<->IP with a gratuitous ARP response,
+                // broadcast: "dev_ip is at dev_mac". The sensor associates
+                // MAC<->IP ONLY from an ARP response (the source MAC of an L3
+                // frame is untrusted, it could be a router), and this unsolicited
+                // broadcast announcement is the form it associates from most
+                // reliably on a SPAN.
                 if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
-                    let c_ip = client_addr(&dev.subnet_cidr);
-                    let c_mac = l3::stable_mac(seed, u32::from(c_ip));
-                    let (req, rep) = arp::resolve(c_mac, c_ip, parse_mac(&dev.mac), dev_ip);
-                    frames.push(req);
-                    frames.push(rep);
+                    frames.push(arp::gratuitous(parse_mac(&dev.mac), dev_ip));
                 }
                 // Own the profile so a missing-model fallback and the vuln borrow
                 // do not tangle; a device is never silently dropped.
@@ -613,17 +609,13 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Bind every capture host the same way, with an ARP response: the zone
-        // client resolves the host, the host answers "ip is at mac". Its replayed
-        // L3 traffic does not bind it (the sensor does not infer MAC<->IP from L3
-        // frame Ethernet headers), so without this ARP it stays IP-only.
+        // Bind every capture host the same way, a gratuitous ARP response
+        // announcing "ip is at mac". Its replayed L3 traffic does not bind it (the
+        // sensor does not infer MAC<->IP from L3 frame Ethernet headers), so
+        // without this ARP it stays IP-only.
         for h in &self.ledger.capture_hosts {
             if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                let c_ip = client_addr(&h.subnet_cidr);
-                let c_mac = l3::stable_mac(seed, u32::from(c_ip));
-                let (req, rep) = arp::resolve(c_mac, c_ip, parse_mac(&h.mac), ip);
-                frames.push(req);
-                frames.push(rep);
+                frames.push(arp::gratuitous(parse_mac(&h.mac), ip));
             }
         }
         self.announce_cursor = (start + count) % n;
