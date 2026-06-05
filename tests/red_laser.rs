@@ -595,15 +595,17 @@ fn wire_carries_only_planned_coherent_frames() {
     }
 }
 
-/// Every asset (device and capture host) must be bound MAC<->IP by an ARP
-/// response: the zone client asks who has the asset IP, the asset answers "ip is
-/// at mac" (oper=2, SHA=mac, SPA=ip). The sensor associates MAC<->IP only from
-/// such ARP responses. Every ARP frame must be padded to the 60-byte Ethernet
-/// minimum (a 42-byte runt is rejected). One request/reply pair per asset, OT
-/// sessions alongside. Regression guard for the binding collapse (IP-only assets)
-/// and the runt-ARP that a sensor would not trust.
+/// Every asset (device and capture host) must be bound MAC<->IP by a SOLICITED
+/// UNICAST ARP reply: the zone engineering station asks "who has the asset IP?"
+/// and the asset answers "ip is at mac" (oper=2, SHA=mac, SPA=ip) unicast to the
+/// station. The sensor associates MAC<->IP from such a solicited reply, not from
+/// a gratuitous broadcast (the reference OT capture it binds from carries only
+/// solicited unicast replies, zero gratuitous). Every ARP frame must be padded
+/// to the 60-byte Ethernet minimum (a 42-byte runt is rejected). Regression
+/// guard for the binding collapse (IP-only assets), the runt-ARP a sensor would
+/// not trust, and the gratuitous-broadcast form the sensor did not associate.
 #[test]
-fn synth_burst_binds_every_asset_via_padded_arp_responses() {
+fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -629,17 +631,69 @@ fn synth_burst_binds_every_asset_via_padded_arp_responses() {
 
     let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
-    let is_arp = |d: &[u8]| d.len() >= 22 && u16::from_be_bytes([d[12], d[13]]) == 0x0806;
+    const BROADCAST: [u8; 6] = [0xff; 6];
+    let is_arp = |d: &[u8]| d.len() >= 42 && u16::from_be_bytes([d[12], d[13]]) == 0x0806;
     // ARP opcode at offset 20-21 (after the 14-byte Ethernet header).
     let oper = |d: &[u8]| u16::from_be_bytes([d[20], d[21]]);
     let arp: Vec<&OwnedPacket> = cap.packets.iter().filter(|p| is_arp(&p.data)).collect();
-    let replies = arp.iter().filter(|p| oper(&p.data) == 2).count();
-    let assets = engine.ledger().device_count() + engine.ledger().capture_host_count();
-    // One ARP response (the binding) per asset.
-    assert_eq!(
-        replies, assets,
-        "one ARP response per asset: {replies} replies vs {assets} assets"
-    );
+    assert!(!arp.is_empty(), "the burst carries ARP");
+
+    // Every ARP reply is unicast to the requester, never a gratuitous broadcast.
+    // A broadcast reply is the form the sensor would not associate MAC<->IP from.
+    for p in arp.iter().filter(|p| oper(&p.data) == 2) {
+        assert_ne!(
+            &p.data[0..6],
+            &BROADCAST,
+            "ARP reply is unicast, not a gratuitous broadcast"
+        );
+    }
+
+    // The set of bindings the replies carry: (sender MAC, sender IP) of each
+    // reply, i.e. "this IP is at this MAC". Sender hardware addr at ARP offset 8
+    // (frame 22-28), sender protocol addr at ARP offset 14 (frame 28-32).
+    let parse_mac6 = |s: &str| -> [u8; 6] {
+        let mut m = [0u8; 6];
+        for (i, part) in s.split(':').enumerate().take(6) {
+            m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
+        }
+        m
+    };
+    let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp
+        .iter()
+        .filter(|p| oper(&p.data) == 2)
+        .map(|p| {
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&p.data[22..28]);
+            let ip = [p.data[28], p.data[29], p.data[30], p.data[31]];
+            (mac, ip)
+        })
+        .collect();
+
+    // Every asset is bound by one of those solicited replies.
+    let assets = engine
+        .ledger()
+        .devices
+        .iter()
+        .map(|d| (d.mac.clone(), d.ip.clone()))
+        .chain(
+            engine
+                .ledger()
+                .capture_hosts
+                .iter()
+                .map(|h| (h.mac.clone(), h.ip.clone())),
+        );
+    let mut checked = 0;
+    for (mac, ip) in assets {
+        let m = parse_mac6(&mac);
+        let a: Ipv4Addr = ip.parse().expect("asset ip parses");
+        assert!(
+            bound.contains(&(m, a.octets())),
+            "asset {ip} / {mac} is bound by a solicited unicast ARP reply"
+        );
+        checked += 1;
+    }
+    assert!(checked > 40, "checked a real fleet of assets: {checked}");
+
     // Every ARP frame is padded to the 60-byte Ethernet minimum, never a runt.
     for p in &arp {
         assert!(

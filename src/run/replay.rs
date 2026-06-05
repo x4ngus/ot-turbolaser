@@ -60,9 +60,17 @@ pub fn run_once(
 
     let summary = summarize(&text, status.code());
     let (pps, mbps) = parse_rate(&text);
+    let packets = parse_packets(&text);
+    // tcpreplay can exit 0 yet send nothing: it prints a fatal tcpedit/DLT error
+    // to stderr, or its stats report "Actual: 0 packets". Either would be logged
+    // as a successful send if we trusted the exit code alone, so gate on both the
+    // fatal marker and the authoritative send count. A missing stats line (count
+    // None) keeps the prior exit-code behaviour, so this never turns a healthy
+    // send into a false failure. This is what masked the unsent bursts in the field.
+    let success = status.success() && !killed && !is_fatal(&text) && packets != Some(0);
     Ok(ReplayResult {
-        success: status.success() && !killed,
-        packets: parse_packets(&text),
+        success,
+        packets,
         pps,
         mbps,
         detail: if killed {
@@ -118,6 +126,14 @@ fn parse_rate(text: &str) -> (Option<f64>, Option<f64>) {
     }
 }
 
+/// A fatal tcpreplay/tcpedit marker that means the run sent nothing, even when
+/// the process still exits 0. The "unsupported DLT type" message is the one that
+/// silently dropped identity bursts on the rig while the daemon logged success.
+fn is_fatal(text: &str) -> bool {
+    text.contains("Unable to process unsupported DLT type")
+        || text.contains("Fatal Error")
+}
+
 fn summarize(text: &str, code: Option<i32>) -> String {
     let last = text
         .lines()
@@ -153,6 +169,17 @@ mod tests {
         let (pps, mbps) = parse_rate(text);
         assert_eq!(pps, Some(2500.0));
         assert_eq!(mbps, Some(10.0));
+    }
+
+    #[test]
+    fn fatal_dlt_marker_is_detected_even_with_other_output() {
+        let text = "File Cache is enabled\nUnable to process unsupported DLT type: Ethernet (0x1)\n";
+        assert!(is_fatal(text), "the DLT error is fatal");
+        assert!(is_fatal("Fatal Error: something"), "fatal error is fatal");
+        assert!(
+            !is_fatal("File Cache is enabled\nActual: 10 packets (600 bytes) sent in 0.01 seconds\n"),
+            "a healthy run is not fatal"
+        );
     }
 
     #[test]
