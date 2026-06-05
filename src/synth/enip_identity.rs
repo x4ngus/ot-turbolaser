@@ -4,10 +4,16 @@
 //! carrying the CIP Identity object (vendor id, device type, product code,
 //! revision, serial, product name). The byte layout is the inverse of what the
 //! reload ENIP mutator reads, so that reader doubles as a round-trip oracle.
+//!
+//! List Identity is the connectionless ENIP discovery command, carried over
+//! **UDP/44818**, not TCP. A stateful sensor attributes the device identity from
+//! the UDP reply directly; sending it over a handshake-less TCP segment (as
+//! earlier builds did) leaves it on an unestablished connection that a sensor
+//! discards, which is why no CVE attributed in the field.
 
 use std::net::Ipv4Addr;
 
-use super::eth::tcp_frame;
+use super::eth::udp_frame;
 
 const ENIP_PORT: u16 = 44818;
 const CMD_LIST_IDENTITY: u16 = 0x0063;
@@ -68,9 +74,11 @@ pub fn list_identity_reply(id: &EnipIdentity) -> Vec<u8> {
     encap(CMD_LIST_IDENTITY, &body)
 }
 
-/// The (request, reply) frames of a device's identity exchange: the discovery
-/// tool queries from an ephemeral port, the device replies from 44818.
-#[allow(clippy::too_many_arguments)]
+/// The (request, reply) frames of a device's identity exchange over UDP/44818:
+/// the discovery tool queries from an ephemeral port, the device replies from
+/// 44818. UDP is connectionless, so the reply stands on its own with no session
+/// to establish, which is exactly how ENIP discovery works and what a passive
+/// sensor fingerprints.
 pub fn exchange(
     tool_mac: [u8; 6],
     dev_mac: [u8; 6],
@@ -81,19 +89,11 @@ pub fn exchange(
 ) -> (Vec<u8>, Vec<u8>) {
     let req = list_identity_request();
     let reply = list_identity_reply(id);
-    let req_frame = tcp_frame(
-        tool_mac, dev_mac, tool_ip, dev_ip, tool_port, ENIP_PORT, 1, 1, &req,
+    let req_frame = udp_frame(
+        tool_mac, dev_mac, tool_ip, dev_ip, tool_port, ENIP_PORT, &req,
     );
-    let reply_frame = tcp_frame(
-        dev_mac,
-        tool_mac,
-        dev_ip,
-        tool_ip,
-        ENIP_PORT,
-        tool_port,
-        1,
-        1 + req.len() as u32,
-        &reply,
+    let reply_frame = udp_frame(
+        dev_mac, tool_mac, dev_ip, tool_ip, ENIP_PORT, tool_port, &reply,
     );
     (req_frame, reply_frame)
 }

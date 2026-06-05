@@ -39,15 +39,24 @@ const ANNOUNCE_WINDOW: usize = 256;
 /// traffic is not concurrently replaying. Each host re-announces as its window
 /// comes round, which is enough to keep the binding fresh between capture fires.
 const CAPTURE_ARP_WINDOW: usize = 16;
-/// The fabricated engineering station that issues discovery queries.
-const CLIENT_MAC: [u8; 6] = [0x00, 0x50, 0x56, 0x00, 0x00, 0x01];
+/// How many fabricated devices to re-bind per iteration via a rotating
+/// gratuitous ARP, as a backup to the identity session (which already carries
+/// the device MAC<->IP). Small and rotating so it never floods.
+const DEVICE_ARP_WINDOW: usize = 16;
+/// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
+/// are periodic (tens of seconds), so emitting them every sub-second tick is
+/// both unrealistic and a needless share of the wire; spacing them keeps OT
+/// protocol traffic dominant in the sensor's packet-type histogram.
+const BEACON_EVERY: u64 = 8;
 /// Skip the L3 remap for captures larger than this, to bound tmpfs use.
 const MAX_SHM_BYTES: u64 = 256 * 1024 * 1024;
 /// Remap cache format version, embedded in the cache filename. Bump it whenever
 /// the remap output changes so an upgrade invalidates every stale cached pcap
 /// rather than replaying old content under an unchanged key. v2: plan-coherence
-/// drop, canonical Ethernet header, and the over-MTU drop (v0.2.3).
-const REMAP_CACHE_VERSION: u32 = 2;
+/// drop, canonical Ethernet header, and the over-MTU drop (v0.2.3). v3: capture
+/// ARP thinned out of the remap (v0.2.5), and a defensive bump past any cache an
+/// intermediate build wrote with a weaker (public-only) leak guard.
+const REMAP_CACHE_VERSION: u32 = 3;
 
 pub struct SimulatorEngine {
     pub ledger: Session,
@@ -73,6 +82,9 @@ pub struct SimulatorEngine {
     /// Cursor into the capture-host registry for the rotating gratuitous-ARP
     /// refresh window, so each host re-announces in turn rather than all at once.
     capture_arp_cursor: usize,
+    /// Cursor into the fabricated device list for the rotating device gratuitous
+    /// ARP backup-binding window.
+    device_arp_cursor: usize,
     /// Models already warned about missing from the vuln DB, so the warning
     /// logs once rather than on every announce.
     warned_models: HashSet<String>,
@@ -87,6 +99,12 @@ impl SimulatorEngine {
     /// Construct from config, loading or creating the session ledger. The
     /// scenario RNG is seeded from the session seed so a run is reproducible.
     pub fn red(cfg: &Config, now_unix: u64) -> Self {
+        // Purge the remap cache on startup. A cache hit is reused verbatim, so a
+        // stale or poisoned entry an earlier binary wrote (for example one from a
+        // build whose leak guard only blocked public addresses) must never
+        // outlive the binary that produced it. The cache is a performance
+        // optimisation, not correctness state, so dropping it is always safe.
+        purge_remap_cache(&cfg.paths.shm_dir);
         let vuln = VulnDb::load(&cfg.oui_db.vuln_path);
         let oui = OuiDb::load(&cfg.oui_db.path);
         let session = Session::load(&cfg.session.path)
@@ -126,6 +144,7 @@ impl SimulatorEngine {
             sim_rng,
             announce_cursor: 0,
             capture_arp_cursor: 0,
+            device_arp_cursor: 0,
             warned_models: HashSet::new(),
             remap_cache_bytes: HashMap::new(),
             dirty: false,
@@ -271,6 +290,19 @@ impl SimulatorEngine {
                 cfg.l3.max_frame_bytes,
                 src.display()
             );
+        }
+        // Thin the capture's own broadcast ARP unless explicitly asked to keep
+        // it: the synth burst already supplies controlled MAC<->IP bindings, so
+        // replaying capture ARP only floods the sensor. This keeps the wire an OT
+        // protocol feed rather than an ARP broadcast.
+        if !cfg.l3.replay_capture_arp {
+            let arp = l3::drop_arp_frames(&mut cap);
+            if arp > 0 {
+                log::info!(
+                    "remap: thinned {arp} capture ARP frame(s) from {}",
+                    src.display()
+                );
+            }
         }
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("mkdir {}: {e}", cache_dir.display()))?;
@@ -439,7 +471,7 @@ impl SimulatorEngine {
         }
 
         let frames = if run.is_multiple_of(self.identity_every) {
-            self.build_assertions()
+            self.build_assertions(run)
         } else {
             Vec::new()
         };
@@ -514,16 +546,20 @@ impl SimulatorEngine {
     }
 
     /// Render a rotating window of devices as protocol-assertion frames (each
-    /// device's response already carries its MAC and IP, so it binds without a
-    /// separate ARP), plus a small rotating window of capture-host gratuitous
-    /// ARPs to keep those bindings fresh between capture replays. Kept ARP-light
-    /// on purpose: the wire is an OT protocol feed, not an ARP broadcast.
-    fn build_assertions(&mut self) -> Vec<Vec<u8>> {
+    /// device's session carries its MAC and IP, the primary binding), plus small
+    /// rotating windows of gratuitous ARP for devices and capture hosts as a
+    /// backup binding. Switch beacons fire only on a cadence. Kept ARP-light and
+    /// OT-dominant on purpose: the wire is an OT protocol feed, not an ARP or
+    /// beacon broadcast.
+    fn build_assertions(&mut self, run: u64) -> Vec<Vec<u8>> {
         let n = self.ledger.devices.len();
         if n == 0 || !self.device_identity {
             return Vec::new();
         }
-        let switch_beacons = self.switch_beacons;
+        // Beacons are periodic, so emit them only every Nth burst, keeping OT
+        // protocol traffic the dominant packet type the sensor sees.
+        let switch_beacons = self.switch_beacons && run.is_multiple_of(BEACON_EVERY);
+        let seed = self.ledger.seed;
         let start = self.announce_cursor % n;
         let count = ANNOUNCE_WINDOW.min(n);
         let mut frames = Vec::new();
@@ -542,13 +578,30 @@ impl SimulatorEngine {
                         fallback_profile(dev)
                     }
                 };
-                frames.extend(assertions_for_device(dev, &profile, switch_beacons));
+                frames.extend(assertions_for_device(dev, &profile, switch_beacons, seed));
             }
         }
         for model in missing {
             if self.warned_models.insert(model.clone()) {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
+        }
+        // Backup MAC<->IP binding for a small rotating window of fabricated
+        // devices. The identity session already carries each device's binding;
+        // this guarantees it even if a session is missed, and was removed in
+        // v0.2.4 (which left identity-only devices MAC-less when their session
+        // was discarded). Small and rotating so it never floods.
+        {
+            let devices = &self.ledger.devices;
+            let take = DEVICE_ARP_WINDOW.min(n);
+            let start_d = self.device_arp_cursor % n;
+            for k in 0..take {
+                let dev = &devices[(start_d + k) % n];
+                if let Ok(ip) = dev.ip.parse::<Ipv4Addr>() {
+                    frames.push(arp::gratuitous(parse_mac(&dev.mac), ip));
+                }
+            }
+            self.device_arp_cursor = (start_d + take) % n;
         }
         // Refresh a small rotating window of capture-host MAC<->IP bindings, not
         // all of them, so the burst stays an OT protocol feed instead of an ARP
@@ -573,21 +626,25 @@ impl SimulatorEngine {
 }
 
 /// The protocol-assertion frames for one device, keyed on its carrier protocol.
+/// `seed` derives the per-zone engineering-station MAC so the querying client is
+/// a distinct, coherent asset in each zone rather than one MAC multi-homed across
+/// every zone (which a sensor cannot fuse, and which polluted attribution).
 fn assertions_for_device(
     dev: &DeviceRecord,
     profile: &DeviceProfile,
     switch_beacons: bool,
+    seed: u64,
 ) -> Vec<Vec<u8>> {
     let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() else {
         return Vec::new();
     };
     let dev_mac = parse_mac(&dev.mac);
     let client_ip = client_addr(&dev.subnet_cidr);
+    // A stable per-zone engineering-station MAC, not one global CLIENT_MAC across
+    // all zones: a multi-homed MAC is unbindable and pollutes the asset model.
+    let client_mac = l3::stable_mac(seed, u32::from(client_ip));
     let client_port = 50000u16;
 
-    // No standalone gratuitous ARP here: every protocol exchange below answers
-    // from the device's own MAC and IP, which binds the asset on its own. Adding
-    // an ARP per device per tick only floods the sensor.
     let mut frames: Vec<Vec<u8>> = Vec::new();
 
     match profile.protocol {
@@ -604,7 +661,7 @@ fn assertions_for_device(
                 product_name: clamp_str(product_name, 255),
             };
             let (a, b) =
-                enip_identity::exchange(CLIENT_MAC, dev_mac, client_ip, dev_ip, client_port, &id);
+                enip_identity::exchange(client_mac, dev_mac, client_ip, dev_ip, client_port, &id);
             frames.push(a);
             frames.push(b);
         }
@@ -623,19 +680,22 @@ fn assertions_for_device(
                     255,
                 ),
             };
-            let (a, b) =
-                modbus_devid::exchange(CLIENT_MAC, dev_mac, client_ip, dev_ip, client_port, 1, &id);
-            frames.push(a);
-            frames.push(b);
+            frames.extend(modbus_devid::exchange(
+                client_mac,
+                dev_mac,
+                client_ip,
+                dev_ip,
+                client_port,
+                1,
+                &id,
+            ));
         }
         ProfileProto::S7 => {
             let (major, minor) = parse_version(&dev.firmware);
             let order = profile.s7_order_number.as_deref().unwrap_or(&dev.model);
-            let (a, b) = s7_szl::exchange(
-                CLIENT_MAC, dev_mac, client_ip, dev_ip, 2000, order, major, minor,
-            );
-            frames.push(a);
-            frames.push(b);
+            frames.extend(s7_szl::exchange(
+                client_mac, dev_mac, client_ip, dev_ip, 2000, order, major, minor,
+            ));
         }
         ProfileProto::SwitchSnmp => {
             let descr = profile
@@ -658,7 +718,7 @@ fn assertions_for_device(
                 ));
             }
             let (a, b) = snmp::exchange(
-                CLIENT_MAC,
+                client_mac,
                 dev_mac,
                 client_ip,
                 dev_ip,
@@ -762,6 +822,18 @@ fn client_addr(subnet_cidr: &str) -> Ipv4Addr {
             Ipv4Addr::from(u32::from(n.network()) + offset)
         })
         .unwrap_or(Ipv4Addr::new(10, 0, 0, 250))
+}
+
+/// Remove the tmpfs remap-cache directory and its contents. Called on engine
+/// startup so a cached remap an earlier binary wrote (reused verbatim on a hit)
+/// can never outlive the binary that produced it. Best effort.
+fn purge_remap_cache(shm_dir: &Path) {
+    let dir = shm_dir.join("remap-cache");
+    if dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            log::warn!("could not purge remap cache {}: {e}", dir.display());
+        }
+    }
 }
 
 /// Total size in bytes of the regular files directly in `dir`. 0 if unreadable.
@@ -933,11 +1005,18 @@ mod tests {
             .find(|p| p.protocol == ProfileProto::Enip)
             .unwrap();
         let d = dev("enip", &p.model, &p.firmware);
-        let frames = assertions_for_device(&d, p, true);
-        assert_eq!(frames.len(), 2, "request + reply, no standalone ARP");
-        // The exchange is IPv4 (ethertype 0x0800); the device binds from its own
-        // response, not a separate gratuitous ARP.
+        let frames = assertions_for_device(&d, p, true, 1337);
+        assert_eq!(frames.len(), 2, "List Identity request + reply over UDP");
+        // List Identity is UDP/44818 (ethertype 0x0800); the device binds from
+        // the connectionless reply, which a sensor reads without a session.
         assert_eq!(u16::from_be_bytes([frames[0][12], frames[0][13]]), 0x0800);
+        assert_eq!(
+            crate::proto::frame::parse_layout(&frames[0])
+                .unwrap()
+                .l4_kind,
+            crate::proto::frame::L4Kind::Udp,
+            "ENIP discovery is over UDP"
+        );
         for f in &frames {
             assert!(crate::proto::frame::parse_layout(f).is_some());
         }
@@ -953,12 +1032,12 @@ mod tests {
             .unwrap();
         let d = dev("switch_snmp", &p.model, &p.firmware);
         assert_eq!(
-            assertions_for_device(&d, p, true).len(),
+            assertions_for_device(&d, p, true, 1337).len(),
             4,
             "lldp + cdp + snmp request/response"
         );
         assert_eq!(
-            assertions_for_device(&d, p, false).len(),
+            assertions_for_device(&d, p, false, 1337).len(),
             2,
             "beacons off leaves the snmp exchange"
         );

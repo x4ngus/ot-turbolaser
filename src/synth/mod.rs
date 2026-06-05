@@ -13,6 +13,7 @@ pub mod eth;
 pub mod lldp;
 pub mod modbus_devid;
 pub mod s7_szl;
+pub mod session;
 pub mod snmp;
 
 use std::time::Duration;
