@@ -32,13 +32,6 @@ const FABRICATE_BATCH: usize = 16;
 /// How many devices to re-announce per iteration, cycling through the ledger, so
 /// each identity pcap stays small.
 const ANNOUNCE_WINDOW: usize = 256;
-/// How many capture hosts to ARP-resolve per burst, cycling through the registry.
-/// Resolving every host at once is a multi-thousand-frame ARP microburst that
-/// chokes the replay and overruns the sensor's ingest, so few associations form
-/// and the capture replay is starved. A rotating window keeps each burst small;
-/// each host re-binds as the window comes round, and the binding persists at the
-/// sensor between rotations.
-const CAPTURE_ARP_WINDOW: usize = 96;
 /// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
 /// are periodic (tens of seconds), so emitting them every sub-second tick is
 /// both unrealistic and a needless share of the wire; spacing them keeps OT
@@ -75,9 +68,6 @@ pub struct SimulatorEngine {
     scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
     announce_cursor: usize,
-    /// Cursor into the capture-host registry for the rotating ARP window, so each
-    /// host re-announces in turn rather than the whole fleet flooding one burst.
-    capture_arp_cursor: usize,
     /// Minimum seconds between identity bursts (periodic discovery cadence).
     announce_interval_secs: u64,
     /// Wall-clock time of the last identity burst, for the cadence gate.
@@ -145,7 +135,6 @@ impl SimulatorEngine {
             scheduler,
             sim_rng,
             announce_cursor: 0,
-            capture_arp_cursor: 0,
             announce_interval_secs: cfg.synthesis.announce_interval_secs,
             last_announce_unix: None,
             announce_count: 0,
@@ -633,29 +622,27 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Bind a rotating window of capture hosts the same way: a solicited ARP
-        // exchange with the zone engineering station. Its replayed L3 traffic
-        // does not bind it (the sensor does not infer MAC<->IP from an L3 frame's
-        // Ethernet header), so without this resolution it stays IP-only. The
-        // window keeps each burst small: resolving the whole fleet at once is an
-        // ARP microburst that chokes the replay and overruns the sensor.
-        let hn = self.ledger.capture_hosts.len();
-        if hn > 0 {
-            let hstart = self.capture_arp_cursor % hn;
-            let hcount = CAPTURE_ARP_WINDOW.min(hn);
-            for k in 0..hcount {
-                let h = &self.ledger.capture_hosts[(hstart + k) % hn];
-                if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                    frames.extend(resolve_asset(
-                        &mut bound_clients,
-                        seed,
-                        &h.subnet_cidr,
-                        parse_mac(&h.mac),
-                        ip,
-                    ));
-                }
+        // Bind EVERY capture host each burst with a solicited ARP exchange (the
+        // zone engineering station asks, the host answers unicast). Its replayed
+        // L3 traffic does not bind it (the sensor does not infer MAC<->IP from an
+        // L3 frame's Ethernet header), so without this resolution it stays
+        // IP-only. The field proved why this must be every burst, not a rotating
+        // window: only assets resolved every burst (devices and the stations)
+        // unioned MAC<->IP at the sensor, while hosts on a rotating window
+        // (re-resolved only every few minutes) never did. The burst no longer
+        // needs windowing to stay small: it is replayed self-paced at its own
+        // frame timing (a millisecond apart, not line rate), so even a full sweep
+        // does not arrive as the microburst that once choked the replay.
+        for h in &self.ledger.capture_hosts {
+            if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+                frames.extend(resolve_asset(
+                    &mut bound_clients,
+                    seed,
+                    &h.subnet_cidr,
+                    parse_mac(&h.mac),
+                    ip,
+                ));
             }
-            self.capture_arp_cursor = (hstart + hcount) % hn;
         }
         self.announce_cursor = (start + count) % n;
         frames
