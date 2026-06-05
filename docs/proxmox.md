@@ -103,8 +103,9 @@ to a plain command, so you can skip `just` entirely and run those directly.
 systemd unit runs), links it onto PATH, installs the systemd unit, and creates
 the pcap folders.
 
-To upgrade later, pull and run `cargo build --release && sudo scripts/install.sh`
-(or `just deploy`). The installer writes the new binary to that same
+To upgrade later, pull and run `cargo build --release && ./scripts/install.sh`
+(or `just deploy`; both run as root in the container, so no `sudo` is needed, and
+a minimal LXC may not even have it). The installer writes the new binary to that same
 `/opt/replay/bin/turbolaser` path and, if the service is already running,
 restarts it onto the new binary. Do not copy the binary to `/usr/local/bin` by
 hand: that path is a symlink to the service binary, and overwriting it leaves the

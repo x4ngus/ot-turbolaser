@@ -8,17 +8,18 @@ default:
     @just --list
 
 # First-time install: build release and lay down the binary, unit, and default
-# config (needs sudo). Leaves the service stopped so you configure first.
+# config (needs root; uses sudo only when not already root, so a root LXC with
+# no sudo still works). Leaves the service stopped so you configure first.
 bootstrap:
     cargo build --release
-    sudo scripts/install.sh
+    if [ "$(id -u)" = 0 ]; then scripts/install.sh; else sudo scripts/install.sh; fi
 
 # Roll out a new version in one step: build, install to the service's own path,
 # and (if the service is already running) restart it onto the new binary. This
 # is the upgrade path; no manual binary-copy or restart needed.
 deploy:
     cargo build --release
-    sudo scripts/install.sh
+    if [ "$(id -u)" = 0 ]; then scripts/install.sh; else sudo scripts/install.sh; fi
     turbolaser --version
 
 # Validate the installed config.
