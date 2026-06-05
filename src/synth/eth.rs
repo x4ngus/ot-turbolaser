@@ -65,6 +65,45 @@ pub fn udp_frame(
     finish(b)
 }
 
+/// TCP control-flag bits, for [`tcp_segment`].
+pub const TCP_FIN: u8 = 0x01;
+pub const TCP_SYN: u8 = 0x02;
+pub const TCP_PSH: u8 = 0x08;
+pub const TCP_ACK: u8 = 0x10;
+
+/// Ethernet + IPv4 + TCP, one segment with the given control flags, checksums
+/// filled. The session builder uses this to emit a full handshake, data, and
+/// teardown so a stateful sensor sees an established connection rather than an
+/// orphan mid-stream segment.
+#[allow(clippy::too_many_arguments)]
+pub fn tcp_segment(
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    let tcp_len = 20 + payload.len();
+    let ip_total = 20 + tcp_len;
+    let mut b = ethernet_header(src_mac, dst_mac, ETHERTYPE_IPV4);
+    b.extend_from_slice(&ipv4_header(ip_total, 6, src, dst));
+    b.extend_from_slice(&sport.to_be_bytes());
+    b.extend_from_slice(&dport.to_be_bytes());
+    b.extend_from_slice(&seq.to_be_bytes());
+    b.extend_from_slice(&ack.to_be_bytes());
+    b.extend_from_slice(&[0x50, flags]); // data offset 5 words, control flags
+    b.extend_from_slice(&[0x20, 0x00]); // window
+    b.extend_from_slice(&[0x00, 0x00]); // checksum placeholder
+    b.extend_from_slice(&[0x00, 0x00]); // urgent pointer
+    b.extend_from_slice(payload);
+    finish(b)
+}
+
 /// Ethernet + IPv4 + TCP, a single PSH+ACK segment, checksums filled. seq/ack
 /// let a caller pair a request and its reply into a coherent exchange.
 #[allow(clippy::too_many_arguments)]
@@ -79,20 +118,18 @@ pub fn tcp_frame(
     ack: u32,
     payload: &[u8],
 ) -> Vec<u8> {
-    let tcp_len = 20 + payload.len();
-    let ip_total = 20 + tcp_len;
-    let mut b = ethernet_header(src_mac, dst_mac, ETHERTYPE_IPV4);
-    b.extend_from_slice(&ipv4_header(ip_total, 6, src, dst));
-    b.extend_from_slice(&sport.to_be_bytes());
-    b.extend_from_slice(&dport.to_be_bytes());
-    b.extend_from_slice(&seq.to_be_bytes());
-    b.extend_from_slice(&ack.to_be_bytes());
-    b.extend_from_slice(&[0x50, 0x18]); // data offset 5 words, flags PSH+ACK
-    b.extend_from_slice(&[0x20, 0x00]); // window
-    b.extend_from_slice(&[0x00, 0x00]); // checksum placeholder
-    b.extend_from_slice(&[0x00, 0x00]); // urgent pointer
-    b.extend_from_slice(payload);
-    finish(b)
+    tcp_segment(
+        src_mac,
+        dst_mac,
+        src,
+        dst,
+        sport,
+        dport,
+        seq,
+        ack,
+        TCP_PSH | TCP_ACK,
+        payload,
+    )
 }
 
 /// A bare Ethernet II frame for non-IP L2 protocols such as LLDP. No checksum:

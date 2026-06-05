@@ -245,6 +245,31 @@ fn remap_into_session_caches_and_reuses() {
     );
 }
 
+#[test]
+fn startup_purges_stale_remap_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    // A stale cache file an earlier binary might have left (reused verbatim on a
+    // hit). Engine startup must purge it so a poisoned remap never outlives the
+    // binary that wrote it.
+    let cache = shm.join("remap-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let stale = cache.join("v2.00000000deadbeef.g0.b.0.0.old.pcap");
+    std::fs::write(&stale, b"poison").unwrap();
+
+    let yaml = cfg_yaml(dir.path(), &shm, &session, "  identity_every_n_runs: 1");
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let _engine = SimulatorEngine::red(&cfg, 0);
+    assert!(
+        !stale.exists(),
+        "a stale remap-cache file is purged on engine startup"
+    );
+}
+
 /// Build a tiny capture of `n` distinct src hosts in 192.168.{base}.0/24 all
 /// talking to one peer, written to `pool/<name>`.
 fn write_capture(pool: &Path, name: &str, base: u8, hosts: u8) -> std::path::PathBuf {
@@ -464,12 +489,13 @@ fn wire_carries_only_planned_coherent_frames() {
     let out = engine.remap_into_session(&cfg, &src, &[]).unwrap();
     let remapped = pcapio::read(&out).unwrap();
 
-    // Only the two coherent conversations and the ARP survive; LLDP, IPv6, and the
-    // oversize frame are dropped.
+    // Only the two coherent OT conversations survive. LLDP, IPv6, and the
+    // oversize frame are dropped as incoherent or over-MTU; the capture's own
+    // broadcast ARP is thinned (the synth burst supplies controlled bindings).
     assert_eq!(
         remapped.packets.len(),
-        3,
-        "only plan-coherent frames remain"
+        2,
+        "only plan-coherent OT frames remain"
     );
     for p in &remapped.packets {
         let d = &p.data;
@@ -477,21 +503,14 @@ fn wire_carries_only_planned_coherent_frames() {
         let ethertype = u16::from_be_bytes([d[12], d[13]]);
         assert_ne!(ethertype, 0x86dd, "no IPv6 on the wire");
         assert_ne!(ethertype, 0x88cc, "no LLDP/L2 chatter on the wire");
+        assert_ne!(ethertype, 0x0806, "capture ARP is thinned, not replayed");
         // Source MAC is locally administered (a stable plan MAC), never a foreign
         // OUI carried over from the capture.
         assert_eq!(d[6] & 0x02, 0x02, "source MAC is locally administered");
         assert_ne!(&d[6..9], &foreign[..], "no foreign source OUI on the wire");
-        match ethertype {
-            0x0800 => {
-                assert_eq!(d[26], 10, "IPv4 source in a planned 10/8 zone");
-                assert_eq!(d[30], 10, "IPv4 destination in a planned 10/8 zone");
-            }
-            0x0806 => {
-                assert_eq!(d[28], 10, "ARP sender in a planned 10/8 zone");
-                assert_eq!(d[38], 10, "ARP target in a planned 10/8 zone");
-            }
-            other => panic!("unexpected ethertype {other:#06x} on the wire"),
-        }
+        assert_eq!(ethertype, 0x0800, "only IPv4 OT traffic on the wire");
+        assert_eq!(d[26], 10, "IPv4 source in a planned 10/8 zone");
+        assert_eq!(d[30], 10, "IPv4 destination in a planned 10/8 zone");
     }
 
     // tshark confirms the surviving bytes dissect with no malformed frames.
@@ -549,9 +568,11 @@ fn synth_burst_is_arp_light_not_a_broadcast_flood() {
         arp < hosts,
         "ARP is rotated, not one per host: {arp} arp vs {hosts} hosts"
     );
+    // The two rotating windows bound ARP: capture-host (16) + device (16). Both
+    // are small and rotate, so the wire is never an ARP broadcast.
     assert!(
-        arp <= 16,
-        "ARP refresh window stays small (CAPTURE_ARP_WINDOW): {arp}"
+        arp <= 32,
+        "ARP refresh windows stay small (capture + device): {arp}"
     );
     assert!(
         total - arp >= 8,

@@ -56,10 +56,12 @@ In red laser the fabricated plant includes:
   dominant vendor OUI (for example "Siemens SIMATIC Basic Control Area 1"), with
   managed switches as the conduits between zones.
 - Devices carrying real, advisory-sourced vendor/model/firmware identities that
-  trigger CVE matches, delivered as genuine protocol assertions (EtherNet/IP List
-  Identity, Modbus 0x2B/0x0E, S7comm SZL, and LLDP/CDP/SNMP for switches) plus a
-  gratuitous ARP, so each device fingerprints as a single asset and each detection
-  rests on a coherent transaction.
+  trigger CVE matches, delivered as complete, established protocol sessions
+  (EtherNet/IP List Identity over UDP; Modbus 0x2B/0x0E and S7comm SZL over a full
+  TCP handshake, COTP and S7 setup, and a graceful teardown), plus LLDP/CDP/SNMP
+  for switches and a small rotating gratuitous ARP. A stateful sensor attributes
+  device identity only on a session it saw established, so each device fingerprints
+  as a single asset and each detection rests on a coherent transaction.
 - Replayed capture traffic mapped into the matching vendor zone, so the
   control-system subnets hold real device relationships, not just the synthetic
   identities.

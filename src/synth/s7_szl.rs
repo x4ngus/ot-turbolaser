@@ -4,23 +4,91 @@
 //! with the module order number (MLFB) and version, the identity a passive
 //! sensor reads to recognise a Siemens S7 CPU and match its CVEs. Carried over
 //! TPKT + COTP + S7 userdata on port 102.
+//!
+//! A real S7 conversation is stateful: TCP handshake, then a COTP Connection
+//! Request/Confirm, then an S7 SetupCommunication exchange, and only then the
+//! function calls (here the SZL read). A sensor that tracks COTP/S7 session
+//! state will not attribute identity from a bare DT segment with no connection
+//! set up, so [`exchange`] emits the whole sequence.
 
 use std::net::Ipv4Addr;
 
-use super::eth::tcp_frame;
+use super::session::TcpSession;
 
 const S7_PORT: u16 = 102;
 
 /// COTP data header (DT, EOT).
 const COTP_DT: [u8; 3] = [0x02, 0xf0, 0x80];
 
-/// Wrap an S7 message (header + parameter + data) in TPKT + COTP.
-fn tpkt_cotp(s7: &[u8]) -> Vec<u8> {
-    let total = 4 + COTP_DT.len() + s7.len();
+/// Prepend a TPKT (RFC 1006) header whose length field covers the whole record.
+fn tpkt(cotp: &[u8]) -> Vec<u8> {
+    let total = 4 + cotp.len();
     let mut b = vec![0x03, 0x00, (total >> 8) as u8, (total & 0xff) as u8];
-    b.extend_from_slice(&COTP_DT);
-    b.extend_from_slice(s7);
+    b.extend_from_slice(cotp);
     b
+}
+
+/// Wrap an S7 message (header + parameter + data) in TPKT + COTP DT.
+fn tpkt_cotp(s7: &[u8]) -> Vec<u8> {
+    let mut cotp = COTP_DT.to_vec();
+    cotp.extend_from_slice(s7);
+    tpkt(&cotp)
+}
+
+/// COTP Connection Request: class 0, our source reference, a TPDU-size and
+/// src/dst TSAP (rack 0, slot 2). What opens an S7 connection after the TCP
+/// handshake.
+fn cotp_cr() -> Vec<u8> {
+    tpkt(&[
+        0x11, 0xe0, // LI=17, PDU type CR
+        0x00, 0x00, // destination reference (unknown)
+        0x00, 0x01, // source reference
+        0x00, // class 0
+        0xc0, 0x01, 0x0a, // parameter: TPDU size = 1024
+        0xc1, 0x02, 0x01, 0x00, // parameter: source TSAP
+        0xc2, 0x02, 0x01, 0x02, // parameter: destination TSAP (rack 0, slot 2)
+    ])
+}
+
+/// COTP Connection Confirm: the PLC's answer to the CR.
+fn cotp_cc() -> Vec<u8> {
+    tpkt(&[
+        0x11, 0xd0, // LI=17, PDU type CC
+        0x00, 0x01, // destination reference (our source ref)
+        0x00, 0x02, // source reference (the PLC's)
+        0x00, // class 0
+        0xc0, 0x01, 0x0a, // parameter: TPDU size = 1024
+        0xc1, 0x02, 0x01, 0x02, // parameter: source TSAP
+        0xc2, 0x02, 0x01, 0x00, // parameter: destination TSAP
+    ])
+}
+
+/// S7 SetupCommunication request (ROSCTR job, function 0xF0): negotiate AMQ and
+/// PDU length. Sent right after the COTP connection is confirmed.
+fn s7_setup_request() -> Vec<u8> {
+    tpkt_cotp(&[
+        0x32, 0x01, 0x00, 0x00, 0x00, 0x00, // job header, pdu ref 0
+        0x00, 0x08, // parameter length 8
+        0x00, 0x00, // data length 0
+        0xf0, 0x00, // function: setup communication
+        0x00, 0x01, // max AMQ calling
+        0x00, 0x01, // max AMQ called
+        0x01, 0xe0, // PDU length 480
+    ])
+}
+
+/// S7 SetupCommunication response (ROSCTR ack_data).
+fn s7_setup_response() -> Vec<u8> {
+    tpkt_cotp(&[
+        0x32, 0x03, 0x00, 0x00, 0x00, 0x00, // ack_data header, pdu ref 0
+        0x00, 0x08, // parameter length 8
+        0x00, 0x00, // data length 0
+        0x00, 0x00, // error class / error code
+        0xf0, 0x00, // function: setup communication
+        0x00, 0x01, // max AMQ calling
+        0x00, 0x01, // max AMQ called
+        0x00, 0xf0, // PDU length 240
+    ])
 }
 
 /// The Read SZL request for module identification (SZL-ID 0x0011, index 0). The
@@ -79,7 +147,10 @@ pub fn read_szl_response(order_number: &str, version_major: u8, version_minor: u
     tpkt_cotp(&s7)
 }
 
-/// The (request, response) frames of an SZL module-identification read.
+/// The frames of an SZL module-identification read as a complete S7 session:
+/// TCP handshake, COTP connection request/confirm, S7 SetupCommunication, the
+/// SZL read request and response, then a graceful teardown. A stateful sensor
+/// only attributes the module identity on an established S7 connection.
 #[allow(clippy::too_many_arguments)]
 pub fn exchange(
     client_mac: [u8; 6],
@@ -90,32 +161,21 @@ pub fn exchange(
     order_number: &str,
     version_major: u8,
     version_minor: u8,
-) -> (Vec<u8>, Vec<u8>) {
-    let req = read_szl_request();
-    let resp = read_szl_response(order_number, version_major, version_minor);
-    let rf = tcp_frame(
-        client_mac,
-        plc_mac,
-        client_ip,
-        plc_ip,
-        client_port,
-        S7_PORT,
-        1,
-        1,
-        &req,
-    );
-    let pf = tcp_frame(
-        plc_mac,
-        client_mac,
-        plc_ip,
-        client_ip,
-        S7_PORT,
-        client_port,
-        1,
-        1 + req.len() as u32,
-        &resp,
-    );
-    (rf, pf)
+) -> Vec<Vec<u8>> {
+    let mut s = TcpSession::new(client_mac, plc_mac, client_ip, plc_ip, client_port, S7_PORT);
+    s.open();
+    s.client_says(&cotp_cr());
+    s.server_says(&cotp_cc());
+    s.client_says(&s7_setup_request());
+    s.server_says(&s7_setup_response());
+    s.client_says(&read_szl_request());
+    s.server_says(&read_szl_response(
+        order_number,
+        version_major,
+        version_minor,
+    ));
+    s.close();
+    s.into_frames()
 }
 
 #[cfg(test)]

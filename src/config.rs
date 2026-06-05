@@ -117,6 +117,12 @@ pub struct L3Cfg {
     /// Default 1514 (standard Ethernet); raise to ~9014 only on a jumbo bridge.
     #[serde(default = "default_max_frame_bytes")]
     pub max_frame_bytes: usize,
+    /// Replay the capture's own broadcast ARP. Off by default: the synth burst
+    /// supplies controlled, rotating MAC<->IP bindings, so replaying a capture's
+    /// ARP on top only floods a passive sensor (ARP was over 90% of frames in the
+    /// field). Turn on only to study raw ARP behaviour.
+    #[serde(default)]
+    pub replay_capture_arp: bool,
 }
 
 impl Default for L3Cfg {
@@ -131,6 +137,7 @@ impl Default for L3Cfg {
             on_oversize: OversizePolicy::default(),
             guard_public_sources: true,
             max_frame_bytes: default_max_frame_bytes(),
+            replay_capture_arp: false,
         }
     }
 }
@@ -551,6 +558,17 @@ impl Config {
                 "top-level 'seed' is ignored in red_laser; set session.seed for a reproducible red-laser session"
             );
         }
+        // Red laser is plan==wire: every replayed host is remapped into the
+        // fabricated plant. With the remap off, captures would replay raw and
+        // their original (often private 192.168) addresses would reach the
+        // sensor, since the public-source backstop only blocks routable
+        // addresses. Refuse the combination rather than leak non-plan addresses.
+        if self.mode == Mode::RedLaser && !self.l3.remap {
+            return Err(
+                "red_laser requires l3.remap = true (plan==wire); use green_laser for raw replay"
+                    .into(),
+            );
+        }
         for (name, p) in [
             ("pool", &self.paths.pool),
             ("variants", &self.paths.variants),
@@ -809,8 +827,41 @@ mod tests {
         assert_eq!(cfg.mode, Mode::RedLaser);
         assert_eq!(cfg.l3.zone_affinity, ZoneAffinity::Both);
         assert!(cfg.l3.guard_public_sources);
+        assert!(
+            !cfg.l3.replay_capture_arp,
+            "capture ARP is thinned by default"
+        );
         assert_eq!(cfg.synthesis.target_devices, 64);
         assert_eq!(cfg.session.seed, Some(1337));
+    }
+
+    #[test]
+    fn red_laser_requires_remap_green_does_not() {
+        let yaml = "iface: tl0
+mode: red_laser
+paths:
+  pool: /opt/pool
+  variants: /opt/variants
+  shm_dir: /dev/shm/x
+  status_file: /run/x.json
+l3:
+  remap: false
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 5.0
+";
+        let cfg: Config = serde_norway::from_str(yaml).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("red_laser requires l3.remap"),
+            "red laser with remap off is refused: {err}"
+        );
+        // Green laser legitimately replays raw, guarded by the public backstop.
+        let green: Config =
+            serde_norway::from_str(&yaml.replace("red_laser", "green_laser")).unwrap();
+        assert!(green.validate().is_ok(), "green laser may replay raw");
     }
 
     #[test]

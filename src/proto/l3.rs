@@ -312,6 +312,19 @@ pub fn drop_oversize_frames(cap: &mut Capture, max_frame: usize) -> usize {
     before - cap.packets.len()
 }
 
+/// Drop every ARP frame from the capture. After the remap, the synth burst
+/// supplies controlled, rotating MAC<->IP bindings; replaying the capture's own
+/// broadcast ARP on top only floods a passive sensor (it was over 90% of frames
+/// in the field) without adding identity. Returns the number of frames dropped.
+pub fn drop_arp_frames(cap: &mut Capture) -> usize {
+    let before = cap.packets.len();
+    cap.packets.retain(|p| match frame::parse_layout(&p.data) {
+        Some(l) if l.l3 >= 2 => u16::from_be_bytes([p.data[l.l3 - 2], p.data[l.l3 - 1]]) != 0x0806,
+        _ => true,
+    });
+    before - cap.packets.len()
+}
+
 /// Fail-closed output guard enforcing plan==wire. After the remap, keep a frame
 /// only if it is provably plan-coherent: an IPv4 (or IPv4 ARP) frame whose
 /// source is a remapped plan host, so its address and rewritten MAC both belong
@@ -1288,6 +1301,28 @@ mod tests {
         };
         assert_eq!(drop_oversize_frames(&mut cap, STANDARD_FRAME_BYTES), 1);
         assert_eq!(cap.packets.len(), 1, "the over-MTU frame is dropped");
+    }
+
+    #[test]
+    fn drop_arp_removes_arp_keeps_ipv4() {
+        let mut arp = vec![
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x06,
+        ];
+        arp.extend_from_slice(&[0, 1, 8, 0, 6, 4, 0, 1]); // htype/ptype/hlen/plen/oper
+        arp.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // SHA
+        arp.extend_from_slice(&[10, 0, 0, 1]); // SPA
+        arp.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // THA
+        arp.extend_from_slice(&[10, 0, 0, 2]); // TPA
+        let mut cap = Capture {
+            header: PcapHeader::default(),
+            packets: vec![pkt(udp([10, 0, 0, 1], [10, 0, 0, 2])), pkt(arp)],
+        };
+        assert_eq!(drop_arp_frames(&mut cap), 1, "the ARP frame is dropped");
+        assert_eq!(cap.packets.len(), 1, "the IPv4 frame is kept");
+        assert_eq!(
+            frame::parse_layout(&cap.packets[0].data).unwrap().l3_kind,
+            L3Kind::Ipv4
+        );
     }
 
     #[test]

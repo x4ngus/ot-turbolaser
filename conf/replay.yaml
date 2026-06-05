@@ -35,6 +35,10 @@ l3:
   max_frame_bytes: 1514         # drop frames larger than this before replay so a
                                 # jumbo/TSO capture frame cannot abort a run with
                                 # EMSGSIZE; raise to ~9014 only on a jumbo bridge
+  replay_capture_arp: false     # off: the synth burst supplies controlled,
+                                # rotating MAC<->IP bindings, so replaying a
+                                # capture's own broadcast ARP only floods the
+                                # sensor. Turn on only to study raw ARP behaviour
 
 # Replay rate. The appliance ships a fixed Mbps band: each run picks one fixed
 # rate uniformly in [mbps_min, mbps_max], so the wire holds a steady rate within

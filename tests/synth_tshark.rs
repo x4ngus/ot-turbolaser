@@ -74,8 +74,8 @@ fn synthesized_assertions_dissect_in_tshark() {
     frames.push(a);
     frames.push(b);
 
-    // Modbus Read Device Identification exchange.
-    let (a, b) = modbus_devid::exchange(
+    // Modbus Read Device Identification exchange (full TCP session).
+    frames.extend(modbus_devid::exchange(
         mac(3),
         mac(4),
         Ipv4Addr::new(10, 0, 1, 50),
@@ -87,9 +87,7 @@ fn synthesized_assertions_dissect_in_tshark() {
             product_code: "BMXP342020",
             revision: "V2.60",
         },
-    );
-    frames.push(a);
-    frames.push(b);
+    ));
 
     // SNMP sysDescr fetch.
     let (a, b) = snmp::exchange(
@@ -106,8 +104,9 @@ fn synthesized_assertions_dissect_in_tshark() {
     frames.push(a);
     frames.push(b);
 
-    // S7comm SZL module-identification exchange.
-    let (a, b) = s7_szl::exchange(
+    // S7comm SZL module-identification exchange (full session: TCP handshake,
+    // COTP connect, S7 setup, the SZL read, then teardown).
+    frames.extend(s7_szl::exchange(
         mac(9),
         mac(10),
         Ipv4Addr::new(10, 0, 3, 50),
@@ -116,9 +115,7 @@ fn synthesized_assertions_dissect_in_tshark() {
         "6ES7 212-1AE40-0XB0",
         4,
         2,
-    );
-    frames.push(a);
-    frames.push(b);
+    ));
 
     // LLDP and CDP switch beacons.
     frames.push(lldp::beacon(
@@ -189,5 +186,23 @@ fn synthesized_assertions_dissect_in_tshark() {
     assert!(
         verbose(&path, "s7comm").contains("6ES7 212"),
         "S7 module order number must be present"
+    );
+
+    // Fix-A regression guards: a stateful sensor attributes identity only on an
+    // established session, so the OT TCP protocols must carry a real handshake
+    // and ENIP discovery must ride UDP, not a handshake-less TCP segment.
+    assert!(
+        dissects(&path, "tcp.flags.syn==1 && tcp.flags.ack==0"),
+        "Modbus/S7 must open with a TCP SYN handshake"
+    );
+    assert!(dissects(&path, "enip && udp"), "ENIP must ride UDP");
+    assert!(
+        !dissects(&path, "enip && tcp"),
+        "ENIP must not ride a handshake-less TCP segment"
+    );
+    // S7 sets up the COTP connection (CR type 0x0e, CC type 0x0d) before the read.
+    assert!(
+        dissects(&path, "cotp.type==0x0e"),
+        "S7 COTP connection request must precede the SZL read"
     );
 }

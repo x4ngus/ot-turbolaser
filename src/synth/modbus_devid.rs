@@ -6,7 +6,7 @@
 
 use std::net::Ipv4Addr;
 
-use super::eth::tcp_frame;
+use super::session::TcpSession;
 
 const MODBUS_PORT: u16 = 502;
 const FUNC_MEI: u8 = 0x2B;
@@ -57,7 +57,10 @@ pub fn read_device_id_response(unit: u8, id: &ModbusDevId) -> Vec<u8> {
     mbap(unit, &pdu)
 }
 
-/// The (request, response) frames of a device identification exchange.
+/// The frames of a device-identification exchange as a complete TCP session:
+/// 3-way handshake, the request and response, then a graceful teardown, so a
+/// stateful sensor parses Modbus on an established connection rather than
+/// discarding a mid-stream segment.
 #[allow(clippy::too_many_arguments)]
 pub fn exchange(
     tool_mac: [u8; 6],
@@ -67,32 +70,15 @@ pub fn exchange(
     tool_port: u16,
     unit: u8,
     id: &ModbusDevId,
-) -> (Vec<u8>, Vec<u8>) {
+) -> Vec<Vec<u8>> {
     let req = read_device_id_request(unit);
     let resp = read_device_id_response(unit, id);
-    let rf = tcp_frame(
-        tool_mac,
-        dev_mac,
-        tool_ip,
-        dev_ip,
-        tool_port,
-        MODBUS_PORT,
-        1,
-        1,
-        &req,
-    );
-    let pf = tcp_frame(
-        dev_mac,
-        tool_mac,
-        dev_ip,
-        tool_ip,
-        MODBUS_PORT,
-        tool_port,
-        1,
-        1 + req.len() as u32,
-        &resp,
-    );
-    (rf, pf)
+    let mut s = TcpSession::new(tool_mac, dev_mac, tool_ip, dev_ip, tool_port, MODBUS_PORT);
+    s.open();
+    s.client_says(&req);
+    s.server_says(&resp);
+    s.close();
+    s.into_frames()
 }
 
 #[cfg(test)]
@@ -107,7 +93,7 @@ mod tests {
             product_code: "BMXP342020",
             revision: "V2.60",
         };
-        let frame = exchange(
+        let frames = exchange(
             [0; 6],
             [0; 6],
             Ipv4Addr::new(10, 0, 0, 1),
@@ -115,10 +101,12 @@ mod tests {
             40000,
             0x01,
             &id,
-        )
-        .1;
+        );
+        // Session order: [SYN, SYN+ACK, ACK, request, response, FIN...]; the
+        // device identification response is the server's data segment.
+        let frame = &frames[4];
         // The MBAP length field matches the trailing bytes.
-        let l = parse_layout(&frame).unwrap();
+        let l = parse_layout(frame).unwrap();
         let pdu = &frame[l.payload..l.end];
         let mbap_len = u16::from_be_bytes([pdu[4], pdu[5]]) as usize;
         assert_eq!(mbap_len, pdu.len() - 6, "MBAP length counts unit + PDU");
