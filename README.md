@@ -58,10 +58,11 @@ In red laser the fabricated plant includes:
 - Devices carrying real, advisory-sourced vendor/model/firmware identities that
   trigger CVE matches, delivered as complete, established protocol sessions
   (EtherNet/IP List Identity over UDP; Modbus 0x2B/0x0E and S7comm SZL over a full
-  TCP handshake, COTP and S7 setup, and a graceful teardown), plus LLDP/CDP/SNMP
-  for switches and a small rotating gratuitous ARP. A stateful sensor attributes
-  device identity only on a session it saw established, so each device fingerprints
-  as a single asset and each detection rests on a coherent transaction.
+  TCP handshake, COTP and S7 setup, and a graceful teardown), each opened from a
+  fresh ephemeral client port so the sensor sees a distinct, attributable scan.
+  Every asset is bound MAC-to-IP by a real ARP request/reply resolution, the
+  binding a passive sensor trusts; switches add LLDP/CDP/SNMP. The fabricated fleet
+  spreads across every carrier protocol, so none is left unrepresented.
 - Replayed capture traffic mapped into the matching vendor zone, so the
   control-system subnets hold real device relationships, not just the synthetic
   identities.

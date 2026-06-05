@@ -14,7 +14,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::ledger::{DeviceRecord, Session, SubnetRecord};
 use crate::proto::l3;
-use crate::vuln::{DeviceProfile, VulnDb};
+use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
 
 use super::zones::{family_of, name_zone};
 
@@ -105,7 +105,12 @@ fn choose_or_create_subnet(
         .collect();
 
     let can_create = session.subnet_count() < params.max_subnets;
-    let create = can_create && (with_room.is_empty() || rng.gen_bool(0.15));
+    // Force a new zone until every carrier protocol has one, so the plant covers
+    // enip/modbus/s7/switch_snmp rather than whatever vendors random picks seeded.
+    // After coverage, the existing variety logic applies.
+    let need_coverage =
+        session.subnet_count() < protocols_present(vuln).len().min(params.max_subnets);
+    let create = can_create && (need_coverage || with_room.is_empty() || rng.gen_bool(0.15));
     if create {
         if let Some(cidr) = create_zone(session, vuln, params, rng) {
             return Some(cidr);
@@ -116,6 +121,20 @@ fn choose_or_create_subnet(
     } else {
         Some(with_room[rng.gen_range(0..with_room.len())].clone())
     }
+}
+
+/// The distinct carrier protocols present in the DB, in a fixed order, so zone
+/// creation can cycle them and guarantee every protocol is represented.
+fn protocols_present(vuln: &VulnDb) -> Vec<ProfileProto> {
+    [
+        ProfileProto::Enip,
+        ProfileProto::Modbus,
+        ProfileProto::S7,
+        ProfileProto::SwitchSnmp,
+    ]
+    .into_iter()
+    .filter(|&p| vuln.by_protocol(p).next().is_some())
+    .collect()
 }
 
 fn create_zone(
@@ -130,7 +149,15 @@ fn create_zone(
         .filter_map(|s| s.cidr.parse().ok())
         .collect();
     let net = l3::fresh_subnet(params.default_prefix, &existing, rng);
-    let profile = vuln.pick(rng.gen_range(0..vuln.len()))?;
+    // Cycle the zone's carrier protocol by zone index so the plant covers every
+    // protocol, then pick a vendor within that protocol for variety.
+    let protos = protocols_present(vuln);
+    if protos.is_empty() {
+        return None;
+    }
+    let proto = protos[session.subnet_count() % protos.len()];
+    let candidates: Vec<&DeviceProfile> = vuln.by_protocol(proto).collect();
+    let profile = candidates[rng.gen_range(0..candidates.len())];
     let idx = session.subnet_count();
     let name = name_zone(
         Some(&profile.vendor),
@@ -221,6 +248,25 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let added = fabricate(&mut s, &db(), &params, 1000, &mut rng);
         assert_eq!(added, 5, "the device cap bounds an over-large target");
+    }
+
+    #[test]
+    fn fabrication_covers_all_protocols() {
+        let params = AllocParams {
+            max_subnets: 10,
+            max_devices: 64,
+            default_prefix: 24,
+        };
+        let mut s = Session::new(1337, 0);
+        let mut rng = ChaCha8Rng::seed_from_u64(1337);
+        fabricate(&mut s, &db(), &params, 64, &mut rng);
+        let protos: HashSet<&str> = s.devices.iter().map(|d| d.protocol.as_str()).collect();
+        for p in ["enip", "modbus", "s7", "switch_snmp"] {
+            assert!(
+                protos.contains(p),
+                "a 64-device fleet covers {p}: {protos:?}"
+            );
+        }
     }
 
     #[test]

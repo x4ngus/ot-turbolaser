@@ -32,15 +32,6 @@ const FABRICATE_BATCH: usize = 16;
 /// How many devices to re-announce per iteration, cycling through the ledger, so
 /// each identity pcap stays small.
 const ANNOUNCE_WINDOW: usize = 256;
-/// How many capture-host MAC<->IP bindings to refresh per burst via gratuitous
-/// ARP, cycling through the registry. A small backstop for receive-only hosts
-/// (those that never source a frame the sensor could bind from); hosts that do
-/// source traffic bind from their own frames. Each gratuitous ARP is its own
-/// conversation record at the sensor, so this is kept small on purpose:
-/// announcing every host floods the sensor's protocol histogram with ARP.
-/// Fabricated devices are not ARP'd at all; they bind from their identity
-/// sessions.
-const CAPTURE_ARP_WINDOW: usize = 8;
 /// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
 /// are periodic (tens of seconds), so emitting them every sub-second tick is
 /// both unrealistic and a needless share of the wire; spacing them keeps OT
@@ -77,9 +68,6 @@ pub struct SimulatorEngine {
     scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
     announce_cursor: usize,
-    /// Cursor into the capture-host registry for the rotating gratuitous-ARP
-    /// refresh window, so each host re-announces in turn rather than all at once.
-    capture_arp_cursor: usize,
     /// Minimum seconds between identity bursts (periodic discovery cadence).
     announce_interval_secs: u64,
     /// Wall-clock time of the last identity burst, for the cadence gate.
@@ -147,7 +135,6 @@ impl SimulatorEngine {
             scheduler,
             sim_rng,
             announce_cursor: 0,
-            capture_arp_cursor: 0,
             announce_interval_secs: cfg.synthesis.announce_interval_secs,
             last_announce_unix: None,
             announce_count: 0,
@@ -564,13 +551,14 @@ impl SimulatorEngine {
         Some(out)
     }
 
-    /// Render a rotating window of devices as protocol-assertion frames. Each
-    /// device's session carries its MAC and IP, so it binds without a separate
-    /// ARP; `nonce` varies the client ephemeral port (and ISN) so each burst is a
-    /// fresh, separately parseable connection. A small rotating capture-host
-    /// gratuitous ARP is the only ARP emitted, as a binding backstop for
-    /// receive-only hosts. Switch beacons fire only on a cadence. Kept ARP-light
-    /// and OT-dominant on purpose: the wire is an OT protocol feed.
+    /// Render a window of devices as an ARP resolution (so the sensor binds the
+    /// device MAC<->IP, which it does not infer from L3 frame Ethernet headers)
+    /// followed by the protocol-assertion session; `nonce` varies the client
+    /// ephemeral port (and ISN) so each burst is a fresh, separately parseable
+    /// connection. Every capture host is resolved the same way. Switch beacons
+    /// fire only on a cadence. Each ARP exchange is one conversation at the
+    /// sensor (request + reply bind both ends), so this binds every asset without
+    /// being an ARP broadcast in the record histogram.
     fn build_assertions(&mut self, run: u64, nonce: u64) -> Vec<Vec<u8>> {
         let n = self.ledger.devices.len();
         if n == 0 || !self.device_identity {
@@ -589,6 +577,16 @@ impl SimulatorEngine {
             let vuln = &self.vuln;
             for k in 0..count {
                 let dev = &devices[(start + k) % n];
+                // Resolve the device first: the zone client asks who has the
+                // device IP, the device answers. The exchange binds both MAC<->IP
+                // at the sensor, which a session alone does not.
+                if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
+                    let c_ip = client_addr(&dev.subnet_cidr);
+                    let c_mac = l3::stable_mac(seed, u32::from(c_ip));
+                    let (req, rep) = arp::resolve(c_mac, c_ip, parse_mac(&dev.mac), dev_ip);
+                    frames.push(req);
+                    frames.push(rep);
+                }
                 // Own the profile so a missing-model fallback and the vuln borrow
                 // do not tangle; a device is never silently dropped.
                 let profile = match vuln.by_model(&dev.model) {
@@ -612,22 +610,18 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Refresh a small rotating window of capture-host MAC<->IP bindings, not
-        // all of them, so the burst stays an OT protocol feed instead of an ARP
-        // broadcast. Each host re-announces as the window cycles round; its live
-        // IP traffic (the replayed capture) is the primary binding.
-        let hosts = &self.ledger.capture_hosts;
-        if !hosts.is_empty() {
-            let m = hosts.len();
-            let take = CAPTURE_ARP_WINDOW.min(m);
-            let start_h = self.capture_arp_cursor % m;
-            for k in 0..take {
-                let h = &hosts[(start_h + k) % m];
-                if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                    frames.push(arp::gratuitous(parse_mac(&h.mac), ip));
-                }
+        // Resolve every capture host so the sensor binds its MAC<->IP. Each is a
+        // single request/reply exchange (one conversation record at the sensor),
+        // not a per-host broadcast flood; the host's own replayed traffic does not
+        // bind it because the sensor does not infer MAC<->IP from L3 frames.
+        for h in &self.ledger.capture_hosts {
+            if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+                let c_ip = client_addr(&h.subnet_cidr);
+                let c_mac = l3::stable_mac(seed, u32::from(c_ip));
+                let (req, rep) = arp::resolve(c_mac, c_ip, parse_mac(&h.mac), ip);
+                frames.push(req);
+                frames.push(rep);
             }
-            self.capture_arp_cursor = (start_h + take) % m;
         }
         self.announce_cursor = (start + count) % n;
         frames
