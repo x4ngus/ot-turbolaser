@@ -37,7 +37,15 @@ fn arp(
     p.extend_from_slice(&sender_ip.octets());
     p.extend_from_slice(&target_mac);
     p.extend_from_slice(&target_ip.octets());
-    l2_frame(sender_mac, eth_dst, ETHERTYPE_ARP, &p)
+    let mut f = l2_frame(sender_mac, eth_dst, ETHERTYPE_ARP, &p);
+    // Pad to the 60-byte Ethernet minimum. A bare ARP is 42 bytes; real ARP on
+    // the wire is always padded to 60 (a NIC pads short frames). A passive sensor
+    // that treats ARP as the authoritative MAC<->IP association source can reject
+    // an undersized runt, so without this the association never forms.
+    if f.len() < 60 {
+        f.resize(60, 0);
+    }
+    f
 }
 
 /// An ARP request: "who has `target_ip`? tell `sender_ip`", broadcast. The

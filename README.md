@@ -60,11 +60,13 @@ In red laser the fabricated plant includes:
   (EtherNet/IP List Identity over UDP; Modbus 0x2B/0x0E and S7comm SZL over a full
   TCP handshake, COTP and S7 setup, and a graceful teardown), each opened from a
   fresh ephemeral client port so the sensor sees a distinct, attributable scan.
-  Every asset is bound MAC-to-IP by an LLDP announcement (chassis-ID carries the
-  MAC, the management-address TLV the IP), the binding a passive sensor credits;
-  switches add CDP. The fabricated fleet spreads across every carrier protocol, so
-  none is left unrepresented. The remap also drops any frame whose payload still
-  carries an original address (NBNS/DHCP/DNS embed them), so a remapped capture can
+  Every asset is bound MAC-to-IP by an ARP response ("ip is at mac"), padded to
+  the standard 60-byte Ethernet frame, which is the only association a passive
+  sensor trusts (the source MAC of an L3 frame could be a router, so it is not);
+  switches add LLDP/CDP. The fabricated fleet spreads across every carrier
+  protocol, so none is left unrepresented. The remap also drops any frame whose
+  payload still carries an original address (NBNS/DHCP/DNS embed them), so a
+  remapped capture can
   never surface a real host on the sensor.
 - Replayed capture traffic mapped into the matching vendor zone, so the
   control-system subnets hold real device relationships, not just the synthetic
