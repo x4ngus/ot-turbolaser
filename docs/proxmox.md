@@ -88,14 +88,20 @@ cd ot-turbolaser
 ./scripts/bootstrap.sh --build --tests
 . "$HOME/.cargo/env"
 
+cargo install just            # the recipe runner used below (just deploy, etc.)
 cargo build --release
 ./scripts/install.sh
 ```
 
 `bootstrap.sh --build` installs the tcpreplay suite, iproute2, and the Rust
-toolchain; `--tests` adds tshark for `reload --validate`. `install.sh` puts the
-binary at `/opt/replay/bin/turbolaser` (the path the systemd unit runs), links it
-onto PATH, installs the systemd unit, and creates the pcap folders.
+toolchain; `--tests` adds tshark for `reload --validate`. A minimal Debian
+container has no `just`, and `apt` only ships it on Debian 13+, so install it
+from the toolchain you just set up with `cargo install just` (it lands in
+`~/.cargo/bin`, already on PATH). The recipes are optional sugar; every one maps
+to a plain command, so you can skip `just` entirely and run those directly.
+`install.sh` puts the binary at `/opt/replay/bin/turbolaser` (the path the
+systemd unit runs), links it onto PATH, installs the systemd unit, and creates
+the pcap folders.
 
 To upgrade later, pull and run `cargo build --release && sudo scripts/install.sh`
 (or `just deploy`). The installer writes the new binary to that same
