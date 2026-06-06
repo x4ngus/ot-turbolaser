@@ -32,13 +32,6 @@ const FABRICATE_BATCH: usize = 16;
 /// How many devices to re-announce per iteration, cycling through the ledger, so
 /// each identity pcap stays small.
 const ANNOUNCE_WINDOW: usize = 256;
-/// How many capture hosts to ARP-resolve per burst, cycling through the registry.
-/// Resolving every host at once is a multi-thousand-frame ARP microburst that
-/// chokes the replay and overruns the sensor's ingest, so few associations form
-/// and the capture replay is starved. A rotating window keeps each burst small;
-/// each host re-binds as the window comes round, and the binding persists at the
-/// sensor between rotations.
-const CAPTURE_ARP_WINDOW: usize = 96;
 /// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
 /// are periodic (tens of seconds), so emitting them every sub-second tick is
 /// both unrealistic and a needless share of the wire; spacing them keeps OT
@@ -75,9 +68,6 @@ pub struct SimulatorEngine {
     scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
     announce_cursor: usize,
-    /// Cursor into the capture-host registry for the rotating ARP window, so each
-    /// host re-announces in turn rather than the whole fleet flooding one burst.
-    capture_arp_cursor: usize,
     /// Minimum seconds between identity bursts (periodic discovery cadence).
     announce_interval_secs: u64,
     /// Wall-clock time of the last identity burst, for the cadence gate.
@@ -145,7 +135,6 @@ impl SimulatorEngine {
             scheduler,
             sim_rng,
             announce_cursor: 0,
-            capture_arp_cursor: 0,
             announce_interval_secs: cfg.synthesis.announce_interval_secs,
             last_announce_unix: None,
             announce_count: 0,
@@ -632,38 +621,23 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // A rotating window of capture hosts, each made a parsed OT endpoint so it
-        // unions MAC<->IP and HOLDS, the same way the fabricated devices and the
-        // CDP/LLDP-speaking switches do. The field proved a bare host, seen only in
-        // replayed background L3 traffic, never unions even with its own ARP
-        // request: the union needs an authoritative parsed identity. So each host
-        // gets (1) its broadcast ARP request for the zone gateway (the association)
-        // and (2) a sustained, generic, CVE-free OT session keyed on its zone (the
-        // identity). The window keeps each burst self-paced, not a microburst, and
-        // each host re-announces as the window comes round.
-        let hn = self.ledger.capture_hosts.len();
-        if hn > 0 {
-            let hstart = self.capture_arp_cursor % hn;
-            let hcount = CAPTURE_ARP_WINDOW.min(hn);
-            for k in 0..hcount {
-                let h = &self.ledger.capture_hosts[(hstart + k) % hn];
-                if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                    let mac = parse_mac(&h.mac);
-                    frames.extend(resolve_asset(seed, &h.subnet_cidr, mac, ip));
-                    bind_gateway(&mut gateways_bound, &mut frames, seed, &h.subnet_cidr);
-                    let profile = generic_profile(h.vendor.as_deref(), h.protocol.as_deref());
-                    frames.extend(assert_identity(
-                        mac,
-                        ip,
-                        &h.subnet_cidr,
-                        &profile,
-                        switch_beacons,
-                        seed,
-                        nonce,
-                    ));
-                }
+        // Every capture host emits its OWN broadcast ARP request EVERY burst, not
+        // a rotating window. A host is born IP-only from its first replayed L3
+        // frame, so its MAC<->IP binding must be present continuously, from the
+        // host's creation, or the asset sticks split: the windowed ARP arrived
+        // minutes late and never caught up, and the field froze the split. The
+        // request is inverted (each host resolves its own zone gateway), so it is
+        // organic gateway resolution, not a one-host subnet scan. No OT session
+        // for hosts: a generic session was parsed into separate, address-less
+        // identity assets at the sensor instead of unioning the host, so hosts
+        // bind by ARP alone. The burst is self-paced (1ms/frame), so a full sweep
+        // spreads over ~1s rather than a line-rate microburst.
+        for h in &self.ledger.capture_hosts {
+            if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+                let mac = parse_mac(&h.mac);
+                frames.extend(resolve_asset(seed, &h.subnet_cidr, mac, ip));
+                bind_gateway(&mut gateways_bound, &mut frames, seed, &h.subnet_cidr);
             }
-            self.capture_arp_cursor = (hstart + hcount) % hn;
         }
         self.announce_cursor = (start + count) % n;
         frames
@@ -878,43 +852,6 @@ fn assert_identity(
         }
     }
     frames
-}
-
-/// A generic, CVE-free OT identity for a capture host, keyed on its zone's vendor
-/// and carrier protocol. The point is a parsed OT session that unions the host
-/// MAC<->IP at the sensor (the lever the fabricated devices and switches prove),
-/// not CVE attribution: background hosts carry generic device data, while the
-/// fabricated fleet remains the CVE-bearing plant. The session is well-formed and
-/// dissectable; it just fingerprints an unremarkable field device, not a known
-/// vulnerable model.
-fn generic_profile(vendor: Option<&str>, protocol: Option<&str>) -> DeviceProfile {
-    let protocol = proto_from_str(protocol.unwrap_or("enip"));
-    let model = match protocol {
-        ProfileProto::Enip => "EtherNet/IP Device",
-        ProfileProto::Modbus => "Modbus Device",
-        ProfileProto::S7 => "S7 Device",
-        ProfileProto::SwitchSnmp => "Managed Switch",
-    }
-    .to_string();
-    DeviceProfile {
-        vendor: vendor.unwrap_or("Generic").to_string(),
-        model,
-        firmware: "1.0".to_string(),
-        protocol,
-        purdue_level: 0,
-        oui: None,
-        cves: Vec::new(),
-        enip_vendor_id: None,
-        enip_device_type: None,
-        enip_product_code: None,
-        enip_product_name: None,
-        s7_order_number: None,
-        sys_descr: None,
-        sys_object_id: None,
-        modbus_vendor_name: None,
-        modbus_product_code: None,
-        modbus_revision: None,
-    }
 }
 
 /// A fresh ephemeral client port in the IANA dynamic range (49152-65535), varied
