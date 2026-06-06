@@ -857,3 +857,66 @@ fn the_zone_gateway_emits_its_own_broadcast_request() {
         "the zone gateway (.250) emits its own broadcast ARP request so it binds"
     );
 }
+
+/// Every capture host must emit a parsed OT session of its own, not just ARP, so
+/// the sensor tracks it as an OT endpoint and unions its MAC<->IP. The field
+/// proved a bare host (seen only in replayed background traffic plus a windowed
+/// ARP request) never unions: the union needs an authoritative parsed identity,
+/// exactly like the fabricated devices and the CDP/LLDP switches. The host's
+/// identity is generic and CVE-free (the fabricated fleet carries the CVEs).
+/// Regression guard for the split capture hosts.
+#[test]
+fn capture_hosts_assert_a_parsed_ot_identity_so_they_union() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 256",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0, 0); // fabricate the fleet and zones
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
+    engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    assert!(
+        engine.ledger().capture_host_count() > 40,
+        "hosts registered"
+    );
+
+    let pcap = engine.red_tick(1, 60).expect("identity burst");
+    let cap = pcapio::read(&pcap).unwrap();
+
+    // The MACs of the registered capture hosts.
+    let host_macs: std::collections::HashSet<[u8; 6]> = engine
+        .ledger()
+        .capture_hosts
+        .iter()
+        .map(|h| parse_mac6(&h.mac))
+        .collect();
+
+    // At least one capture host must SOURCE an IPv4 (non-ARP) frame: it is the
+    // server of its own OT session, so the sensor sees a parsed endpoint and
+    // unions it. Before this, a host emitted only ARP (0x0806) in the synth burst.
+    let host_sources_ot = cap.packets.iter().any(|p| {
+        let d = &p.data;
+        d.len() >= 14
+            && u16::from_be_bytes([d[12], d[13]]) == 0x0800
+            && host_macs.contains(&{
+                let mut src = [0u8; 6];
+                src.copy_from_slice(&d[6..12]);
+                src
+            })
+    });
+    assert!(
+        host_sources_ot,
+        "a capture host emits its own parsed OT session (not just ARP), so it unions MAC<->IP"
+    );
+}
