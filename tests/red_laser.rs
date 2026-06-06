@@ -739,15 +739,13 @@ fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
     );
 }
 
-/// Every capture host must be resolved in a SINGLE burst, not on a rotating
-/// window. The field showed that only assets resolved every burst (devices and
-/// the per-zone stations) unioned MAC<->IP at the sensor, while hosts on a
-/// rotating window (re-resolved only every few minutes) never did: the binding
-/// needs the `is-at` reply frequently, not once a rotation. The old anti-flood
-/// reason for windowing is gone now that the burst is replayed self-paced (1ms
-/// per frame, not line rate), so a full sweep no longer arrives as a microburst.
+/// With a large capture-host fleet the ARP must rotate through a bounded window
+/// per burst, not resolve every host at once. Resolving the whole fleet in one
+/// burst is a multi-thousand-frame ARP microburst that chokes the replay and
+/// overruns the sensor (so few associations form and the capture is starved):
+/// the v0.2.11 field defect. Over a few rotations every host is still bound.
 #[test]
-fn every_capture_host_is_resolved_in_a_single_burst() {
+fn capture_host_arp_rotates_through_a_window_and_covers_all() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -766,28 +764,44 @@ fn every_capture_host_is_resolved_in_a_single_burst() {
 
     let pool = dir.path().join("pool");
     std::fs::create_dir_all(&pool).unwrap();
-    // ~200 hosts in one /24: far more than the old 96-wide window.
+    // ~200 hosts in one /24, well over the per-burst ARP window.
     let src = write_capture(&pool, "many.pcap", 60, 200);
     engine.remap_into_session(&cfg, &src, &[]).unwrap();
     let hosts = engine.ledger().capture_host_count();
     assert!(hosts > 150, "a large host fleet: {hosts}");
 
-    // One burst.
-    let pcap = engine.red_tick(1, 60).expect("burst");
-    let cap = pcapio::read(&pcap).unwrap();
-    let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp_frames(&cap)
-        .into_iter()
-        .filter(|(_, op, _, _)| *op == 2)
-        .map(|(_, _, sha, spa)| (sha, spa))
-        .collect();
+    // Resolve over several bursts, advancing the wall clock past the cadence gate
+    // each time, and collect every binding the replies carry.
+    let mut bound: std::collections::HashSet<([u8; 6], [u8; 4])> = std::collections::HashSet::new();
+    let mut max_replies_in_a_burst = 0usize;
+    for i in 1..=8u64 {
+        let pcap = engine.red_tick(i, i * 60).expect("burst");
+        let cap = pcapio::read(&pcap).unwrap();
+        let replies: Vec<_> = arp_frames(&cap)
+            .into_iter()
+            .filter(|(_, op, _, _)| *op == 2)
+            .collect();
+        max_replies_in_a_burst = max_replies_in_a_burst.max(replies.len());
+        for (_, _, sha, spa) in replies {
+            bound.insert((sha, spa));
+        }
+        let _ = std::fs::remove_file(&pcap);
+    }
 
-    // Every capture host is bound by a reply in that single burst (no window).
+    // No single burst resolves the whole fleet: the per-burst ARP stays well
+    // below the host count (the anti-flood property the window guarantees).
+    assert!(
+        max_replies_in_a_burst < hosts,
+        "a burst never resolves the whole fleet at once: {max_replies_in_a_burst} replies vs {hosts} hosts"
+    );
+
+    // Every capture host is bound within a few rotations.
     for h in &engine.ledger().capture_hosts {
         let m = parse_mac6(&h.mac);
         let a: Ipv4Addr = h.ip.parse().expect("host ip parses");
         assert!(
             bound.contains(&(m, a.octets())),
-            "capture host {} / {} is resolved in a single burst",
+            "capture host {} / {} is bound over the rotations",
             h.ip,
             h.mac
         );
