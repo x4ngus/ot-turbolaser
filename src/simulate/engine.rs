@@ -598,21 +598,6 @@ impl SimulatorEngine {
             let vuln = &self.vuln;
             for k in 0..count {
                 let dev = &devices[(start + k) % n];
-                // Bind the device MAC<->IP: the device broadcasts its own ARP
-                // request for the zone gateway ("who has <gateway>?", sender =
-                // dev_ip/dev_mac). The sensor unions MAC<->IP from a request's
-                // sender, not from a reply (an L3 source MAC is untrusted, and a
-                // unicast is-at reply did not bind in the field even when the
-                // sensor received it). The gateway also binds itself once.
-                if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
-                    frames.extend(resolve_asset(
-                        seed,
-                        &dev.subnet_cidr,
-                        parse_mac(&dev.mac),
-                        dev_ip,
-                    ));
-                    bind_gateway(&mut gateways_bound, &mut frames, seed, &dev.subnet_cidr);
-                }
                 // Own the profile so a missing-model fallback and the vuln borrow
                 // do not tangle; a device is never silently dropped.
                 let profile = match vuln.by_model(&dev.model) {
@@ -622,13 +607,24 @@ impl SimulatorEngine {
                         fallback_profile(dev)
                     }
                 };
-                frames.extend(assertions_for_device(
-                    dev,
-                    &profile,
-                    switch_beacons,
-                    seed,
-                    nonce,
-                ));
+                // Bind the device MAC<->IP: it broadcasts its own ARP request for
+                // the zone gateway (the sensor unions from a request's sender, not
+                // a reply), the gateway binds itself once, and the device sustains
+                // its parsed OT identity so the union holds against any traffic.
+                if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
+                    let dev_mac = parse_mac(&dev.mac);
+                    frames.extend(resolve_asset(seed, &dev.subnet_cidr, dev_mac, dev_ip));
+                    bind_gateway(&mut gateways_bound, &mut frames, seed, &dev.subnet_cidr);
+                    frames.extend(assert_identity(
+                        dev_mac,
+                        dev_ip,
+                        &dev.subnet_cidr,
+                        &profile,
+                        switch_beacons,
+                        seed,
+                        nonce,
+                    ));
+                }
             }
         }
         for model in missing {
@@ -636,14 +632,15 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // A rotating window of capture hosts, each bound MAC<->IP the same way as
-        // a device: the host broadcasts its own ARP request for the zone gateway,
-        // so its sender (MAC, IP) ride in a request the sensor unions from. This
-        // is the fix for the split capture hosts: previously a host only ever
-        // appeared as the target of the station's who-has (its identity landing in
-        // a unicast reply), and a reply never unioned. The window keeps each burst
-        // small; the burst is self-paced, not a microburst, and each host
-        // re-announces as the window comes round.
+        // A rotating window of capture hosts, each made a parsed OT endpoint so it
+        // unions MAC<->IP and HOLDS, the same way the fabricated devices and the
+        // CDP/LLDP-speaking switches do. The field proved a bare host, seen only in
+        // replayed background L3 traffic, never unions even with its own ARP
+        // request: the union needs an authoritative parsed identity. So each host
+        // gets (1) its broadcast ARP request for the zone gateway (the association)
+        // and (2) a sustained, generic, CVE-free OT session keyed on its zone (the
+        // identity). The window keeps each burst self-paced, not a microburst, and
+        // each host re-announces as the window comes round.
         let hn = self.ledger.capture_hosts.len();
         if hn > 0 {
             let hstart = self.capture_arp_cursor % hn;
@@ -654,6 +651,16 @@ impl SimulatorEngine {
                     let mac = parse_mac(&h.mac);
                     frames.extend(resolve_asset(seed, &h.subnet_cidr, mac, ip));
                     bind_gateway(&mut gateways_bound, &mut frames, seed, &h.subnet_cidr);
+                    let profile = generic_profile(h.vendor.as_deref(), h.protocol.as_deref());
+                    frames.extend(assert_identity(
+                        mac,
+                        ip,
+                        &h.subnet_cidr,
+                        &profile,
+                        switch_beacons,
+                        seed,
+                        nonce,
+                    ));
                 }
             }
             self.capture_arp_cursor = (hstart + hcount) % hn;
@@ -735,86 +742,95 @@ fn zone_station(subnet_cidr: &str, asset_ip: Ipv4Addr) -> Ipv4Addr {
     }
 }
 
-/// The protocol-assertion frames for one device, keyed on its carrier protocol.
-/// `seed` derives the per-zone engineering-station MAC so the querying client is
-/// a distinct, coherent asset in each zone rather than one MAC multi-homed across
-/// every zone (which a sensor cannot fuse, and which polluted attribution).
-/// `nonce` (the burst counter) varies the client ephemeral port per scan so each
-/// burst is a fresh connection the sensor parses anew, instead of one identical
-/// 4-tuple it folds into a single conversation and never re-reads (which left the
-/// device unattributed and surfacing only as an L2/MAC-only asset).
-fn assertions_for_device(
-    dev: &DeviceRecord,
+/// The protocol-assertion frames for one asset (a fabricated device or a capture
+/// host), keyed on the profile's carrier protocol. Driven entirely by the
+/// `profile` (its model/firmware/vendor and protocol-specific fields), so the
+/// same builder serves the CVE-bearing fabricated fleet and the generic-identity
+/// capture hosts: the asset is the session SERVER, answering its per-zone
+/// engineering station, which is what makes the sensor track it as an OT endpoint
+/// and union its MAC<->IP. A bare host seen only in replayed background traffic
+/// never unions; a parsed OT session is the lever (the fabricated devices and the
+/// CDP/LLDP-speaking switches prove it). `seed` derives the per-zone station MAC
+/// (one stable client per zone, never a MAC multi-homed across zones, which a
+/// sensor cannot fuse). `nonce` (the burst counter) varies the client ephemeral
+/// port per scan so each burst is a fresh connection the sensor parses anew.
+fn assert_identity(
+    mac: [u8; 6],
+    ip: Ipv4Addr,
+    subnet_cidr: &str,
     profile: &DeviceProfile,
     switch_beacons: bool,
     seed: u64,
     nonce: u64,
 ) -> Vec<Vec<u8>> {
-    let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() else {
-        return Vec::new();
-    };
-    let dev_mac = parse_mac(&dev.mac);
-    let client_ip = client_addr(&dev.subnet_cidr);
-    // A stable per-zone engineering-station MAC, not one global CLIENT_MAC across
-    // all zones: a multi-homed MAC is unbindable and pollutes the asset model.
+    let client_ip = client_addr(subnet_cidr);
     let client_mac = l3::stable_mac(seed, u32::from(client_ip));
-    // A fresh ephemeral client port per scan, so each connection is a distinct
-    // 4-tuple (one ephemeral port per connection, like a real client).
-    let client_port = ephemeral_port(nonce, dev_ip);
+    let client_port = ephemeral_port(nonce, ip);
 
     let mut frames: Vec<Vec<u8>> = Vec::new();
 
     match profile.protocol {
         ProfileProto::Enip => {
-            let (major, minor) = parse_version(&dev.firmware);
-            let product_name = profile.enip_product_name.as_deref().unwrap_or(&dev.model);
+            let (major, minor) = parse_version(&profile.firmware);
+            let product_name = profile
+                .enip_product_name
+                .as_deref()
+                .unwrap_or(&profile.model);
             let id = enip_identity::EnipIdentity {
                 vendor_id: profile.enip_vendor_id.unwrap_or(0),
                 device_type: profile.enip_device_type.unwrap_or(0),
                 product_code: profile.enip_product_code.unwrap_or(0),
                 revision_major: major,
                 revision_minor: minor,
-                serial: u32::from(dev_ip),
+                serial: u32::from(ip),
                 product_name: clamp_str(product_name, 255),
             };
-            let (a, b) =
-                enip_identity::exchange(client_mac, dev_mac, client_ip, dev_ip, client_port, &id);
+            let (a, b) = enip_identity::exchange(client_mac, mac, client_ip, ip, client_port, &id);
             frames.push(a);
             frames.push(b);
         }
         ProfileProto::Modbus => {
             let id = modbus_devid::ModbusDevId {
                 vendor_name: clamp_str(
-                    profile.modbus_vendor_name.as_deref().unwrap_or(&dev.vendor),
+                    profile
+                        .modbus_vendor_name
+                        .as_deref()
+                        .unwrap_or(&profile.vendor),
                     255,
                 ),
                 product_code: clamp_str(
-                    profile.modbus_product_code.as_deref().unwrap_or(&dev.model),
+                    profile
+                        .modbus_product_code
+                        .as_deref()
+                        .unwrap_or(&profile.model),
                     255,
                 ),
                 revision: clamp_str(
-                    profile.modbus_revision.as_deref().unwrap_or(&dev.firmware),
+                    profile
+                        .modbus_revision
+                        .as_deref()
+                        .unwrap_or(&profile.firmware),
                     255,
                 ),
             };
             frames.extend(modbus_devid::exchange(
                 client_mac,
-                dev_mac,
+                mac,
                 client_ip,
-                dev_ip,
+                ip,
                 client_port,
                 1,
                 &id,
             ));
         }
         ProfileProto::S7 => {
-            let (major, minor) = parse_version(&dev.firmware);
-            let order = profile.s7_order_number.as_deref().unwrap_or(&dev.model);
+            let (major, minor) = parse_version(&profile.firmware);
+            let order = profile.s7_order_number.as_deref().unwrap_or(&profile.model);
             frames.extend(s7_szl::exchange(
                 client_mac,
-                dev_mac,
+                mac,
                 client_ip,
-                dev_ip,
+                ip,
                 client_port,
                 order,
                 major,
@@ -825,32 +841,32 @@ fn assertions_for_device(
             let descr = profile
                 .sys_descr
                 .clone()
-                .unwrap_or_else(|| format!("{} {}", dev.vendor, dev.model));
+                .unwrap_or_else(|| format!("{} {}", profile.vendor, profile.model));
             // Switches send LLDP and CDP on the beacon cadence (realistic switch
             // colour; on a multi-MAC chassis these are also what the sensor uses
-            // to merge the MACs into one asset). MAC<->IP binding still comes from
-            // the ARP response emitted for every asset in build_assertions.
+            // to merge the MACs into one asset). The MAC<->IP union comes from the
+            // every-burst SNMP session plus the ARP request in build_assertions.
             if switch_beacons {
                 frames.push(lldp::beacon(
-                    dev_mac,
-                    dev_ip,
-                    clamp_str(&dev.model, 511),
+                    mac,
+                    ip,
+                    clamp_str(&profile.model, 511),
                     clamp_str(&descr, 511),
                 ));
                 frames.push(cdp::beacon(
-                    dev_mac,
-                    dev_ip,
-                    &dev.model,
-                    &dev.firmware,
-                    &dev.model,
+                    mac,
+                    ip,
+                    &profile.model,
+                    &profile.firmware,
+                    &profile.model,
                 ));
             }
             let request_id = 0x1000u32.wrapping_add(nonce as u32 & 0x0fff);
             let (a, b) = snmp::exchange(
                 client_mac,
-                dev_mac,
+                mac,
                 client_ip,
-                dev_ip,
+                ip,
                 client_port,
                 "public",
                 request_id,
@@ -862,6 +878,43 @@ fn assertions_for_device(
         }
     }
     frames
+}
+
+/// A generic, CVE-free OT identity for a capture host, keyed on its zone's vendor
+/// and carrier protocol. The point is a parsed OT session that unions the host
+/// MAC<->IP at the sensor (the lever the fabricated devices and switches prove),
+/// not CVE attribution: background hosts carry generic device data, while the
+/// fabricated fleet remains the CVE-bearing plant. The session is well-formed and
+/// dissectable; it just fingerprints an unremarkable field device, not a known
+/// vulnerable model.
+fn generic_profile(vendor: Option<&str>, protocol: Option<&str>) -> DeviceProfile {
+    let protocol = proto_from_str(protocol.unwrap_or("enip"));
+    let model = match protocol {
+        ProfileProto::Enip => "EtherNet/IP Device",
+        ProfileProto::Modbus => "Modbus Device",
+        ProfileProto::S7 => "S7 Device",
+        ProfileProto::SwitchSnmp => "Managed Switch",
+    }
+    .to_string();
+    DeviceProfile {
+        vendor: vendor.unwrap_or("Generic").to_string(),
+        model,
+        firmware: "1.0".to_string(),
+        protocol,
+        purdue_level: 0,
+        oui: None,
+        cves: Vec::new(),
+        enip_vendor_id: None,
+        enip_device_type: None,
+        enip_product_code: None,
+        enip_product_name: None,
+        s7_order_number: None,
+        sys_descr: None,
+        sys_object_id: None,
+        modbus_vendor_name: None,
+        modbus_product_code: None,
+        modbus_revision: None,
+    }
 }
 
 /// A fresh ephemeral client port in the IANA dynamic range (49152-65535), varied
@@ -1118,6 +1171,27 @@ mod tests {
         }
     }
 
+    /// Render a device's identity through the profile-driven builder (a test shim
+    /// for the old per-device entry point; the engine now calls assert_identity
+    /// directly for both fabricated devices and capture hosts).
+    fn identity_for(
+        d: &DeviceRecord,
+        p: &DeviceProfile,
+        switch_beacons: bool,
+        seed: u64,
+        nonce: u64,
+    ) -> Vec<Vec<u8>> {
+        assert_identity(
+            parse_mac(&d.mac),
+            d.ip.parse().unwrap(),
+            &d.subnet_cidr,
+            p,
+            switch_beacons,
+            seed,
+            nonce,
+        )
+    }
+
     #[test]
     fn version_parsing() {
         assert_eq!(parse_version("V4.2.1"), (4, 2));
@@ -1144,7 +1218,7 @@ mod tests {
             .find(|p| p.protocol == ProfileProto::Enip)
             .unwrap();
         let d = dev("enip", &p.model, &p.firmware);
-        let frames = assertions_for_device(&d, p, true, 1337, 0);
+        let frames = identity_for(&d, p, true, 1337, 0);
         assert_eq!(frames.len(), 2, "List Identity request + reply over UDP");
         // List Identity is UDP/44818 (ethertype 0x0800); the device binds from
         // the connectionless reply, which a sensor reads without a session.
@@ -1173,12 +1247,12 @@ mod tests {
         // The switch branch emits LLDP + CDP on the beacon cadence plus the SNMP
         // fetch; the MAC<->IP binding ARP is added per asset in build_assertions.
         assert_eq!(
-            assertions_for_device(&d, p, true, 1337, 0).len(),
+            identity_for(&d, p, true, 1337, 0).len(),
             4,
             "lldp + cdp + snmp request/response"
         );
         assert_eq!(
-            assertions_for_device(&d, p, false, 1337, 0).len(),
+            identity_for(&d, p, false, 1337, 0).len(),
             2,
             "beacons off leaves the snmp exchange"
         );
@@ -1215,8 +1289,8 @@ mod tests {
         let d = dev("modbus", &p.model, &p.firmware);
         // Two bursts (nonce 0 and 1) must differ on the wire, so a sensor sees a
         // fresh connection each scan rather than one it folds and never re-reads.
-        let burst0 = assertions_for_device(&d, p, false, 1337, 0);
-        let burst1 = assertions_for_device(&d, p, false, 1337, 1);
+        let burst0 = identity_for(&d, p, false, 1337, 0);
+        let burst1 = identity_for(&d, p, false, 1337, 1);
         assert_ne!(
             burst0, burst1,
             "successive scans are distinct connections (fresh port and ISN)"
