@@ -19,7 +19,7 @@ use crate::oui::OuiDb;
 use crate::pcapio::{self, Capture};
 use crate::proto::frame::{parse_layout, L3Kind, L4Kind};
 use crate::proto::l3;
-use crate::synth::{self, arp, cdp, enip_identity, lldp, modbus_devid, s7_szl, snmp};
+use crate::synth::{self, arp, cdp, enip_identity, lldp, modbus_devid, s7_szl, session, snmp};
 use crate::threat::{self, ThreatScheduler};
 use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
 
@@ -39,6 +39,10 @@ const ANNOUNCE_WINDOW: usize = 256;
 /// each host re-binds as the window comes round, and the binding persists at the
 /// sensor between rotations.
 const CAPTURE_ARP_WINDOW: usize = 96;
+/// The service port a capture host opens its session to on the zone station. A
+/// generic, dissector-light port: the point is a tracked TCP connection with the
+/// host as an endpoint, not a parsed application protocol.
+const HOST_SESSION_PORT: u16 = 443;
 /// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
 /// are periodic (tens of seconds), so emitting them every sub-second tick is
 /// both unrealistic and a needless share of the wire; spacing them keeps OT
@@ -633,12 +637,16 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Bind a rotating window of capture hosts the same way: a solicited ARP
-        // exchange with the zone engineering station. Its replayed L3 traffic
-        // does not bind it (the sensor does not infer MAC<->IP from an L3 frame's
-        // Ethernet header), so without this resolution it stays IP-only. The
-        // window keeps each burst small: resolving the whole fleet at once is an
-        // ARP microburst that chokes the replay and overruns the sensor.
+        // A rotating window of capture hosts, each given two things. (1) The ARP
+        // resolution, as before. (2) A short, complete TCP session to the zone
+        // station, which is the new lever: the field showed the sensor unions
+        // MAC<->IP only for assets it tracks as endpoints of a session (the
+        // fabricated devices as servers, the stations as clients), never for a
+        // host seen only in replayed background traffic or synthetic ARP. The host
+        // opens the session (host as client -> station as server) so it becomes a
+        // tracked connection endpoint without one host scanning the whole subnet.
+        // The window keeps each burst small; the burst is self-paced, not a
+        // microburst, and each host re-announces as the window comes round.
         let hn = self.ledger.capture_hosts.len();
         if hn > 0 {
             let hstart = self.capture_arp_cursor % hn;
@@ -646,13 +654,15 @@ impl SimulatorEngine {
             for k in 0..hcount {
                 let h = &self.ledger.capture_hosts[(hstart + k) % hn];
                 if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+                    let mac = parse_mac(&h.mac);
                     frames.extend(resolve_asset(
                         &mut bound_clients,
                         seed,
                         &h.subnet_cidr,
-                        parse_mac(&h.mac),
+                        mac,
                         ip,
                     ));
+                    frames.extend(host_session(seed, &h.subnet_cidr, mac, ip, nonce));
                 }
             }
             self.capture_arp_cursor = (hstart + hcount) % hn;
@@ -707,6 +717,45 @@ fn zone_station(subnet_cidr: &str, asset_ip: Ipv4Addr) -> Ipv4Addr {
     } else {
         client
     }
+}
+
+/// A short, complete TCP session that makes a passive capture host a tracked
+/// connection ENDPOINT at the sensor, so it unions MAC<->IP. The field showed the
+/// sensor associates a MAC with an IP only for assets it tracks as endpoints of a
+/// session it parses (the fabricated devices as servers, the engineering stations
+/// as clients) and never for a host it sees only in replayed background traffic
+/// or synthetic ARP. The host opens the connection (host -> station, host as
+/// client) so it becomes a tracked endpoint without one host scanning the subnet,
+/// which is the pattern that cost the stations their binding. A fresh ephemeral
+/// client port per burst (varied by `nonce`) makes each a distinct connection.
+/// Returns nothing if the host sits on the station address (a degenerate self
+/// session).
+fn host_session(
+    seed: u64,
+    subnet_cidr: &str,
+    host_mac: [u8; 6],
+    host_ip: Ipv4Addr,
+    nonce: u64,
+) -> Vec<Vec<u8>> {
+    let station_ip = client_addr(subnet_cidr);
+    if station_ip == host_ip {
+        return Vec::new();
+    }
+    let station_mac = l3::stable_mac(seed, u32::from(station_ip));
+    let client_port = ephemeral_port(nonce, host_ip);
+    let mut s = session::TcpSession::new(
+        host_mac,
+        station_mac,
+        host_ip,
+        station_ip,
+        client_port,
+        HOST_SESSION_PORT,
+    );
+    s.open();
+    s.client_says(b"\x00");
+    s.server_says(b"\x00");
+    s.close();
+    s.into_frames()
 }
 
 /// The protocol-assertion frames for one device, keyed on its carrier protocol.
