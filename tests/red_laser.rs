@@ -807,3 +807,69 @@ fn capture_host_arp_rotates_through_a_window_and_covers_all() {
         );
     }
 }
+
+/// A capture host must open a complete, tracked TCP session to its zone station,
+/// so the sensor sees it as a session endpoint and unions MAC<->IP. The field
+/// showed ARP alone never unions a passive host (only OT-session endpoints union),
+/// so each windowed host opens a short session (host as client -> station:443).
+/// Host-as-client avoids one host scanning the subnet. Regression guard for the
+/// host-union mechanism.
+#[test]
+fn capture_hosts_open_a_tracked_session_to_their_station() {
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+    let yaml = cfg_yaml(
+        dir.path(),
+        &shm,
+        &session,
+        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 256",
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    engine.red_tick(0, 0); // fabricate the fleet and zones
+    let pool = dir.path().join("pool");
+    std::fs::create_dir_all(&pool).unwrap();
+    let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
+    engine.remap_into_session(&cfg, &src, &[]).unwrap();
+    assert!(engine.ledger().capture_host_count() > 40, "hosts registered");
+
+    let pcap = engine.red_tick(1, 60).expect("identity burst");
+    let cap = pcapio::read(&pcap).unwrap();
+
+    // TCP = ethertype 0x0800, IP proto 6. Ports/flags at the usual offsets (no IP
+    // options): src/dst IP last octet d[29]/d[33]; tcp sport d[34..36], dport
+    // d[36..38]; flags d[47].
+    let is_tcp = |d: &[u8]| {
+        d.len() >= 54 && u16::from_be_bytes([d[12], d[13]]) == 0x0800 && d[23] == 6
+    };
+    // The host opens the session: SYN (not SYN-ACK) to <station>.250:443.
+    let host_syns: Vec<&OwnedPacket> = cap
+        .packets
+        .iter()
+        .filter(|p| {
+            let d = &p.data;
+            is_tcp(d)
+                && u16::from_be_bytes([d[36], d[37]]) == 443
+                && d[47] & 0x12 == 0x02 // SYN set, ACK clear
+        })
+        .collect();
+    assert!(
+        !host_syns.is_empty(),
+        "capture hosts open TCP sessions to the station on 443"
+    );
+    for p in &host_syns {
+        let d = &p.data;
+        assert_eq!(d[33], 250, "the session's server is the .250 station");
+        assert_ne!(d[29], 250, "the host (not the station) opens the connection");
+    }
+    // The station answers, so it is a real established session, not a lone SYN.
+    let synack = cap.packets.iter().any(|p| {
+        let d = &p.data;
+        is_tcp(d) && u16::from_be_bytes([d[34], d[35]]) == 443 && d[47] & 0x12 == 0x12
+    });
+    assert!(synack, "the station completes the handshake (SYN-ACK)");
+}
