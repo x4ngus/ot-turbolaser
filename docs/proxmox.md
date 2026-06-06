@@ -241,6 +241,48 @@ tshark -i net1 -c 20
 Within a short while the sensor should inventory the same zones and devices you
 saw in step 6, including the CVE-bearing devices.
 
+## If the sensor sees broadcast but not unicast (split assets, missing CVEs)
+
+This is the most common and most confusing deployment failure: assets appear but
+split into separate MAC-only and IP-only entries that never union, and CVEs
+never attribute. The cause is the lab bridge, not the appliance.
+
+`vmbr9` is a learning switch. tcpreplay re-emits each host's frames, so the
+bridge learns every fabricated MAC on the replay port and then forwards that
+host's *unicast* only back toward the replay port, never to the sensor. The
+sensor still receives broadcast and multicast (ARP `who-has`, NBNS, CDP) because
+those are flooded, so it looks like traffic is arriving, but it never sees the
+two frame types that carry the asset model:
+
+- the unicast ARP `is-at` replies that bind MAC to IP, so every asset stays split
+  into a MAC-only and an IP-only object, and
+- the unicast OT session responses (S7comm SZL, EtherNet/IP List Identity, Modbus
+  device id) that carry the device identity, so no CVE ever matches.
+
+Confirm it on the host with the sensor's port:
+
+```
+tcpdump -i tap200i1 -e -n 'arp and ether[20:2]==2'   # is-at replies; zero == the bug
+```
+
+If `who-has` requests flood in but there are zero `is-at` replies, fix it by
+making the isolated bridge flood everything to the sensor. It is a monitoring
+span, not a production switch, so flooding is correct, and on a two-port isolated
+segment there is nothing to storm:
+
+```
+bridge link set dev veth910i1 learning off flood on   # replay port
+bridge link set dev tap200i1  learning off flood on   # sensor port
+```
+
+The step-7 `tc`-mirred mirror is an alternative, but it is fragile here:
+tcpreplay can transmit with `PACKET_QDISC_BYPASS`, which skips the egress qdisc
+and the mirror with it. Disabling learning works regardless, because it is plain
+L2 forwarding below the qdisc. Add these two `bridge link set` lines to the
+`ot-mirror.sh` script below so flood mode survives a reboot (guest restart
+recreates the ports with learning back on). After applying it, the `is-at`
+replies appear on the sensor and assets union within a minute or two.
+
 ---
 
 # Full reference
