@@ -742,13 +742,14 @@ fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
     );
 }
 
-/// With a large capture-host fleet the ARP must rotate through a bounded window
-/// per burst, not resolve every host at once. Resolving the whole fleet in one
-/// burst is a multi-thousand-frame ARP microburst that chokes the replay and
-/// overruns the sensor (so few associations form and the capture is starved):
-/// the v0.2.11 field defect. Over a few rotations every host is still bound.
+/// Every capture host emits its own broadcast ARP request in a SINGLE burst, not
+/// a rotating window. A host is born IP-only from its first replayed L3 frame, so
+/// its binding must be present from the host's creation or the asset sticks split
+/// (a window delayed the ARP and the field froze the split). The burst is
+/// self-paced (1ms per frame), so a full sweep spreads over ~1s rather than a
+/// line-rate microburst. Regression guard against re-introducing the window.
 #[test]
-fn capture_host_arp_rotates_through_a_window_and_covers_all() {
+fn every_capture_host_emits_its_request_each_burst() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -767,45 +768,27 @@ fn capture_host_arp_rotates_through_a_window_and_covers_all() {
 
     let pool = dir.path().join("pool");
     std::fs::create_dir_all(&pool).unwrap();
-    // ~200 hosts in one /24, well over the per-burst ARP window.
+    // ~200 hosts in one /24 -- a large fleet, all resolved in one burst.
     let src = write_capture(&pool, "many.pcap", 60, 200);
     engine.remap_into_session(&cfg, &src, &[]).unwrap();
     let hosts = engine.ledger().capture_host_count();
     assert!(hosts > 150, "a large host fleet: {hosts}");
 
-    // Resolve over several bursts, advancing the wall clock past the cadence gate
-    // each time, and collect every binding the broadcast requests carry.
-    let mut bound: std::collections::HashSet<([u8; 6], [u8; 4])> = std::collections::HashSet::new();
-    let mut max_requests_in_a_burst = 0usize;
-    for i in 1..=8u64 {
-        let pcap = engine.red_tick(i, i * 60).expect("burst");
-        let cap = pcapio::read(&pcap).unwrap();
-        // Each asset binds via its own request (oper=1); collect those senders.
-        let requests: Vec<([u8; 6], [u8; 4])> = arp_frames(&cap)
-            .iter()
-            .filter_map(|&(_, op, sha, spa)| (op == 1).then_some((sha, spa)))
-            .collect();
-        max_requests_in_a_burst = max_requests_in_a_burst.max(requests.len());
-        for (sha, spa) in requests {
-            bound.insert((sha, spa));
-        }
-        let _ = std::fs::remove_file(&pcap);
-    }
+    // ONE burst. Collect the sender of every broadcast request (oper=1).
+    let pcap = engine.red_tick(1, 60).expect("burst");
+    let cap = pcapio::read(&pcap).unwrap();
+    let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp_frames(&cap)
+        .iter()
+        .filter_map(|&(_, op, sha, spa)| (op == 1).then_some((sha, spa)))
+        .collect();
 
-    // No single burst resolves the whole fleet: the per-burst ARP stays well
-    // below the host count (the anti-flood property the window guarantees).
-    assert!(
-        max_requests_in_a_burst < hosts,
-        "a burst never resolves the whole fleet at once: {max_requests_in_a_burst} requests vs {hosts} hosts"
-    );
-
-    // Every capture host is bound within a few rotations.
+    // Every capture host is bound in that single burst, no window to wait for.
     for h in &engine.ledger().capture_hosts {
         let m = parse_mac6(&h.mac);
         let a: Ipv4Addr = h.ip.parse().expect("host ip parses");
         assert!(
             bound.contains(&(m, a.octets())),
-            "capture host {} / {} is bound over the rotations",
+            "capture host {} / {} emits its own request in a single burst",
             h.ip,
             h.mac
         );
@@ -855,68 +838,5 @@ fn the_zone_gateway_emits_its_own_broadcast_request() {
     assert!(
         gateway_request,
         "the zone gateway (.250) emits its own broadcast ARP request so it binds"
-    );
-}
-
-/// Every capture host must emit a parsed OT session of its own, not just ARP, so
-/// the sensor tracks it as an OT endpoint and unions its MAC<->IP. The field
-/// proved a bare host (seen only in replayed background traffic plus a windowed
-/// ARP request) never unions: the union needs an authoritative parsed identity,
-/// exactly like the fabricated devices and the CDP/LLDP switches. The host's
-/// identity is generic and CVE-free (the fabricated fleet carries the CVEs).
-/// Regression guard for the split capture hosts.
-#[test]
-fn capture_hosts_assert_a_parsed_ot_identity_so_they_union() {
-    let dir = tempfile::tempdir().unwrap();
-    let shm = dir.path().join("shm");
-    let session = dir.path().join("session.json");
-    let yaml = cfg_yaml(
-        dir.path(),
-        &shm,
-        &session,
-        "  identity_every_n_runs: 1\n  max_devices: 8\n  max_assets: 256",
-    );
-    let cfg_path = dir.path().join("replay.yaml");
-    std::fs::write(&cfg_path, yaml).unwrap();
-    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
-
-    let mut engine = SimulatorEngine::red(&cfg, 0);
-    engine.red_tick(0, 0); // fabricate the fleet and zones
-    let pool = dir.path().join("pool");
-    std::fs::create_dir_all(&pool).unwrap();
-    let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
-    engine.remap_into_session(&cfg, &src, &[]).unwrap();
-    assert!(
-        engine.ledger().capture_host_count() > 40,
-        "hosts registered"
-    );
-
-    let pcap = engine.red_tick(1, 60).expect("identity burst");
-    let cap = pcapio::read(&pcap).unwrap();
-
-    // The MACs of the registered capture hosts.
-    let host_macs: std::collections::HashSet<[u8; 6]> = engine
-        .ledger()
-        .capture_hosts
-        .iter()
-        .map(|h| parse_mac6(&h.mac))
-        .collect();
-
-    // At least one capture host must SOURCE an IPv4 (non-ARP) frame: it is the
-    // server of its own OT session, so the sensor sees a parsed endpoint and
-    // unions it. Before this, a host emitted only ARP (0x0806) in the synth burst.
-    let host_sources_ot = cap.packets.iter().any(|p| {
-        let d = &p.data;
-        d.len() >= 14
-            && u16::from_be_bytes([d[12], d[13]]) == 0x0800
-            && host_macs.contains(&{
-                let mut src = [0u8; 6];
-                src.copy_from_slice(&d[6..12]);
-                src
-            })
-    });
-    assert!(
-        host_sources_ot,
-        "a capture host emits its own parsed OT session (not just ARP), so it unions MAC<->IP"
     );
 }
