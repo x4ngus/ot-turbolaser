@@ -631,17 +631,19 @@ fn wire_carries_only_planned_coherent_frames() {
     }
 }
 
-/// Every asset (device and capture host) must be bound MAC<->IP by a SOLICITED
-/// UNICAST ARP reply: the zone engineering station asks "who has the asset IP?"
-/// and the asset answers "ip is at mac" (oper=2, SHA=mac, SPA=ip) unicast to the
-/// station. The sensor associates MAC<->IP from such a solicited reply, not from
-/// a gratuitous broadcast (the reference OT capture it binds from carries only
-/// solicited unicast replies, zero gratuitous). Every ARP frame must be padded
-/// to the 60-byte Ethernet minimum (a 42-byte runt is rejected). Regression
-/// guard for the binding collapse (IP-only assets), the runt-ARP a sensor would
-/// not trust, and the gratuitous-broadcast form the sensor did not associate.
+/// Every asset (device and capture host) must be bound MAC<->IP by its OWN
+/// BROADCAST ARP REQUEST: the asset asks "who has <gateway>?" with its own MAC
+/// and IP in the sender fields (oper=1, SHA=mac, SPA=ip, eth dst = broadcast).
+/// The field export proved a passive sensor forms the union from a request's
+/// sender, not from a reply: with the bridge flooding unicast, only assets that
+/// emitted their own request unioned, while assets seen only as the sender of a
+/// unicast is-at reply stayed split MAC-only/IP-only. Requests target the one
+/// shared zone gateway (many hosts -> one gateway), the benign pattern, never a
+/// per-host subnet scan. Every ARP frame must be padded to the 60-byte Ethernet
+/// minimum (a 42-byte runt is rejected). Regression guard for the binding
+/// collapse (split IP-only/MAC-only assets) the inversion fixes.
 #[test]
-fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
+fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -674,22 +676,23 @@ fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
     let arp: Vec<&OwnedPacket> = cap.packets.iter().filter(|p| is_arp(&p.data)).collect();
     assert!(!arp.is_empty(), "the burst carries ARP");
 
-    // Every ARP reply is unicast to the requester, never a gratuitous broadcast.
-    // A broadcast reply is the form the sensor would not associate MAC<->IP from.
-    for p in arp.iter().filter(|p| oper(&p.data) == 2) {
-        assert_ne!(
-            &p.data[0..6],
-            &BROADCAST,
-            "ARP reply is unicast, not a gratuitous broadcast"
-        );
+    // Every ARP request is broadcast (the form the sensor unions from, and one
+    // that reaches the sensor regardless of the bridge's unicast flooding); every
+    // reply is unicast to the requester. Only these two opcodes appear.
+    for p in &arp {
+        match oper(&p.data) {
+            1 => assert_eq!(&p.data[0..6], &BROADCAST, "ARP request is broadcast"),
+            2 => assert_ne!(&p.data[0..6], &BROADCAST, "ARP reply is unicast"),
+            other => panic!("unexpected ARP opcode {other}"),
+        }
     }
 
-    // The set of bindings the replies carry: (sender MAC, sender IP) of each
-    // reply, i.e. "this IP is at this MAC". Sender hardware addr at ARP offset 8
-    // (frame 22-28), sender protocol addr at ARP offset 14 (frame 28-32).
+    // The bindings the REQUESTS carry: (sender MAC, sender IP) of each request,
+    // i.e. "this IP is at this MAC". Sender hardware addr at frame 22-28, sender
+    // protocol addr at frame 28-32.
     let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp
         .iter()
-        .filter(|p| oper(&p.data) == 2)
+        .filter(|p| oper(&p.data) == 1)
         .map(|p| {
             let mut mac = [0u8; 6];
             mac.copy_from_slice(&p.data[22..28]);
@@ -698,7 +701,7 @@ fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
         })
         .collect();
 
-    // Every asset is bound by one of those solicited replies.
+    // Every asset is the sender of one of those broadcast requests.
     let assets = engine
         .ledger()
         .devices
@@ -717,7 +720,7 @@ fn synth_burst_binds_every_asset_via_solicited_unicast_arp_replies() {
         let a: Ipv4Addr = ip.parse().expect("asset ip parses");
         assert!(
             bound.contains(&(m, a.octets())),
-            "asset {ip} / {mac} is bound by a solicited unicast ARP reply"
+            "asset {ip} / {mac} emits its own broadcast ARP request"
         );
         checked += 1;
     }
@@ -771,18 +774,19 @@ fn capture_host_arp_rotates_through_a_window_and_covers_all() {
     assert!(hosts > 150, "a large host fleet: {hosts}");
 
     // Resolve over several bursts, advancing the wall clock past the cadence gate
-    // each time, and collect every binding the replies carry.
+    // each time, and collect every binding the broadcast requests carry.
     let mut bound: std::collections::HashSet<([u8; 6], [u8; 4])> = std::collections::HashSet::new();
-    let mut max_replies_in_a_burst = 0usize;
+    let mut max_requests_in_a_burst = 0usize;
     for i in 1..=8u64 {
         let pcap = engine.red_tick(i, i * 60).expect("burst");
         let cap = pcapio::read(&pcap).unwrap();
-        let replies: Vec<_> = arp_frames(&cap)
-            .into_iter()
-            .filter(|(_, op, _, _)| *op == 2)
+        // Each asset binds via its own request (oper=1); collect those senders.
+        let requests: Vec<([u8; 6], [u8; 4])> = arp_frames(&cap)
+            .iter()
+            .filter_map(|&(_, op, sha, spa)| (op == 1).then_some((sha, spa)))
             .collect();
-        max_replies_in_a_burst = max_replies_in_a_burst.max(replies.len());
-        for (_, _, sha, spa) in replies {
+        max_requests_in_a_burst = max_requests_in_a_burst.max(requests.len());
+        for (sha, spa) in requests {
             bound.insert((sha, spa));
         }
         let _ = std::fs::remove_file(&pcap);
@@ -791,8 +795,8 @@ fn capture_host_arp_rotates_through_a_window_and_covers_all() {
     // No single burst resolves the whole fleet: the per-burst ARP stays well
     // below the host count (the anti-flood property the window guarantees).
     assert!(
-        max_replies_in_a_burst < hosts,
-        "a burst never resolves the whole fleet at once: {max_replies_in_a_burst} replies vs {hosts} hosts"
+        max_requests_in_a_burst < hosts,
+        "a burst never resolves the whole fleet at once: {max_requests_in_a_burst} requests vs {hosts} hosts"
     );
 
     // Every capture host is bound within a few rotations.
@@ -808,14 +812,12 @@ fn capture_host_arp_rotates_through_a_window_and_covers_all() {
     }
 }
 
-/// A capture host must open a complete, tracked TCP session to its zone station,
-/// so the sensor sees it as a session endpoint and unions MAC<->IP. The field
-/// showed ARP alone never unions a passive host (only OT-session endpoints union),
-/// so each windowed host opens a short session (host as client -> station:443).
-/// Host-as-client avoids one host scanning the subnet. Regression guard for the
-/// host-union mechanism.
+/// The zone gateway (engineering station) also binds itself: every asset
+/// resolves it (its MAC/IP otherwise land only in unicast replies), so it emits
+/// one broadcast request of its own per burst. Without this the station would be
+/// the one perpetually split asset.
 #[test]
-fn capture_hosts_open_a_tracked_session_to_their_station() {
+fn the_zone_gateway_emits_its_own_broadcast_request() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -835,41 +837,23 @@ fn capture_hosts_open_a_tracked_session_to_their_station() {
     std::fs::create_dir_all(&pool).unwrap();
     let src = write_capture(&pool, "many.pcap", 60, 60); // 61 hosts in one /24
     engine.remap_into_session(&cfg, &src, &[]).unwrap();
-    assert!(engine.ledger().capture_host_count() > 40, "hosts registered");
+    assert!(
+        engine.ledger().capture_host_count() > 40,
+        "hosts registered"
+    );
 
     let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
 
-    // TCP = ethertype 0x0800, IP proto 6. Ports/flags at the usual offsets (no IP
-    // options): src/dst IP last octet d[29]/d[33]; tcp sport d[34..36], dport
-    // d[36..38]; flags d[47].
-    let is_tcp = |d: &[u8]| {
-        d.len() >= 54 && u16::from_be_bytes([d[12], d[13]]) == 0x0800 && d[23] == 6
-    };
-    // The host opens the session: SYN (not SYN-ACK) to <station>.250:443.
-    let host_syns: Vec<&OwnedPacket> = cap
-        .packets
+    // The gateway is network+250 of each zone. It must appear as the SENDER of at
+    // least one broadcast request (sender protocol address ends in .250), so it
+    // binds MAC<->IP like every other asset rather than being seen only as the
+    // target everyone resolves.
+    let gateway_request = arp_frames(&cap)
         .iter()
-        .filter(|p| {
-            let d = &p.data;
-            is_tcp(d)
-                && u16::from_be_bytes([d[36], d[37]]) == 443
-                && d[47] & 0x12 == 0x02 // SYN set, ACK clear
-        })
-        .collect();
+        .any(|&(dst, op, _, spa)| op == 1 && dst == [0xff; 6] && spa[3] == 250);
     assert!(
-        !host_syns.is_empty(),
-        "capture hosts open TCP sessions to the station on 443"
+        gateway_request,
+        "the zone gateway (.250) emits its own broadcast ARP request so it binds"
     );
-    for p in &host_syns {
-        let d = &p.data;
-        assert_eq!(d[33], 250, "the session's server is the .250 station");
-        assert_ne!(d[29], 250, "the host (not the station) opens the connection");
-    }
-    // The station answers, so it is a real established session, not a lone SYN.
-    let synack = cap.packets.iter().any(|p| {
-        let d = &p.data;
-        is_tcp(d) && u16::from_be_bytes([d[34], d[35]]) == 443 && d[47] & 0x12 == 0x12
-    });
-    assert!(synack, "the station completes the handshake (SYN-ACK)");
 }
