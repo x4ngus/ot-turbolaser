@@ -8,6 +8,7 @@
 
 pub mod devices;
 pub mod engine;
+pub mod roles;
 pub mod zones;
 
 use rand::SeedableRng;

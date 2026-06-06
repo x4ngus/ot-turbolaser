@@ -130,8 +130,7 @@ fn parse_rate(text: &str) -> (Option<f64>, Option<f64>) {
 /// the process still exits 0. The "unsupported DLT type" message is the one that
 /// silently dropped identity bursts on the rig while the daemon logged success.
 fn is_fatal(text: &str) -> bool {
-    text.contains("Unable to process unsupported DLT type")
-        || text.contains("Fatal Error")
+    text.contains("Unable to process unsupported DLT type") || text.contains("Fatal Error")
 }
 
 fn summarize(text: &str, code: Option<i32>) -> String {
@@ -173,11 +172,14 @@ mod tests {
 
     #[test]
     fn fatal_dlt_marker_is_detected_even_with_other_output() {
-        let text = "File Cache is enabled\nUnable to process unsupported DLT type: Ethernet (0x1)\n";
+        let text =
+            "File Cache is enabled\nUnable to process unsupported DLT type: Ethernet (0x1)\n";
         assert!(is_fatal(text), "the DLT error is fatal");
         assert!(is_fatal("Fatal Error: something"), "fatal error is fatal");
         assert!(
-            !is_fatal("File Cache is enabled\nActual: 10 packets (600 bytes) sent in 0.01 seconds\n"),
+            !is_fatal(
+                "File Cache is enabled\nActual: 10 packets (600 bytes) sent in 0.01 seconds\n"
+            ),
             "a healthy run is not fatal"
         );
     }

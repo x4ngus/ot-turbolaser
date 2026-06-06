@@ -283,6 +283,36 @@ L2 forwarding below the qdisc. Add these two `bridge link set` lines to the
 recreates the ports with learning back on). After applying it, the `is-at`
 replies appear on the sensor and assets union within a minute or two.
 
+## Post-deploy union check (v0.3.0)
+
+v0.3.0 forms the MAC<->IP union from each asset's own ARP `is-at` reply, solicited
+by a small per-zone set of control-cell masters (never a subnet scan). So the
+`is-at` replies on the sensor port should now come from *many* distinct senders --
+one per asset -- not just the per-zone stations that were the only repliers
+before:
+
+```
+tcpdump -i tap200i1 -e -n 'arp and ether[20:2]==2' | awk '{print $2}' | sort -u | wc -l
+```
+
+Then score the deploy without leaving the appliance. `turbolaser verify` profiles
+the synth burst against the reference OT ARP bands and scores a Dragos CSV export
+for how many planned assets actually unioned:
+
+```
+turbolaser verify                              # profile the last synth burst (ARP bands + per-asset replier coverage)
+turbolaser verify --csv assets-export_*.csv    # MAC<->IP union-rate vs the sealed plan, with the stragglers listed
+```
+
+A healthy deploy: the ARP profile passes (no scan, no runts, no locally-administered
+MAC, every planned asset emits an `is-at`) and the union-rate climbs toward 100% as
+the sensor rediscovers the fleet fresh. If union stays low, the cause is almost
+always delivery -- re-apply the two `bridge link set ... learning off flood on`
+lines (a guest restart resets them) and confirm the `is-at` count above is non-zero.
+A fresh inventory is required to test a union change: a record the sensor already
+classified split will not re-union, so clear the Dragos inventory (or re-seed the
+plan) so assets are discovered anew.
+
 ---
 
 # Full reference

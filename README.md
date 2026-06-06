@@ -153,6 +153,7 @@ Every subcommand takes `--config <path>` (default `/opt/replay/conf/replay.yaml`
 | `turbolaser plan --commit` | Fabricate the plant from `session.seed` and seal it as the ledger the daemon replays verbatim. `--write` is an alias, `--force` overwrites an existing ledger, `--dry-run` previews only. |
 | `turbolaser pewpew` (alias `status`) | Live fire-control readout: wire footprint vs plan, the zone list, throughput (pps and Mbps), and the last threat injection. `--json` emits raw. |
 | `turbolaser zones` | Show the current zone map: red reads the sealed ledger, green derives it from the captures. `--json` emits raw. |
+| `turbolaser verify` | Post-deploy union check. Profiles the synth burst against the reference OT ARP bands (no scan, no runts, no LAA, every planned asset emits an `is-at`); `--csv <export>` scores a Dragos asset export for MAC<->IP union-rate vs the plan and lists the stragglers. `--pcap <file>` profiles a specific capture; `--json` emits raw. |
 | `turbolaser reload --in <pcap> --out-dir <dir>` | Forge variant pcaps (the rounds) with payload-identity mutations. `--count N` rounds, `--proto`, `--seed-base`, `--remap-l3`, `--validate` (tshark-check each round). |
 | `turbolaser reset` | Clear the red-laser session ledger for a fresh plant. |
 | `turbolaser check` | Validate a config file without replaying. |

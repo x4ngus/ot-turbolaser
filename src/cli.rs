@@ -55,6 +55,9 @@ pub enum Command {
     NetSetup(NetArgs),
     /// Tear down the bridge and mirror from config. Used by the systemd unit.
     NetTeardown(NetArgs),
+    /// Validate the MAC<->IP union: profile the emitted ARP burst against the
+    /// reference OT bands and/or score a Dragos asset export against the plan.
+    Verify(VerifyArgs),
 }
 
 #[derive(Args, Debug)]
@@ -151,6 +154,22 @@ pub struct PlanArgs {
     /// Explicit preview only; never write. Mutually exclusive with --commit.
     #[arg(long, conflicts_with = "commit")]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct VerifyArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// A Dragos CSV asset export to score for MAC<->IP union-rate vs the plan.
+    #[arg(long, value_name = "CSV")]
+    pub csv: Option<PathBuf>,
+    /// An emitted burst pcap to profile against the reference ARP bands. If
+    /// omitted, the daemon's synth burst at <shm_dir>/synth-identity.pcap is used.
+    #[arg(long, value_name = "PCAP")]
+    pub pcap: Option<PathBuf>,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Protocol selector for reload. `auto` dispatches by sniffing each frame.

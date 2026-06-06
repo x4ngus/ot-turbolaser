@@ -16,6 +16,7 @@ pub mod run;
 pub mod simulate;
 pub mod synth;
 pub mod threat;
+pub mod validate;
 pub mod vuln;
 
 use cli::{Cli, Command};
@@ -36,6 +37,7 @@ pub fn dispatch(cli: Cli) -> i32 {
         Command::Status(a) => control::pewpew(&a),
         Command::NetSetup(a) => control::net_setup(&a),
         Command::NetTeardown(a) => control::net_teardown(&a),
+        Command::Verify(a) => validate::cmd_verify(&a),
     }
 }
 

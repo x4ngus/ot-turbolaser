@@ -1,9 +1,11 @@
 //! The red-laser simulator engine.
 //!
 //! Holds the loaded session ledger and drives each iteration: fabricate a few
-//! more devices (up to the caps), then render a rotating window of devices as
-//! genuine protocol-assertion exchanges written to a tmpfs pcap the run loop
-//! fires. The ledger persists on change so the world survives restarts.
+//! more devices (up to the caps), then build the identity burst -- an ARP
+//! `is-at` reply that unions every asset MAC<->IP (see [`super::roles`]) plus the
+//! fabricated devices' OT sessions carrying their model and CVEs -- written to a
+//! tmpfs pcap the run loop fires. The ledger persists on change so the world
+//! survives restarts.
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -24,14 +26,12 @@ use crate::threat::{self, ThreatScheduler};
 use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
 
 use super::devices::{self, AllocParams};
+use super::roles;
 use super::zones;
 
 /// How many new devices to fabricate per iteration until the cap, so the asset
 /// set grows gradually like real discovery rather than all at once.
 const FABRICATE_BATCH: usize = 16;
-/// How many devices to re-announce per iteration, cycling through the ledger, so
-/// each identity pcap stays small.
-const ANNOUNCE_WINDOW: usize = 256;
 /// Emit switch beacons (LLDP/CDP) only every Nth identity burst. Real beacons
 /// are periodic (tens of seconds), so emitting them every sub-second tick is
 /// both unrealistic and a needless share of the wire; spacing them keeps OT
@@ -67,7 +67,6 @@ pub struct SimulatorEngine {
     external_cidrs: Vec<String>,
     scheduler: ThreatScheduler,
     sim_rng: ChaCha8Rng,
-    announce_cursor: usize,
     /// Minimum seconds between identity bursts (periodic discovery cadence).
     announce_interval_secs: u64,
     /// Wall-clock time of the last identity burst, for the cadence gate.
@@ -134,7 +133,6 @@ impl SimulatorEngine {
             external_cidrs: cfg.threats.external_cidrs.clone(),
             scheduler,
             sim_rng,
-            announce_cursor: 0,
             announce_interval_secs: cfg.synthesis.announce_interval_secs,
             last_announce_unix: None,
             announce_count: 0,
@@ -551,42 +549,59 @@ impl SimulatorEngine {
         Some(out)
     }
 
-    /// Render a window of devices as an ARP binding (so the sensor unions the
-    /// device MAC<->IP, which it does not infer from an L3 frame's Ethernet
-    /// header) followed by the protocol-assertion session; `nonce` varies the
-    /// client ephemeral port (and ISN) so each burst is a fresh, parseable
-    /// connection. Every capture host is bound the same way. Switch beacons fire
-    /// only on a cadence. The binding is a broadcast ARP REQUEST emitted by the
-    /// asset itself ("who has <gateway>?", sender = the asset's own MAC+IP): the
-    /// field export proved a passive sensor forms the union from a request's
-    /// sender, not from a reply. With the lab bridge flooding unicast, the only
-    /// assets that unioned were the one-per-zone devices that emitted their own
-    /// request, while every asset seen only as the sender of a unicast is-at
-    /// reply stayed split. Each asset resolving the one shared zone gateway is the
-    /// benign many-hosts-to-one-gateway pattern, the opposite of the one-host
-    /// subnet scan the sensor suppresses. Because the request is broadcast, the
-    /// binding reaches the sensor whether or not the bridge floods unicast.
+    /// Emit the identity burst the run loop fires as a paced pcap: first the ARP
+    /// resolutions that union every asset's MAC<->IP, then the fabricated
+    /// devices' OT sessions that carry their model and CVEs.
+    ///
+    /// THE UNION. A passive sensor (Dragos) forms the MAC<->IP union from an
+    /// authoritative ARP `is-at` REPLY -- an asset answering "my IP is at my MAC"
+    /// (the sender fields of an `oper=2` frame) -- not from a `who-has` request's
+    /// sender, and not from an L3/L7 frame's source MAC. The v0.2.21 field export
+    /// was the controlled proof: every asset broadcast its own who-has request,
+    /// yet the ONLY assets that unioned were the per-zone `.250` stations -- the
+    /// sole emitters of an is-at reply. So every asset must be the OWNER of a
+    /// resolution. The `roles` graph arranges that as small control cells (a
+    /// local master polls a few members, which answer and bind; one member
+    /// resolves the master, which answers and binds), so the solicitation is
+    /// organically distributed -- never the one-host subnet sweep the sensor
+    /// suppresses as a scan, which cost every prior iteration its bindings.
+    ///
+    /// THE IDENTITY. Each fabricated device additionally answers its zone station
+    /// as an OT server (`assert_identity`), so the sensor parses its model/CVEs
+    /// and tracks it as an endpoint -- a second authoritative signal beyond the
+    /// is-at reply. Capture hosts carry no synthetic session (a generic one was
+    /// parsed into separate, address-less phantom assets in v0.2.20); they bind
+    /// by their is-at reply alone. `nonce` (the burst counter) varies each client
+    /// ephemeral port so every burst is a fresh, separately parseable connection.
     fn build_assertions(&mut self, run: u64, nonce: u64) -> Vec<Vec<u8>> {
-        let n = self.ledger.devices.len();
-        if n == 0 || !self.device_identity {
+        if !self.device_identity {
             return Vec::new();
         }
+        let seed = self.ledger.seed;
         // Beacons are periodic, so emit them only every Nth burst, keeping OT
         // protocol traffic the dominant packet type the sensor sees.
         let switch_beacons = self.switch_beacons && run.is_multiple_of(BEACON_EVERY);
-        let seed = self.ledger.seed;
-        let start = self.announce_cursor % n;
-        let count = ANNOUNCE_WINDOW.min(n);
         let mut frames = Vec::new();
+
+        // Union every asset (device and capture host) MAC<->IP via the
+        // authoritative is-at reply it emits as the OWNER of a cell resolution.
+        // Emitted first, so the binding is on the wire before the asset's OT
+        // session or any replayed background L3 that could otherwise let the
+        // sensor classify its MAC as a forwarder and split it.
+        for e in roles::arp_edges(&self.ledger, seed) {
+            let (req, rep) = arp::resolve(e.requester.mac, e.requester.ip, e.owner.mac, e.owner.ip);
+            frames.push(req);
+            frames.push(rep);
+        }
+
+        // Sustain each fabricated device's parsed OT identity (model + CVEs) as
+        // the server answering its zone station, so the sensor reads its CVEs and
+        // tracks it as an OT endpoint. Capture hosts get no synthetic session.
         let mut missing: Vec<String> = Vec::new();
-        // Each zone gateway emits its own binding once per burst; gated here so
-        // the engineering station binds without re-announcing per asset.
-        let mut gateways_bound: HashSet<Ipv4Addr> = HashSet::new();
         {
             let devices = &self.ledger.devices;
             let vuln = &self.vuln;
-            for k in 0..count {
-                let dev = &devices[(start + k) % n];
+            for dev in devices {
                 // Own the profile so a missing-model fallback and the vuln borrow
                 // do not tangle; a device is never silently dropped.
                 let profile = match vuln.by_model(&dev.model) {
@@ -596,14 +611,8 @@ impl SimulatorEngine {
                         fallback_profile(dev)
                     }
                 };
-                // Bind the device MAC<->IP: it broadcasts its own ARP request for
-                // the zone gateway (the sensor unions from a request's sender, not
-                // a reply), the gateway binds itself once, and the device sustains
-                // its parsed OT identity so the union holds against any traffic.
                 if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
                     let dev_mac = parse_mac(&dev.mac);
-                    frames.extend(resolve_asset(seed, &dev.subnet_cidr, dev_mac, dev_ip));
-                    bind_gateway(&mut gateways_bound, &mut frames, seed, &dev.subnet_cidr);
                     frames.extend(assert_identity(
                         dev_mac,
                         dev_ip,
@@ -621,98 +630,7 @@ impl SimulatorEngine {
                 log::warn!("no vuln profile for model {model:?}; announcing a generic identity");
             }
         }
-        // Every capture host emits its OWN broadcast ARP request EVERY burst, not
-        // a rotating window. A host is born IP-only from its first replayed L3
-        // frame, so its MAC<->IP binding must be present continuously, from the
-        // host's creation, or the asset sticks split: the windowed ARP arrived
-        // minutes late and never caught up, and the field froze the split. The
-        // request is inverted (each host resolves its own zone gateway), so it is
-        // organic gateway resolution, not a one-host subnet scan. No OT session
-        // for hosts: a generic session was parsed into separate, address-less
-        // identity assets at the sensor instead of unioning the host, so hosts
-        // bind by ARP alone. The burst is self-paced (1ms/frame), so a full sweep
-        // spreads over ~1s rather than a line-rate microburst.
-        for h in &self.ledger.capture_hosts {
-            if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-                let mac = parse_mac(&h.mac);
-                frames.extend(resolve_asset(seed, &h.subnet_cidr, mac, ip));
-                bind_gateway(&mut gateways_bound, &mut frames, seed, &h.subnet_cidr);
-            }
-        }
-        self.announce_cursor = (start + count) % n;
         frames
-    }
-}
-
-/// Bind one asset (device or capture host) MAC<->IP the way a passive sensor
-/// actually associates it: the asset emits its own broadcast ARP REQUEST for the
-/// zone gateway, so its (MAC, IP) ride in the request's sender fields. The field
-/// export was the controlled proof. With the lab bridge flooding unicast to the
-/// sensor, the only assets that unioned were the ones that emitted their own
-/// who-has request; every asset seen only as the sender of a unicast is-at reply
-/// stayed split MAC-only/IP-only even though the reply reached the sensor. So the
-/// sensor forms the union from a request's sender, not from a reply. Each asset
-/// resolving the one shared gateway is the benign, ubiquitous many-hosts-to-one
-/// pattern, the opposite of the one-host subnet scan the sensor suppresses (which
-/// is what cost the scanning station its binding, and why a many-to-many peer
-/// ring regressed to zero in v0.2.14). The gateway answers unicast so the
-/// exchange is a coherent two-party resolution; that reply binds nothing new but
-/// keeps the conversation realistic. Because the request is broadcast, the
-/// binding reaches the sensor whether or not the bridge floods unicast, so the
-/// union no longer depends on a host-side flood that resets every deploy. Returns
-/// the frames for the caller to extend its burst with.
-fn resolve_asset(
-    seed: u64,
-    subnet_cidr: &str,
-    asset_mac: [u8; 6],
-    asset_ip: Ipv4Addr,
-) -> Vec<Vec<u8>> {
-    let gateway_ip = zone_station(subnet_cidr, asset_ip);
-    let gateway_mac = l3::stable_mac(seed, u32::from(gateway_ip));
-    // The asset asks for the gateway (broadcast, sender = asset -> binds the
-    // asset); the gateway answers unicast (realism, binds nothing new).
-    let (req, rep) = arp::resolve(asset_mac, asset_ip, gateway_mac, gateway_ip);
-    vec![req, rep]
-}
-
-/// Bind the zone gateway (engineering station) itself, once per burst per zone.
-/// Every asset resolves the gateway, which puts the gateway's (MAC, IP) only in
-/// unicast replies, so it would never union. So the gateway emits one broadcast
-/// request of its own, resolving the subnet's first host, so its sender (MAC, IP)
-/// ride in a request and the station binds like every other asset. `seen` gates
-/// it to once per zone per burst.
-fn bind_gateway(
-    seen: &mut HashSet<Ipv4Addr>,
-    frames: &mut Vec<Vec<u8>>,
-    seed: u64,
-    subnet_cidr: &str,
-) {
-    let gw_ip = client_addr(subnet_cidr);
-    if !seen.insert(gw_ip) {
-        return;
-    }
-    let Ok(net) = subnet_cidr.parse::<Ipv4Net>() else {
-        return;
-    };
-    let target_ip = Ipv4Addr::from(u32::from(net.network()).saturating_add(1));
-    if target_ip == gw_ip {
-        return; // degenerate tiny subnet: gateway is the first host
-    }
-    let gw_mac = l3::stable_mac(seed, u32::from(gw_ip));
-    frames.push(arp::request(gw_mac, gw_ip, target_ip));
-}
-
-/// The per-zone gateway an asset resolves: normally the zone engineering station
-/// (`client_addr`), but if the asset itself occupies that address, the host just
-/// below it, so the target is never the asset (a node does not ARP itself; the
-/// request would carry the asset as both sender and target). One below the
-/// station is still a usable host.
-fn zone_station(subnet_cidr: &str, asset_ip: Ipv4Addr) -> Ipv4Addr {
-    let client = client_addr(subnet_cidr);
-    if client == asset_ip {
-        Ipv4Addr::from(u32::from(client).saturating_sub(1))
-    } else {
-        client
     }
 }
 
@@ -737,7 +655,7 @@ fn assert_identity(
     seed: u64,
     nonce: u64,
 ) -> Vec<Vec<u8>> {
-    let client_ip = client_addr(subnet_cidr);
+    let client_ip = roles::station_addr(subnet_cidr);
     let client_mac = l3::stable_mac(seed, u32::from(client_ip));
     let client_port = ephemeral_port(nonce, ip);
 
@@ -934,25 +852,6 @@ fn parse_version(fw: &str) -> (u8, u8) {
     (groups.next().unwrap_or(0), groups.next().unwrap_or(0))
 }
 
-/// The engineering station address within a subnet (network + 250, clamped to
-/// the last usable host so it never lands outside a small subnet).
-fn client_addr(subnet_cidr: &str) -> Ipv4Addr {
-    subnet_cidr
-        .parse::<Ipv4Net>()
-        .ok()
-        .map(|n| {
-            let host_bits = 32 - u32::from(n.prefix_len());
-            let last_usable = if host_bits >= 1 {
-                (1u32 << host_bits).saturating_sub(2)
-            } else {
-                0
-            };
-            let offset = 250.min(last_usable);
-            Ipv4Addr::from(u32::from(n.network()) + offset)
-        })
-        .unwrap_or(Ipv4Addr::new(10, 0, 0, 250))
-}
-
 /// Remove the tmpfs remap-cache directory and its contents. Called on engine
 /// startup so a cached remap an earlier binary wrote (reused verbatim on a hit)
 /// can never outlive the binary that produced it. Best effort.
@@ -1138,12 +1037,15 @@ mod tests {
     }
 
     #[test]
-    fn mac_and_client_addr() {
+    fn mac_and_station_addr() {
         assert_eq!(
             parse_mac("00:0e:8c:11:22:33"),
             [0x00, 0x0E, 0x8C, 0x11, 0x22, 0x33]
         );
-        assert_eq!(client_addr("10.20.0.0/24"), Ipv4Addr::new(10, 20, 0, 250));
+        assert_eq!(
+            roles::station_addr("10.20.0.0/24"),
+            Ipv4Addr::new(10, 20, 0, 250)
+        );
     }
 
     #[test]
@@ -1231,65 +1133,6 @@ mod tests {
         assert_ne!(
             burst0, burst1,
             "successive scans are distinct connections (fresh port and ISN)"
-        );
-    }
-
-    #[test]
-    fn resolve_asset_emits_the_assets_own_broadcast_request() {
-        const BROADCAST: [u8; 6] = [0xff; 6];
-        let oper = |d: &[u8]| u16::from_be_bytes([d[20], d[21]]);
-
-        // An asset binds via its OWN broadcast request for the zone gateway: the
-        // sender fields carry the asset's MAC/IP; the gateway answers unicast.
-        // (ARP offsets in the frame: SHA 22-28, SPA 28-32, TPA 38-42.)
-        let f = resolve_asset(
-            1337,
-            "10.9.0.0/24",
-            [0x02, 0, 0, 0, 0, 1],
-            Ipv4Addr::new(10, 9, 0, 5),
-        );
-        assert_eq!(f.len(), 2, "one request from the asset, one unicast reply");
-        assert_eq!(oper(&f[0]), 1, "the asset emits a request");
-        assert_eq!(&f[0][0..6], &BROADCAST, "the request is broadcast");
-        assert_eq!(&f[0][22..28], &[0x02, 0, 0, 0, 0, 1], "SHA = asset MAC");
-        assert_eq!(&f[0][28..32], &[10, 9, 0, 5], "SPA = asset IP");
-        assert_eq!(&f[0][38..42], &[10, 9, 0, 250], "TPA = the zone gateway");
-        assert_eq!(oper(&f[1]), 2, "the gateway answers");
-        assert_ne!(&f[1][0..6], &BROADCAST, "the reply is unicast");
-
-        // Collision: an asset sitting on the gateway address resolves the host one
-        // below instead, so it never ARPs itself.
-        let f2 = resolve_asset(
-            1337,
-            "10.9.0.0/24",
-            [0x02, 0, 0, 0, 0, 9],
-            Ipv4Addr::new(10, 9, 0, 250), // == client_addr for this /24
-        );
-        assert_eq!(oper(&f2[0]), 1);
-        assert_eq!(&f2[0][28..32], &[10, 9, 0, 250], "SPA = the asset's own IP");
-        assert_eq!(
-            &f2[0][38..42],
-            &[10, 9, 0, 249],
-            "the colliding asset targets the host one below, not itself"
-        );
-    }
-
-    #[test]
-    fn bind_gateway_emits_one_broadcast_request_per_zone() {
-        let oper = |d: &[u8]| u16::from_be_bytes([d[20], d[21]]);
-        let mut seen = HashSet::new();
-        let mut frames = Vec::new();
-        bind_gateway(&mut seen, &mut frames, 1337, "10.9.0.0/24");
-        // A second asset in the same zone does not re-announce the gateway.
-        bind_gateway(&mut seen, &mut frames, 1337, "10.9.0.0/24");
-        assert_eq!(frames.len(), 1, "the gateway binds once per zone per burst");
-        assert_eq!(oper(&frames[0]), 1, "the gateway emits a request");
-        assert_eq!(&frames[0][0..6], &[0xff; 6], "broadcast");
-        assert_eq!(&frames[0][28..32], &[10, 9, 0, 250], "SPA = the gateway");
-        assert_eq!(
-            &frames[0][38..42],
-            &[10, 9, 0, 1],
-            "TPA = the subnet's first host"
         );
     }
 
