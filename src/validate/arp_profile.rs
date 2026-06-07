@@ -38,8 +38,6 @@ pub struct ArpProfile {
     /// host resolving the whole subnet is the ARP-scan signature the sensor
     /// suppresses. Bounded by the control-cell fan-out.
     pub max_fanout: usize,
-    /// The source IP (SPA) of the busiest requester, for the report.
-    pub busiest_requester: Option<Ipv4Addr>,
     /// Every protocol address that emitted an `is-at` reply: the assets that
     /// declare their own MAC<->IP and therefore union.
     pub repliers: HashSet<Ipv4Addr>,
@@ -56,9 +54,9 @@ fn ipv4(b: &[u8], off: usize) -> Ipv4Addr {
 /// Measure the ARP traffic in `cap`.
 pub fn analyze(cap: &Capture) -> ArpProfile {
     let mut p = ArpProfile::default();
-    // Distinct who-has targets per requester MAC, plus that requester's SPA for
-    // a readable report.
-    let mut fanout: HashMap<[u8; 6], (HashSet<Ipv4Addr>, Ipv4Addr)> = HashMap::new();
+    // Distinct who-has targets per requester MAC: the fan-out that tells organic
+    // resolution apart from a subnet scan.
+    let mut fanout: HashMap<[u8; 6], HashSet<Ipv4Addr>> = HashMap::new();
 
     for pkt in &cap.packets {
         let d = &pkt.data;
@@ -79,8 +77,7 @@ pub fn analyze(cap: &Capture) -> ArpProfile {
             OP_REQUEST => {
                 p.requests += 1;
                 let src = [d[6], d[7], d[8], d[9], d[10], d[11]];
-                let entry = fanout.entry(src).or_insert_with(|| (HashSet::new(), spa));
-                entry.0.insert(tpa);
+                fanout.entry(src).or_default().insert(tpa);
             }
             OP_REPLY => {
                 p.replies += 1;
@@ -93,11 +90,7 @@ pub fn analyze(cap: &Capture) -> ArpProfile {
         }
     }
 
-    if let Some((mac_set, spa)) = fanout.values().max_by_key(|(set, _)| set.len()) {
-        let _ = mac_set;
-        p.busiest_requester = Some(*spa);
-    }
-    p.max_fanout = fanout.values().map(|(set, _)| set.len()).max().unwrap_or(0);
+    p.max_fanout = fanout.values().map(HashSet::len).max().unwrap_or(0);
     p
 }
 
@@ -245,5 +238,34 @@ mod tests {
             violations.iter().any(|v| v.0.contains("ARP-scan")),
             "a subnet sweep must be flagged: {violations:?}"
         );
+    }
+
+    #[test]
+    fn runts_and_laa_replies_are_flagged() {
+        // A reply from a locally-administered MAC (a sensor ignores it for
+        // association), and a sub-60-byte runt (rejected). These are the v0.2.13
+        // and v0.2.9 regressions; the gate must catch both.
+        let laa = [0x02, 0x00, 0x00, 0x00, 0x00, 0x09]; // LAA bit set
+        let laa_reply = arp::reply(
+            laa,
+            Ipv4Addr::new(10, 8, 0, 5),
+            [0x00, 0x0e, 0x8c, 1, 1, 1],
+            Ipv4Addr::new(10, 8, 0, 250),
+        );
+        let mut runt = arp::request(
+            [0x00, 0x0e, 0x8c, 2, 2, 2],
+            Ipv4Addr::new(10, 8, 0, 6),
+            Ipv4Addr::new(10, 8, 0, 250),
+        );
+        runt.truncate(42); // strip the padding back to a 42-byte runt
+
+        let prof = analyze(&synth::to_capture(vec![laa_reply, runt]));
+        assert_eq!(prof.locally_administered, 1);
+        assert_eq!(prof.runts, 1);
+        let violations = prof.check(&HashSet::new(), roles::CELL_SIZE - 1);
+        assert!(violations
+            .iter()
+            .any(|v| v.0.contains("locally-administered")));
+        assert!(violations.iter().any(|v| v.0.contains("60-byte")));
     }
 }

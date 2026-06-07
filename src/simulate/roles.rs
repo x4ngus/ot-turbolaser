@@ -31,6 +31,7 @@
 //! The graph is pure (a function of the sealed ledger plus the session seed), so
 //! it requires no re-plan and is unit-tested without a wire.
 
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
@@ -103,48 +104,44 @@ fn parse_mac(s: &str) -> [u8; 6] {
 /// station's MAC is derived the same way the engine's OT-session client MAC is
 /// (`stable_mac(seed, station_ip)`), so ARP and the session agree byte-for-byte.
 pub fn arp_edges(ledger: &Session, seed: u64) -> Vec<Edge> {
-    let mut edges = Vec::new();
-    // Walk zones in ledger order for determinism. A capture host or device is
-    // placed in the zone whose CIDR it records.
-    for subnet in &ledger.subnets {
-        let cidr = subnet.cidr.as_str();
-        let mut nodes: Vec<Node> = Vec::new();
-
-        // Real assets in this zone, sorted by IP so cell membership is stable
-        // across runs (a host re-binds in the same cell every burst).
-        let mut reals: Vec<Node> = ledger
-            .devices
-            .iter()
-            .filter(|d| d.subnet_cidr == subnet.cidr)
-            .filter_map(|d| {
-                d.ip.parse::<Ipv4Addr>().ok().map(|ip| Node {
+    // Group every asset by its OWN recorded subnet in a single pass. Keying on
+    // the asset (not on `ledger.subnets`) means no asset is silently dropped if
+    // its zone is absent from the subnet list, and the cost is O(assets) rather
+    // than O(zones x assets). A BTreeMap keeps zone order deterministic so a host
+    // re-binds in the same cell every burst.
+    let mut by_zone: BTreeMap<&str, Vec<Node>> = BTreeMap::new();
+    for d in &ledger.devices {
+        if let Ok(ip) = d.ip.parse::<Ipv4Addr>() {
+            by_zone
+                .entry(d.subnet_cidr.as_str())
+                .or_default()
+                .push(Node {
                     ip,
                     mac: parse_mac(&d.mac),
-                })
-            })
-            .chain(
-                ledger
-                    .capture_hosts
-                    .iter()
-                    .filter(|h| h.subnet_cidr == subnet.cidr)
-                    .filter_map(|h| {
-                        h.ip.parse::<Ipv4Addr>().ok().map(|ip| Node {
-                            ip,
-                            mac: parse_mac(&h.mac),
-                        })
-                    }),
-            )
-            .collect();
+                });
+        }
+    }
+    for h in &ledger.capture_hosts {
+        if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
+            by_zone
+                .entry(h.subnet_cidr.as_str())
+                .or_default()
+                .push(Node {
+                    ip,
+                    mac: parse_mac(&h.mac),
+                });
+        }
+    }
+
+    let mut edges = Vec::new();
+    for (cidr, mut reals) in by_zone {
+        // Sort by IP so cell membership is stable across runs.
         reals.sort_by_key(|n| u32::from(n.ip));
 
-        if reals.is_empty() {
-            continue; // an empty zone has nothing to discover
-        }
-
-        // The station leads cell 0 as the supervisory client, unless a real
-        // asset already occupies its address (then that asset plays the role and
-        // a duplicate node would split it).
+        // The station leads cell 0 as the supervisory client, unless a real asset
+        // already occupies its address (a duplicate node would split it).
         let station_ip = station_addr(cidr);
+        let mut nodes: Vec<Node> = Vec::with_capacity(reals.len() + 1);
         if !reals.iter().any(|n| n.ip == station_ip) {
             nodes.push(Node {
                 ip: station_ip,
@@ -152,6 +149,22 @@ pub fn arp_edges(ledger: &Session, seed: u64) -> Vec<Edge> {
             });
         }
         nodes.extend(reals);
+
+        // A lone asset sitting on the station address would be the only node and
+        // have no peer to solicit its is-at, so it would never bind. Give it a
+        // synthetic requester one address below so it is still resolved.
+        if nodes.len() == 1 {
+            let alt = Ipv4Addr::from(u32::from(station_ip).saturating_sub(1));
+            if alt != nodes[0].ip {
+                nodes.insert(
+                    0,
+                    Node {
+                        ip: alt,
+                        mac: l3::stable_mac(seed, u32::from(alt)),
+                    },
+                );
+            }
+        }
 
         // Partition into cells; bind every node within its cell.
         for cell in cells_no_orphan(&nodes, CELL_SIZE) {
@@ -365,5 +378,35 @@ mod tests {
                 cell.len()
             );
         }
+    }
+
+    /// A zone with a single asset sitting on the station address still binds: it
+    /// gets a synthetic requester one below, so it is solicited and unions.
+    #[test]
+    fn lone_asset_on_station_address_still_binds() {
+        let cidr = "10.5.0.0/24";
+        let mut s = sess(3);
+        add_zone(&mut s, cidr);
+        s.capture_hosts.push(host("10.5.0.250", cidr)); // sits on the station addr
+        let edges = arp_edges(&s, s.seed);
+        let lone: Ipv4Addr = "10.5.0.250".parse().unwrap();
+        assert!(
+            edges.iter().any(|e| e.owner.ip == lone),
+            "the lone .250 asset must be solicited and bind: {edges:?}"
+        );
+    }
+
+    /// An asset whose zone is absent from `ledger.subnets` is still bound: the
+    /// graph keys on the asset's own subnet, not the subnet list.
+    #[test]
+    fn asset_binds_even_if_zone_not_in_subnet_list() {
+        let cidr = "10.6.0.0/24";
+        let mut s = sess(5);
+        // Note: NO add_zone -- subnets stays empty on purpose.
+        s.capture_hosts.push(host("10.6.0.7", cidr));
+        s.capture_hosts.push(host("10.6.0.8", cidr));
+        let owners: HashSet<Ipv4Addr> = arp_edges(&s, s.seed).iter().map(|e| e.owner.ip).collect();
+        assert!(owners.contains(&"10.6.0.7".parse().unwrap()));
+        assert!(owners.contains(&"10.6.0.8".parse().unwrap()));
     }
 }
