@@ -1,0 +1,154 @@
+# ot-turbolaser vulnerable device profile starter set.
+#
+# Real, public-advisory-sourced vendor/model/firmware -> CVE mappings used by
+# red laser. Each profile is rendered into traffic as a genuine OT/ICS protocol
+# assertion (a discovery query and its response, or an SNMP fetch) so a sensor's
+# CVE match rests on a coherent transaction, not an orphan packet.
+#
+# This is a starter set. Verify each pairing against the current advisory and
+# extend freely. An on-disk file at oui_db.vuln_path overrides this embedded set.
+#
+# Fields:
+#   vendor, model, firmware  identity strings the sensor dissects
+#   protocol                 carrier assertion: enip | modbus | s7 | switch_snmp
+#   purdue_level             0 field, 1 basic control, 2 supervisory, 3 ops, 4 enterprise
+#   oui                      representative vendor OUI (low bytes randomised per device)
+#   cves                     advisory-confirmed CVE ids for this model+firmware
+#   enip_*                   CIP Identity object numerics (enip profiles)
+#   enip_product_name        exact CIP ProductName when it differs from model
+#   sys_descr                SNMP sysDescr / LLDP system description (switch profiles)
+#   sys_object_id            SNMP sysObjectID.0 enterprise OID (switch profiles)
+#   modbus_*                 Modbus device-id object overrides (modbus profiles)
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-1200 CPU 1212C"
+firmware = "V4.2.1"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2020-15782"]   # memory protection bypass, fw < V4.5.0 (ICSA-21-152-01)
+s7_order_number = "6ES7 212-1AE40-0XB0"
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-300 CPU 315-2 PN/DP"
+firmware = "V3.2.12"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2016-9159"]    # credential disclosure over port 102 (ICSA-16-348-05)
+s7_order_number = "6ES7 315-2EH14-0AB0"
+
+[[profile]]
+vendor = "Rockwell Automation"
+model = "1756-L61 ControlLogix 5561"
+firmware = "20.011"
+protocol = "enip"
+purdue_level = 1
+oui = "00:00:BC"
+cves = ["CVE-2021-22681"]   # Logix key extraction, 5560 v16+ (ICSA-21-056-03)
+enip_vendor_id = 1
+enip_device_type = 14
+enip_product_code = 54
+enip_product_name = "1756-L61/B LOGIX5561"
+
+[[profile]]
+vendor = "Rockwell Automation"
+model = "1766-L32BWA MicroLogix 1400"
+firmware = "21.002"
+protocol = "enip"
+purdue_level = 1
+oui = "00:00:BC"
+cves = ["CVE-2021-22659"]   # Modbus TCP buffer overflow DoS, fw <= 21.6 (ICSA-21-033-01)
+enip_vendor_id = 1
+enip_device_type = 14
+enip_product_code = 185
+enip_product_name = "1766-L32BWA MicroLogix 1400"
+
+[[profile]]
+vendor = "Schneider Electric"
+model = "Modicon M340 BMXP342020"
+firmware = "V2.60"
+protocol = "modbus"
+purdue_level = 1
+oui = "00:80:F4"
+cves = ["CVE-2018-7811"]    # unverified password change, embedded web server (ICSA-18-086-01)
+modbus_vendor_name = "Schneider Electric"
+modbus_product_code = "BMXP342020"
+modbus_revision = "V2.60"
+
+[[profile]]
+vendor = "ABB"
+model = "AC500 V3 PM5650"
+firmware = "3.8.0"
+protocol = "modbus"
+purdue_level = 1
+oui = "00:21:C1"            # ABB Inc. (classic 24-bit OUI; resolves to ABB in IEEE tables)
+cves = ["CVE-2025-2595"]    # user-management bypass, fw < 3.9.0 (ICSA-26-132-03)
+
+[[profile]]
+vendor = "GE Fanuc Automation"
+model = "PACSystems RX3i CPE310"
+firmware = "9.20"
+protocol = "enip"
+purdue_level = 1
+oui = "00:09:91"
+cves = ["CVE-2018-8867"]    # improper input validation DoS, CPE310 <= 9.20 (ICSA-18-137-01)
+enip_vendor_id = 271
+enip_device_type = 12
+enip_product_code = 1
+enip_product_name = "PACSystems RX3i CPE310"
+
+[[profile]]
+vendor = "Moxa"
+model = "EDS-405A"
+firmware = "3.4"
+protocol = "switch_snmp"
+purdue_level = 2
+oui = "00:90:E8"
+cves = ["CVE-2015-6464", "CVE-2015-6465", "CVE-2015-6466"]  # web mgmt priv-esc/DoS/XSS (ICSA-15-246-03)
+sys_descr = "Moxa EDS-405A Series Managed Ethernet Switch, firmware V3.4"
+sys_object_id = "1.3.6.1.4.1.8691.7.50"
+
+[[profile]]
+vendor = "Hirschmann"
+model = "RSP20"
+firmware = "07.0.02"
+protocol = "switch_snmp"
+purdue_level = 2
+oui = "00:80:63"
+cves = ["CVE-2020-6994"]    # HiOS RCE, fw < 07.0.03 (ICSA-20-091-01)
+sys_descr = "Hirschmann RSP20 HiOS-2A Rel. 07.0.02"
+sys_object_id = "1.3.6.1.4.1.248.14.1.1"
+
+[[profile]]
+vendor = "Cisco Systems"
+model = "IE-2000-8TC-G-E Industrial Ethernet Switch"
+firmware = "15.2(4)EA"
+protocol = "switch_snmp"
+purdue_level = 2
+oui = "00:00:0C"
+cves = ["CVE-2017-6736"]    # SNMP subsystem RCE, IOS/IOS XE (cisco-sa-20170629-snmp)
+sys_descr = "Cisco IOS Software, IE2000 Software (IE2000-UNIVERSALK9-M), Version 15.2(4)EA, RELEASE SOFTWARE (fc1)"
+sys_object_id = "1.3.6.1.4.1.9.1.1632"   # ciscoProducts arc; verify the exact sub-id per switch model
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-1500 CPU 1511-1 PN"
+firmware = "V2.8.1"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2020-15782"]   # memory protection bypass, S7-1200/1500 fw < V2.9.2 (ICSA-21-152-01)
+s7_order_number = "6ES7 511-1AK02-0AB0"
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-400 CPU 414-3 PN/DP"
+firmware = "V6.0.3"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2016-9159"]    # private-key/credential disclosure over port 102 (ICSA-16-348-05, S7-300/400)
+s7_order_number = "6ES7 414-3EM07-0AB0"

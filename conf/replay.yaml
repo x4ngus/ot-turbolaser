@@ -1,0 +1,138 @@
+# ot-turbolaser replay config. Plain and direct. No payload mutation happens
+# here; payload-identity variants are pre-baked offline by `turbolaser reload`.
+
+# Replay NIC on the isolated bridge. This is also the mirror source port.
+iface: tl0
+
+# red_laser   = fresh random, topology-preserving L3 remap every run (adversarial).
+# green_laser = fixed seed and asset set, vary only timing and the inter-run gap.
+# The old names variety/baseline still parse as aliases.
+mode: red_laser
+
+# Green-laser master seed (reproducible). IGNORED in red laser; pin session.seed
+# below instead. Left commented so a red-laser appliance does not warn about an
+# unused seed.
+# seed: 1337
+
+paths:
+  pool: /opt/replay/pcaps/pool
+  variants: /opt/replay/pcaps/variants
+  shm_dir: /dev/shm/ot-turbolaser
+  status_file: /run/ot-turbolaser/status.json
+
+# Cheap per-run L3 randomisation. The coherent remapper keeps conversations and
+# subnet structure intact while moving everything to fresh random subnets.
+l3:
+  remap: true
+  remap_mac: true         # rewrite Ethernet/ARP MACs alongside IPs so each host
+                          # has one coherent MAC<->IP identity the sensor fuses
+  subnets: []             # optional CIDR hints, e.g. ["192.168.10.0/24"]
+  zone_affinity: both     # both | vendor | protocol | off: how replayed hosts
+                          # are placed into the fabricated control-system zones
+  max_remap_bytes: 2147483648   # 2 GiB; a larger capture is skipped, never raw
+  on_oversize: remap_to_disk    # remap_to_disk | skip, when over the tmpfs budget
+  guard_public_sources: true    # refuse a public source on the wire if remap is off
+  max_frame_bytes: 1514         # drop frames larger than this before replay so a
+                                # jumbo/TSO capture frame cannot abort a run with
+                                # EMSGSIZE; raise to ~9014 only on a jumbo bridge
+  replay_capture_arp: false     # off: the synth burst supplies controlled,
+                                # rotating MAC<->IP bindings, so replaying a
+                                # capture's own broadcast ARP only floods the
+                                # sensor. Turn on only to study raw ARP behaviour
+
+# Replay rate. The appliance ships a fixed Mbps band: each run picks one fixed
+# rate uniformly in [mbps_min, mbps_max], so the wire holds a steady rate within
+# a run and fluctuates run to run, matching a busy operational OT link. This is
+# what the sensor should see at ~10 Mbps, not the capture's own (sparse) timing.
+rate:
+  model: mbps             # original | multiplier | pps | mbps | topspeed
+  mbps_min: 9.0           # per-run fixed-rate floor
+  mbps_max: 11.0          # per-run fixed-rate ceiling
+  # For a single fixed rate, drop the band and set: mbps: 10.0
+  # Other models:
+  #   model: original     ->  honour the capture's own timing (slow for OT pcaps)
+  #   model: multiplier   ->  multiplier: 2.0
+  #   model: pps          ->  pps: 200   (optional pps_multi: 1)
+  #   model: topspeed     ->  no parameter
+
+# Inter-run gap distribution. Kept short so replays are near-continuous and the
+# sensor sees a sustained rate within the Mbps band above; raise mean_secs for a
+# burstier, lower-time-average profile.
+gap:
+  dist: exp_poisson       # exp_poisson | trunc_normal
+  mean_secs: 0.5
+  min_secs: 0.1           # optional clamp (skews the tail)
+  max_secs: 3.0
+  # For trunc_normal instead:
+  #   dist: trunc_normal
+  #   mean_secs: 8.0
+  #   stddev_secs: 3.0
+  #   lower_secs: 1.0
+  #   upper_secs: 30.0
+
+# Per-file selection weights. Precedence: files (exact) > globs (first match) > default.
+weights:
+  default: 1.0
+  globs:
+    - { pattern: "*modbus*", weight: 3.0 }
+    - { pattern: "*dnp3*", weight: 0.5 }
+  files:
+    noisy.pcap: 0.0         # 0 = never selected
+
+watchdog:
+  poll_secs: 2
+  flatline_secs: 10         # tx_packets flat this long during a send => abort and move on
+
+# Isolated bridge and mirror. The replay port is `iface` above.
+net:
+  mirror: tc                # tc | ovs
+  bridge: tlbr0
+  sensor_port: sens0
+
+no_pcaps_retry_secs: 30
+
+# --- v0.2 red laser content layer (all optional; green laser ignores these) ---
+# These default sensibly, so the block is commented. Uncomment to tune. The hard
+# caps (10 zones, 2000 devices) are enforced in code and cannot be exceeded.
+#
+# zones:
+#   enabled: true
+#   max_subnets: 10          # clamped to 10
+#   default_prefix: 24       # subnet size for fabricated zones
+#
+# synthesis:
+#   enabled: true
+#   switch_beacons: true     # LLDP/CDP/SNMP switch conduits between zones
+#   device_identity: true    # ENIP/Modbus/S7 identity assertions carrying CVEs
+#   identity_every_n_runs: 1
+#   announce_interval_secs: 25  # min seconds between identity bursts: periodic
+#                            # discovery, not a scan storm. Each burst opens fresh
+#                            # client connections (new ephemeral ports) so the
+#                            # sensor sees distinct, parseable scans it attributes,
+#                            # not one identical conversation it folds and ignores
+#   cycle_every_n_runs: 0    # >0 re-labels zones every N runs once an unsealed
+#                            # session saturates; sealed plans never cycle
+#   target_devices: 64       # fleet size `plan --commit` fabricates and seals
+#   max_devices: 2000        # hard cap, clamped to 2000
+#   max_assets: 512          # total wire assets (fabricated + capture-derived):
+#                            # replayed capture hosts fill spare zone capacity up
+#                            # to this, surplus rides existing assets, so the
+#                            # sensor's asset count stays bounded and == the plan
+#
+# threats:                   # external-threat host promotion (red laser only)
+#   enabled: true
+#   min_interval_secs: 172800    # 2 days; a 24h floor is enforced regardless
+#   max_interval_secs: 1209600   # 14 days
+#   external_cidrs: ["198.51.100.0/24", "203.0.113.0/24"]  # set ranges your
+#                            # threat-intel flags to exercise geo/reputation enrichment
+
+# Pin the red-laser session so plan and run agree. `turbolaser plan --commit`
+# fabricates the fleet from this seed and writes the sealed ledger the daemon
+# replays verbatim; `turbolaser reset` clears it for a fresh feed.
+session:
+  path: /var/lib/ot-turbolaser/session.json
+  seed: 1337
+#
+# oui_db:
+#   path: /opt/replay/data/oui.csv
+#   vuln_path: /opt/replay/data/vuln_profiles.toml

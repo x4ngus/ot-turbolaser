@@ -1,0 +1,48 @@
+[Unit]
+Description=ot-turbolaser ICS/OT pcap replay appliance
+Documentation=https://github.com/x4ngus/ot-turbolaser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Network setup (isolated bridge + mirror) runs before the daemon, and teardown
+# after it stops, both driven from the same config. net-setup refuses to attach
+# the bridge to a physical uplink.
+ExecStartPre=/opt/replay/bin/turbolaser net-setup --config /opt/replay/conf/replay.yaml
+ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml
+ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
+Restart=always
+RestartSec=3
+
+# Creates /run/ot-turbolaser (0755) for the status heartbeat, cleaned on stop.
+RuntimeDirectory=ot-turbolaser
+RuntimeDirectoryMode=0755
+
+# Creates /var/lib/ot-turbolaser (0750) for the persistent red-laser session
+# ledger, preserved across restarts. Cleared with `turbolaser reset`.
+StateDirectory=ot-turbolaser
+StateDirectoryMode=0750
+
+# Raw AF_PACKET TX for tcpreplay, plus tc/ip for the network setup.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Hardening that works inside an LXC container, the primary target. These do not
+# need a mount namespace.
+NoNewPrivileges=true
+RestrictRealtime=true
+LockPersonality=true
+# Filesystem and kernel hardening (ProtectSystem, ReadWritePaths, ProtectHome,
+# ProtectKernelTunables, ProtectKernelModules, ProtectControlGroups) is left out
+# of the default unit on purpose: it relies on mount namespaces, which an LXC
+# container cannot set up, so the service would fail with 226/NAMESPACE. On a
+# bare metal host or a VM, add it with the optional drop-in:
+#   install -D systemd/hardening.conf \
+#     /etc/systemd/system/ot-turbolaser.service.d/hardening.conf
+#   systemctl daemon-reload && systemctl restart ot-turbolaser
+# Do NOT add PrivateNetwork (hides the NICs), RestrictAddressFamilies without
+# AF_PACKET (blocks raw TX), or PrivateTmp (hides the /dev/shm scratch).
+
+[Install]
+WantedBy=multi-user.target
