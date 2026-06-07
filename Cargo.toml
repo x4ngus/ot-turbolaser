@@ -1,6 +1,6 @@
 [package]
 name = "ot-turbolaser"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 description = "Headless ICS/OT pcap replay appliance. Replays industrial captures with randomised, genuine-looking identifiers and timing onto an isolated mirror feeding a passive sensor."

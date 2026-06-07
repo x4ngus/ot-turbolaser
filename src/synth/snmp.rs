@@ -14,10 +14,16 @@ const SYSDESCR_OID: [u8; 8] = [0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00];
 // 1.3.6.1.2.1.1.2.0 (sysObjectID.0).
 const SYSOBJECTID_OID: [u8; 8] = [0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x02, 0x00];
 
+/// Default firmware-version OID: ENTITY-MIB entPhysicalFirmwareRev
+/// (1.3.6.1.2.1.47.1.1.1.1.9) at entPhysicalIndex 1. Bound to the device's
+/// firmware string in the GetResponse so a passive sensor reads an explicit
+/// firmware-version varbind (the firmware detection event), not free text.
+pub const DEFAULT_FIRMWARE_OID: &str = "1.3.6.1.2.1.47.1.1.1.1.9.1";
+
 /// Encode a dotted OID string into BER OID content bytes (no tag/length). The
 /// first two arcs fold to `40*a + b`; later arcs use base-128 with the
 /// continuation bit. None if the string is not a valid OID.
-fn encode_oid(s: &str) -> Option<Vec<u8>> {
+pub fn encode_oid(s: &str) -> Option<Vec<u8>> {
     let arcs: Vec<u64> = s
         .split('.')
         .map(|p| p.parse().ok())
@@ -99,33 +105,44 @@ fn varbind(name_oid: &[u8], value: &[u8]) -> Vec<u8> {
     tlv(0x30, &vb)
 }
 
-/// GET sysDescr.0 and sysObjectID.0.
-pub fn get_request(community: &str, request_id: u32) -> Vec<u8> {
+/// GET sysDescr.0, sysObjectID.0, and (when set) the firmware OID.
+pub fn get_request(community: &str, request_id: u32, firmware_oid: Option<&str>) -> Vec<u8> {
     let mut varbinds = Vec::new();
     varbinds.extend_from_slice(&varbind(&SYSDESCR_OID, &tlv(0x05, &[])));
     varbinds.extend_from_slice(&varbind(&SYSOBJECTID_OID, &tlv(0x05, &[])));
+    if let Some(oid) = firmware_oid.and_then(encode_oid) {
+        varbinds.extend_from_slice(&varbind(&oid, &tlv(0x05, &[])));
+    }
     message(community, 0xA0, request_id, &varbinds)
 }
 
-/// The response binding sysDescr.0 to the description string and, when known,
-/// sysObjectID.0 to the device's enterprise OID (the field passive sensors key
-/// CVE attribution on).
+/// The response binding sysDescr.0 to the description string, sysObjectID.0 to
+/// the device's enterprise OID when known (the field passive sensors key CVE
+/// attribution on), and the firmware OID to the firmware string when both are set
+/// (the explicit firmware detection event). A varbind is emitted only when its
+/// value is present, so an unset firmware leaves the response byte-identical to
+/// the two-varbind form.
 pub fn get_response(
     community: &str,
     request_id: u32,
     sys_descr: &str,
     sys_object_id: Option<&str>,
+    firmware_oid: Option<&str>,
+    firmware: Option<&str>,
 ) -> Vec<u8> {
     let mut varbinds = Vec::new();
     varbinds.extend_from_slice(&varbind(&SYSDESCR_OID, &tlv(0x04, sys_descr.as_bytes())));
     if let Some(oid) = sys_object_id.and_then(encode_oid) {
         varbinds.extend_from_slice(&varbind(&SYSOBJECTID_OID, &tlv(0x06, &oid)));
     }
+    if let (Some(oid), Some(fw)) = (firmware_oid.and_then(encode_oid), firmware) {
+        varbinds.extend_from_slice(&varbind(&oid, &tlv(0x04, fw.as_bytes())));
+    }
     message(community, 0xA2, request_id, &varbinds)
 }
 
-/// The (request, response) frames of an SNMP fetch of sysDescr.0 and
-/// sysObjectID.0.
+/// The (request, response) frames of an SNMP fetch of sysDescr.0, sysObjectID.0,
+/// and, when `firmware_oid`/`firmware` are set, the firmware-version OID.
 #[allow(clippy::too_many_arguments)]
 pub fn exchange(
     mgr_mac: [u8; 6],
@@ -137,9 +154,18 @@ pub fn exchange(
     request_id: u32,
     sys_descr: &str,
     sys_object_id: Option<&str>,
+    firmware_oid: Option<&str>,
+    firmware: Option<&str>,
 ) -> (Vec<u8>, Vec<u8>) {
-    let req = get_request(community, request_id);
-    let resp = get_response(community, request_id, sys_descr, sys_object_id);
+    let req = get_request(community, request_id, firmware_oid);
+    let resp = get_response(
+        community,
+        request_id,
+        sys_descr,
+        sys_object_id,
+        firmware_oid,
+        firmware,
+    );
     let rf = udp_frame(mgr_mac, sw_mac, mgr_ip, sw_ip, mgr_port, SNMP_PORT, &req);
     let pf = udp_frame(sw_mac, mgr_mac, sw_ip, mgr_ip, SNMP_PORT, mgr_port, &resp);
     (rf, pf)
@@ -158,7 +184,14 @@ mod tests {
 
     #[test]
     fn response_is_a_sequence_carrying_the_descr() {
-        let resp = get_response("public", 0x1234, "Cisco IOS Software, IE3000", None);
+        let resp = get_response(
+            "public",
+            0x1234,
+            "Cisco IOS Software, IE3000",
+            None,
+            None,
+            None,
+        );
         assert_eq!(resp[0], 0x30, "top-level SEQUENCE");
         // The description bytes appear verbatim in the encoding.
         let needle = b"Cisco IOS Software, IE3000";
@@ -184,7 +217,14 @@ mod tests {
 
     #[test]
     fn response_binds_sysobjectid_when_known() {
-        let resp = get_response("public", 1, "Moxa EDS-405A", Some("1.3.6.1.4.1.8691.7.50"));
+        let resp = get_response(
+            "public",
+            1,
+            "Moxa EDS-405A",
+            Some("1.3.6.1.4.1.8691.7.50"),
+            None,
+            None,
+        );
         // The sysObjectID name OID and an OBJECT IDENTIFIER value (tag 0x06) are
         // both present.
         assert!(
@@ -196,5 +236,44 @@ mod tests {
             resp.windows(2).any(|w| w == [0xC3, 0x73]),
             "enterprise OID value present"
         );
+    }
+
+    #[test]
+    fn firmware_varbind_present_when_set_and_backcompat_when_not() {
+        let resp = get_response(
+            "public",
+            7,
+            "Fortinet FortiGate",
+            Some("1.3.6.1.4.1.12356.101.1.1000"),
+            Some(DEFAULT_FIRMWARE_OID),
+            Some("6.0.4"),
+        );
+        let fw_oid = encode_oid(DEFAULT_FIRMWARE_OID).unwrap();
+        assert!(
+            resp.windows(fw_oid.len()).any(|w| w == fw_oid.as_slice()),
+            "firmware OID present"
+        );
+        assert!(
+            resp.windows(5).any(|w| w == b"6.0.4"),
+            "firmware string bound as the firmware varbind"
+        );
+        // No firmware value -> byte-identical to the legacy two-varbind response.
+        let with_none = get_response(
+            "public",
+            9,
+            "Hirschmann",
+            Some("1.3.6.1.4.1.248"),
+            None,
+            None,
+        );
+        let oid_but_no_value = get_response(
+            "public",
+            9,
+            "Hirschmann",
+            Some("1.3.6.1.4.1.248"),
+            Some(DEFAULT_FIRMWARE_OID),
+            None,
+        );
+        assert_eq!(with_none, oid_but_no_value);
     }
 }

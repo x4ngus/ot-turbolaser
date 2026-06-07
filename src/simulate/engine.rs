@@ -60,6 +60,10 @@ pub struct SimulatorEngine {
     synth_enabled: bool,
     device_identity: bool,
     switch_beacons: bool,
+    /// North-south conduit traffic across adjacent Purdue zones.
+    ns_enabled: bool,
+    ns_cadence: u64,
+    ns_max_per_pair: usize,
     /// True when the loaded ledger was committed by `plan --commit`: do not
     /// fabricate past it, just re-announce the sealed fleet.
     sealed: bool,
@@ -128,6 +132,9 @@ impl SimulatorEngine {
             synth_enabled: cfg.synthesis.enabled,
             device_identity: cfg.synthesis.device_identity,
             switch_beacons: cfg.synthesis.switch_beacons,
+            ns_enabled: cfg.north_south.enabled,
+            ns_cadence: cfg.north_south.cadence_runs.max(1),
+            ns_max_per_pair: cfg.north_south.max_flows_per_pair,
             sealed,
             threats_enabled: cfg.threats.enabled,
             external_cidrs: cfg.threats.external_cidrs.clone(),
@@ -683,6 +690,40 @@ impl SimulatorEngine {
             frames.push(q);
             frames.push(r);
         }
+
+        // North-south conduit traffic: a supervisory client in a higher zone polls
+        // a CVE-bearing device in an adjacent lower zone, forwarded by a conduit
+        // whose MAC is the L2 source the sensor sees (so neither endpoint IP binds
+        // to it). Bounded and on a cadence; rendered by the same OT-session builder
+        // as an identity, never ARP, so the union gate is untouched.
+        if self.ns_enabled && run.is_multiple_of(self.ns_cadence) {
+            let by_ip: HashMap<Ipv4Addr, &DeviceRecord> = self
+                .ledger
+                .devices
+                .iter()
+                .filter_map(|d| d.ip.parse::<Ipv4Addr>().ok().map(|ip| (ip, d)))
+                .collect();
+            for c in roles::north_south_crossings(&self.ledger, seed, self.ns_max_per_pair) {
+                let Some(dev) = by_ip.get(&c.south_ip) else {
+                    continue;
+                };
+                let profile = match self.vuln.by_model(&dev.model) {
+                    Some(p) => p.clone(),
+                    None => fallback_profile(dev),
+                };
+                // The south device is the server; the conduit MAC forwards the
+                // north client's poll (client_ip = north, client_mac = conduit).
+                frames.extend(assert_identity(
+                    c.south_mac,
+                    c.south_ip,
+                    c.north_ip,
+                    c.conduit_mac,
+                    &profile,
+                    false,
+                    nonce,
+                ));
+            }
+        }
         frames
     }
 }
@@ -788,9 +829,15 @@ fn assert_identity(
                 .unwrap_or_else(|| format!("{} {}", profile.vendor, profile.model));
             // Switches send LLDP and CDP on the beacon cadence (realistic switch
             // colour; on a multi-MAC chassis these are also what the sensor uses
-            // to merge the MACs into one asset). The MAC<->IP union comes from the
-            // every-burst SNMP session plus the ARP request in build_assertions.
-            if switch_beacons {
+            // to merge the MACs into one asset). A zone-edge firewall or router
+            // emits no such discovery beacons, so suppress them for those classes.
+            // The MAC<->IP union comes from the every-burst SNMP session plus the
+            // ARP request in build_assertions.
+            let infra = matches!(
+                profile.asset_class.as_deref(),
+                Some("Firewall") | Some("Router")
+            );
+            if switch_beacons && !infra {
                 frames.push(lldp::beacon(
                     mac,
                     ip,
@@ -805,6 +852,16 @@ fn assert_identity(
                     &profile.model,
                 ));
             }
+            // Bind an explicit firmware-version OID when a firmware string is
+            // present, so the sensor reads a firmware detection event rather than
+            // scraping sysDescr. A profile may override the default OID.
+            let firmware_oid = (!profile.firmware.is_empty()).then(|| {
+                profile
+                    .firmware_oid
+                    .as_deref()
+                    .unwrap_or(snmp::DEFAULT_FIRMWARE_OID)
+            });
+            let firmware = (!profile.firmware.is_empty()).then_some(profile.firmware.as_str());
             let request_id = 0x1000u32.wrapping_add(nonce as u32 & 0x0fff);
             let (a, b) = snmp::exchange(
                 client_mac,
@@ -816,6 +873,8 @@ fn assert_identity(
                 request_id,
                 &descr,
                 profile.sys_object_id.as_deref(),
+                firmware_oid,
+                firmware,
             );
             frames.push(a);
             frames.push(b);
@@ -865,6 +924,8 @@ fn fallback_profile(dev: &DeviceRecord) -> DeviceProfile {
         s7_order_number: None,
         sys_descr: None,
         sys_object_id: None,
+        firmware_oid: None,
+        asset_class: None,
         modbus_vendor_name: None,
         modbus_product_code: None,
         modbus_revision: None,

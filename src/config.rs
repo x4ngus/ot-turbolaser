@@ -41,6 +41,10 @@ pub struct Config {
     #[serde(default)]
     pub synthesis: SynthesisCfg,
     #[serde(default)]
+    pub dns: DnsCfg,
+    #[serde(default)]
+    pub north_south: NorthSouthCfg,
+    #[serde(default)]
     pub threats: ThreatsCfg,
     #[serde(default)]
     pub session: SessionCfg,
@@ -485,6 +489,55 @@ impl Default for SynthesisCfg {
     }
 }
 
+/// Shared DNS domain identity. Fabricated zones are tagged with a domain (most
+/// share the first, so the identity spans zones), and the existing DNS A-records
+/// resolve fully-qualified `<host>.<domain>` names a sensor correlates by suffix.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsCfg {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Site domains. Most zones take the first (the shared plant domain); the rest
+    /// cycle the remainder. Empty leaves hostnames single-label.
+    #[serde(default = "default_dns_domains")]
+    pub domains: Vec<String>,
+}
+
+impl Default for DnsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            domains: default_dns_domains(),
+        }
+    }
+}
+
+/// North-south conduit traffic: bounded cross-zone OT sessions between adjacent
+/// Purdue zones, forwarded by a conduit (the zone firewall, else a switch, else
+/// the station). Off by default so the baseline stays intra-zone until opted in.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NorthSouthCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bounded flows per adjacent zone pair, so the wire carries no scan.
+    #[serde(default = "default_ns_per_pair")]
+    pub max_flows_per_pair: usize,
+    /// Emit the crossings every Nth run.
+    #[serde(default = "default_ns_cadence")]
+    pub cadence_runs: u64,
+}
+
+impl Default for NorthSouthCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_flows_per_pair: default_ns_per_pair(),
+            cadence_runs: default_ns_cadence(),
+        }
+    }
+}
+
 /// External-threat host promotion. Sparse and rate-limited; a 24h floor between
 /// promotions is enforced in code regardless of the interval set here.
 #[derive(Debug, Deserialize)]
@@ -624,6 +677,21 @@ impl Config {
         if matches!(self.synthesis.max_assets, Some(0)) {
             return Err("synthesis.max_assets must be > 0".into());
         }
+        if self.dns.enabled {
+            for d in &self.dns.domains {
+                if d.trim().is_empty() || d.contains(char::is_whitespace) {
+                    return Err(format!("dns.domains entry {d:?} is not a valid domain"));
+                }
+            }
+        }
+        if self.north_south.enabled {
+            if self.north_south.cadence_runs == 0 {
+                return Err("north_south.cadence_runs must be > 0".into());
+            }
+            if self.north_south.max_flows_per_pair == 0 {
+                return Err("north_south.max_flows_per_pair must be > 0".into());
+            }
+        }
         if self.threats.min_interval_secs > self.threats.max_interval_secs {
             return Err("threats.min_interval_secs must be <= threats.max_interval_secs".into());
         }
@@ -707,6 +775,15 @@ fn default_announce_interval() -> u64 {
 }
 fn default_target_devices() -> usize {
     64
+}
+fn default_dns_domains() -> Vec<String> {
+    vec!["plant.corp.example".into(), "dmz.corp.example".into()]
+}
+fn default_ns_per_pair() -> usize {
+    2
+}
+fn default_ns_cadence() -> u64 {
+    2
 }
 fn default_max_frame_bytes() -> usize {
     // Standard Ethernet: 14-byte header + 1500 MTU. Frames over this abort a

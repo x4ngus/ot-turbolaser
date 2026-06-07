@@ -119,6 +119,20 @@ no_pcaps_retry_secs: 30
 #                            # to this, surplus rides existing assets, so the
 #                            # sensor's asset count stays bounded and == the plan
 #
+# dns:                       # shared DNS domain identity across zones (red laser)
+#   enabled: true
+#   domains: ["plant.corp.example", "dmz.corp.example"]  # most zones take the
+#                            # first (the shared plant domain), so DNS hostnames
+#                            # seal as <host>.<domain> and a sensor reads one
+#                            # cross-zone site identity from the suffix
+#
+# north_south:               # cross-zone (north-south) OT traffic over a conduit
+#   enabled: false           # off by default; the baseline stays intra-zone
+#   max_flows_per_pair: 2    # bounded flows per adjacent Purdue-zone pair (no mesh)
+#   cadence_runs: 2          # emit the crossings every Nth run. The conduit is the
+#                            # zone-edge router/firewall (else a switch, else the
+#                            # station); its MAC is the L2 forwarder the sensor sees
+#
 # threats:                   # external-threat host promotion (red laser only)
 #   enabled: true
 #   min_interval_secs: 172800    # 2 days; a 24h floor is enforced regardless

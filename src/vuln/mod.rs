@@ -68,6 +68,20 @@ pub struct DeviceProfile {
     /// passive sensors key CVE attribution on. Emitted alongside sysDescr.
     #[serde(default)]
     pub sys_object_id: Option<String>,
+    /// Dedicated firmware/version OID bound to `firmware` in the SNMP response, so
+    /// a sensor reads an explicit firmware-version varbind (the firmware detection
+    /// event) rather than scraping it from free-text sysDescr. Defaults to
+    /// ENTITY-MIB entPhysicalFirmwareRev when unset and a firmware string is
+    /// present. See [`crate::synth::snmp`].
+    #[serde(default)]
+    pub firmware_oid: Option<String>,
+    /// The BOM asset class this SNMP profile fills, when it is infrastructure that
+    /// the bill of materials places: "Firewall" or "Router". `None` is an ordinary
+    /// switch/controller profile. Lets fabrication give a zone's firewall/router a
+    /// real CVE-bearing identity instead of a generic one, and suppresses the
+    /// LLDP/CDP beacons a firewall/router does not emit.
+    #[serde(default)]
+    pub asset_class: Option<String>,
     /// Modbus device-identification object overrides (objects 0x00/0x01/0x02).
     /// Each falls back to vendor/model/firmware when unset.
     #[serde(default)]

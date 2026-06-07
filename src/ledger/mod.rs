@@ -25,8 +25,10 @@ pub const MAX_DEVICES: usize = 2000;
 
 /// Current ledger schema version. Schema 3 (v0.2.2) added the capture-host
 /// registry and the `max_assets` cap; schema 4 (v0.3.1) adds per-asset
-/// `hostname` and `asset_type`. Older files load via serde defaults; a newer
-/// file is refused on load rather than silently misread.
+/// `hostname` and `asset_type`, and (v0.3.2) the per-zone DNS `domain`. All
+/// additive optional fields, so the schema number is unchanged. Older files load
+/// via serde defaults; a newer file is refused on load rather than silently
+/// misread.
 pub const SCHEMA: u32 = 4;
 
 /// Default total wire-asset cap (fabricated devices plus capture-derived assets)
@@ -101,13 +103,19 @@ pub struct Session {
     pub max_assets: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubnetRecord {
     pub cidr: String,
     pub zone_name: String,
     pub purdue_level: u8,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// DNS domain this zone belongs to. Several zones share one value so the
+    /// sensor correlates assets in different subnets as one site (a cross-zone
+    /// network identity) from their shared FQDN suffix. `None` leaves hostnames
+    /// single-label. Set at plan time by `assign_domains`.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +395,7 @@ mod tests {
             zone_name: "Zone".into(),
             purdue_level: 1,
             vendor: Some("Rockwell Automation".into()),
+            ..Default::default()
         }
     }
 

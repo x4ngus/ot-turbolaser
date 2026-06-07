@@ -136,13 +136,19 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
     };
     let added = devices::fabricate(&mut s, &vuln, &fab_params, target, &mut rng);
     devices::create_l3_zones(&mut s, &params, 3, &mut rng);
+    // Tag each zone with a shared DNS domain before naming, so hostnames seal as
+    // fully-qualified `<host>.<domain>` and the sensor reads a cross-zone site
+    // identity from the suffix.
+    if cfg.dns.enabled {
+        devices::assign_domains(&mut s, &cfg.dns.domains, seed);
+    }
     // Add the supporting cast (firewall at .1, HMI, engineering station,
     // historian, servers) and DNS hostnames off the same seed, then record the
     // full fabricated count so a sealed plan's drift check (device_count ==
     // target_devices) accounts for the BOM. The BOM is identity-only, so the
     // CVE-bearing set stays the controllers.
     let oui = OuiDb::load(&cfg.oui_db.path);
-    devices::enrich_plant(&mut s, &oui, seed);
+    devices::enrich_plant(&mut s, &vuln, &oui, seed);
     s.target_devices = s.device_count();
     s.max_assets = ledger::effective_asset_cap(cfg.synthesis.max_assets);
 
@@ -189,6 +195,11 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
             s.subnet_count()
         );
         render_session(&s, false);
+        if cfg.north_south.enabled {
+            let flows =
+                roles::north_south_crossings(&s, seed, cfg.north_south.max_flows_per_pair).len();
+            println!("north-south: {flows} conduit flow(s) across adjacent Purdue zones");
+        }
         println!("sample devices:");
         for d in s.devices.iter().take(12) {
             println!(
@@ -303,6 +314,7 @@ fn render_session(s: &Session, json: bool) {
                     "name": z.zone_name,
                     "purdue_level": z.purdue_level,
                     "vendor": z.vendor,
+                    "domain": z.domain,
                     "devices": count(&z.cidr),
                 })
             })
@@ -325,12 +337,13 @@ fn render_session(s: &Session, json: bool) {
     );
     for z in &s.subnets {
         println!(
-            "  {:<18} L{} {:<34} {:>4} devices  {}",
+            "  {:<18} L{} {:<34} {:>4} devices  {:<20} {}",
             z.cidr,
             z.purdue_level,
             z.zone_name,
             count(&z.cidr),
-            z.vendor.as_deref().unwrap_or("-")
+            z.vendor.as_deref().unwrap_or("-"),
+            z.domain.as_deref().unwrap_or("-")
         );
     }
 }

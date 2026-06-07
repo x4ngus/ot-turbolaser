@@ -36,7 +36,7 @@ use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
 
-use crate::ledger::Session;
+use crate::ledger::{DeviceRecord, Session, SubnetRecord};
 use crate::proto::l3;
 
 /// Assets per control cell: a local master plus up to `CELL_SIZE - 1` members.
@@ -95,6 +95,134 @@ pub fn firewall_addr(subnet_cidr: &str) -> Ipv4Addr {
         .ok()
         .map(|n| Ipv4Addr::from(u32::from(n.network()).saturating_add(1)))
         .unwrap_or(Ipv4Addr::new(10, 0, 0, 1))
+}
+
+/// A north-south crossing: a supervisory client in a higher Purdue zone reaching
+/// a CVE-bearing device in an adjacent lower zone, forwarded by a conduit. The
+/// engine renders it with the conduit MAC as the L2 forwarder (the client MAC)
+/// and the north client's IP, so a sensor sees north<->south traffic crossing the
+/// conduit and does not bind either IP to the conduit MAC (an L3 source MAC could
+/// be a router). It carries no ARP, so it never touches the union gate or
+/// multi-homes a MAC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crossing {
+    /// The supervisory client's IP (the higher zone's station).
+    pub north_ip: Ipv4Addr,
+    /// The field server in the adjacent lower zone (its real IP and MAC).
+    pub south_ip: Ipv4Addr,
+    pub south_mac: [u8; 6],
+    /// The L2 forwarder the sensor sees on the crossing: the zone-edge router or
+    /// firewall, else a switch, else the north station.
+    pub conduit_mac: [u8; 6],
+}
+
+/// Enumerate bounded north-south crossings across adjacent Purdue zones. Each
+/// zone at level L+1 (north) pairs with one deterministically chosen zone at
+/// level L (south) and reaches up to `max_per_pair` of its lowest-IP CVE-bearing
+/// devices, forwarded by a conduit (the zone-edge router/firewall, else a switch,
+/// else the north station). Bounded, never a mesh, so the wire carries no scan.
+/// Pure (a function of the ledger and seed), so adjacency and bounding are
+/// unit-tested without a wire.
+pub fn north_south_crossings(ledger: &Session, seed: u64, max_per_pair: usize) -> Vec<Crossing> {
+    if max_per_pair == 0 {
+        return Vec::new();
+    }
+    let mut by_level: BTreeMap<u8, Vec<&SubnetRecord>> = BTreeMap::new();
+    for s in &ledger.subnets {
+        by_level.entry(s.purdue_level).or_default().push(s);
+    }
+    for v in by_level.values_mut() {
+        v.sort_by(|a, b| a.cidr.cmp(&b.cidr));
+    }
+    // South servers: a zone's CVE-bearing field devices (not the conduit infra
+    // itself), sorted by IP so the lowest are picked.
+    let mut servers_by_zone: BTreeMap<&str, Vec<(Ipv4Addr, [u8; 6])>> = BTreeMap::new();
+    for d in &ledger.devices {
+        if d.cves.is_empty() || matches!(d.asset_type.as_deref(), Some("Firewall") | Some("Router"))
+        {
+            continue;
+        }
+        if let Ok(ip) = d.ip.parse::<Ipv4Addr>() {
+            servers_by_zone
+                .entry(d.subnet_cidr.as_str())
+                .or_default()
+                .push((ip, l3::parse_mac(&d.mac)));
+        }
+    }
+    for v in servers_by_zone.values_mut() {
+        v.sort_by_key(|(ip, _)| u32::from(*ip));
+    }
+
+    let mut out = Vec::new();
+    for (&level, north_zones) in &by_level {
+        let Some(south_level) = level.checked_sub(1) else {
+            continue;
+        };
+        let Some(south_zones) = by_level.get(&south_level) else {
+            continue;
+        };
+        if south_zones.is_empty() {
+            continue;
+        }
+        for north in north_zones {
+            let south = south_zones[det_index(seed, &north.cidr, south_zones.len())];
+            let Some(servers) = servers_by_zone.get(south.cidr.as_str()) else {
+                continue;
+            };
+            if servers.is_empty() {
+                continue;
+            }
+            let north_ip = station_addr(&north.cidr);
+            let station_mac = l3::stable_mac(seed, u32::from(north_ip));
+            let conduit_mac = pick_conduit_mac(ledger, &north.cidr, &south.cidr, station_mac);
+            for &(south_ip, south_mac) in servers.iter().take(max_per_pair) {
+                out.push(Crossing {
+                    north_ip,
+                    south_ip,
+                    south_mac,
+                    conduit_mac,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The conduit MAC for a zone pair: the zone-edge router or firewall in either
+/// zone, else a switch, else the north station MAC. So a plant always shows
+/// north-south traffic, using a real conduit device when one exists.
+fn pick_conduit_mac(
+    ledger: &Session,
+    north_cidr: &str,
+    south_cidr: &str,
+    station: [u8; 6],
+) -> [u8; 6] {
+    let in_pair = |d: &&DeviceRecord| d.subnet_cidr == north_cidr || d.subnet_cidr == south_cidr;
+    for class in ["Router", "Firewall", "Switch"] {
+        if let Some(d) = ledger
+            .devices
+            .iter()
+            .filter(in_pair)
+            .find(|d| d.asset_type.as_deref() == Some(class))
+        {
+            return l3::parse_mac(&d.mac);
+        }
+    }
+    station
+}
+
+/// A small deterministic index into a slice of length `len`, from the seed and a
+/// key string (FNV-1a style), so a north zone always picks the same south zone.
+fn det_index(seed: u64, key: &str, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let mut h = seed ^ 0xCBF2_9CE4_8422_2325;
+    for b in key.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    (h % len as u64) as usize
 }
 
 /// Build the per-zone ARP communication graph as a flat edge list. Every real
@@ -230,6 +358,7 @@ mod tests {
             zone_name: "Z".into(),
             purdue_level: 1,
             vendor: None,
+            ..Default::default()
         });
     }
 
@@ -408,5 +537,128 @@ mod tests {
         let owners: HashSet<Ipv4Addr> = arp_edges(&s, s.seed).iter().map(|e| e.owner.ip).collect();
         assert!(owners.contains(&"10.6.0.7".parse().unwrap()));
         assert!(owners.contains(&"10.6.0.8".parse().unwrap()));
+    }
+
+    fn zoned(s: &mut Session, cidr: &str, level: u8) {
+        s.subnets.push(SubnetRecord {
+            cidr: cidr.into(),
+            zone_name: "Z".into(),
+            purdue_level: level,
+            vendor: None,
+            ..Default::default()
+        });
+    }
+
+    fn cve_dev(ip: &str, cidr: &str) -> DeviceRecord {
+        let mut d = dev(ip, cidr);
+        d.cves = vec!["CVE-0000-0000".into()];
+        d.asset_type = Some("Controller".into());
+        d
+    }
+
+    fn infra(ip: &str, cidr: &str, class: &str, mac: &str) -> DeviceRecord {
+        let mut d = dev(ip, cidr);
+        d.mac = mac.into();
+        d.protocol = "switch_snmp".into();
+        d.cves = vec!["CVE-0000-0001".into()];
+        d.asset_type = Some(class.into());
+        d
+    }
+
+    #[test]
+    fn north_south_pairs_are_adjacent_only() {
+        let mut s = sess(11);
+        zoned(&mut s, "10.1.0.0/24", 1);
+        zoned(&mut s, "10.2.0.0/24", 2);
+        zoned(&mut s, "10.3.0.0/24", 3);
+        s.devices.push(cve_dev("10.1.0.5", "10.1.0.0/24"));
+        s.devices.push(cve_dev("10.1.0.6", "10.1.0.0/24"));
+        s.devices.push(cve_dev("10.2.0.5", "10.2.0.0/24"));
+        s.devices.push(cve_dev("10.2.0.6", "10.2.0.0/24"));
+        s.devices.push(cve_dev("10.3.0.5", "10.3.0.0/24"));
+        let xs = north_south_crossings(&s, s.seed, 2);
+        assert!(!xs.is_empty(), "adjacent zones yield crossings");
+        for c in &xs {
+            let n = c.north_ip.octets()[1];
+            let so = c.south_ip.octets()[1];
+            // North is exactly one Purdue level above south (2->1 or 3->2), never
+            // the non-adjacent 3->1.
+            assert!(
+                (n == 2 && so == 1) || (n == 3 && so == 2),
+                "crossing {n}->{so} is not adjacent"
+            );
+        }
+        assert!(
+            xs.iter()
+                .any(|c| c.north_ip.octets()[1] == 2 && c.south_ip.octets()[1] == 1),
+            "the 2->1 pair is represented"
+        );
+        assert!(
+            xs.iter()
+                .any(|c| c.north_ip.octets()[1] == 3 && c.south_ip.octets()[1] == 2),
+            "the 3->2 pair is represented"
+        );
+    }
+
+    #[test]
+    fn crossings_are_bounded_and_deterministic() {
+        let mut s = sess(7);
+        zoned(&mut s, "10.1.0.0/24", 1);
+        zoned(&mut s, "10.2.0.0/24", 2);
+        for i in 1..=20u8 {
+            s.devices
+                .push(cve_dev(&format!("10.1.0.{i}"), "10.1.0.0/24"));
+        }
+        s.devices.push(cve_dev("10.2.0.5", "10.2.0.0/24"));
+        // One north zone reaching one south zone, capped at max_per_pair even with
+        // 20 candidate servers: never a mesh.
+        assert_eq!(north_south_crossings(&s, s.seed, 3).len(), 3);
+        assert_eq!(
+            north_south_crossings(&s, s.seed, 3),
+            north_south_crossings(&s, s.seed, 3),
+            "deterministic"
+        );
+    }
+
+    #[test]
+    fn conduit_prefers_router_then_firewall_then_switch_then_station() {
+        let mut s = sess(5);
+        zoned(&mut s, "10.1.0.0/24", 1);
+        zoned(&mut s, "10.2.0.0/24", 2);
+        s.devices.push(cve_dev("10.1.0.5", "10.1.0.0/24")); // south server
+        let sw = infra("10.2.0.20", "10.2.0.0/24", "Switch", "00:90:e8:00:00:20");
+        let fw = infra("10.2.0.1", "10.2.0.0/24", "Firewall", "00:09:0f:00:00:01");
+        let rt = infra("10.2.0.30", "10.2.0.0/24", "Router", "00:00:0c:00:00:30");
+        s.devices.push(sw.clone());
+        s.devices.push(fw.clone());
+        s.devices.push(rt.clone());
+        let station_mac = l3::stable_mac(s.seed, u32::from(station_addr("10.2.0.0/24")));
+
+        assert_eq!(
+            north_south_crossings(&s, s.seed, 1)[0].conduit_mac,
+            l3::parse_mac(&rt.mac),
+            "router preferred"
+        );
+        s.devices
+            .retain(|d| d.asset_type.as_deref() != Some("Router"));
+        assert_eq!(
+            north_south_crossings(&s, s.seed, 1)[0].conduit_mac,
+            l3::parse_mac(&fw.mac),
+            "firewall is next"
+        );
+        s.devices
+            .retain(|d| d.asset_type.as_deref() != Some("Firewall"));
+        assert_eq!(
+            north_south_crossings(&s, s.seed, 1)[0].conduit_mac,
+            l3::parse_mac(&sw.mac),
+            "switch is next"
+        );
+        s.devices
+            .retain(|d| d.asset_type.as_deref() != Some("Switch"));
+        assert_eq!(
+            north_south_crossings(&s, s.seed, 1)[0].conduit_mac,
+            station_mac,
+            "the station MAC is the last resort, so a pair is never skipped"
+        );
     }
 }

@@ -130,8 +130,17 @@ fn choose_or_create_subnet(
     }
 }
 
-/// The distinct carrier protocols present in the DB, in a fixed order, so zone
-/// creation can cycle them and guarantee every protocol is represented.
+/// A core fabrication profile: a controller or switch, not a BOM-placed
+/// firewall/router (those are tagged with `asset_class` and reached only by the
+/// bill of materials in `enrich_plant`, never by core zone/device fabrication).
+fn is_core(p: &DeviceProfile) -> bool {
+    p.asset_class.is_none()
+}
+
+/// The distinct carrier protocols present among the core profiles, in a fixed
+/// order, so zone creation can cycle them and guarantee every protocol is
+/// represented. Infrastructure (firewall/router) profiles are excluded so they
+/// never seed a core zone.
 fn protocols_present(vuln: &VulnDb) -> Vec<ProfileProto> {
     [
         ProfileProto::Enip,
@@ -140,7 +149,7 @@ fn protocols_present(vuln: &VulnDb) -> Vec<ProfileProto> {
         ProfileProto::SwitchSnmp,
     ]
     .into_iter()
-    .filter(|&p| vuln.by_protocol(p).next().is_some())
+    .filter(|&p| vuln.by_protocol(p).any(is_core))
     .collect()
 }
 
@@ -163,7 +172,10 @@ fn create_zone(
         return None;
     }
     let proto = protos[session.subnet_count() % protos.len()];
-    let candidates: Vec<&DeviceProfile> = vuln.by_protocol(proto).collect();
+    let candidates: Vec<&DeviceProfile> = vuln.by_protocol(proto).filter(|p| is_core(p)).collect();
+    if candidates.is_empty() {
+        return None;
+    }
     let profile = candidates[rng.gen_range(0..candidates.len())];
     let idx = session.subnet_count();
     let name = name_zone(
@@ -177,6 +189,7 @@ fn create_zone(
         zone_name: name,
         purdue_level: profile.purdue_level,
         vendor: Some(profile.vendor.clone()),
+        domain: None,
     };
     session.add_subnet(rec).then(|| net.to_string())
 }
@@ -213,26 +226,28 @@ pub fn create_l3_zones(
             zone_name: name,
             purdue_level: 3,
             vendor: Some(vendor.to_string()),
+            domain: None,
         };
         session.add_subnet(rec);
     }
 }
 
-/// Prefer a profile matching the zone vendor; fall back to any profile.
+/// Prefer a core profile matching the zone vendor; fall back to any core profile.
+/// Infrastructure (firewall/router) profiles are excluded: they are placed by the
+/// bill of materials, not fabricated into the core fleet.
 fn pick_profile<'a>(
     vuln: &'a VulnDb,
     vendor: Option<&str>,
     rng: &mut ChaCha8Rng,
 ) -> &'a DeviceProfile {
+    let core: Vec<&DeviceProfile> = vuln.profiles().iter().filter(|p| is_core(p)).collect();
     if let Some(v) = vendor {
-        let matches: Vec<&DeviceProfile> =
-            vuln.profiles().iter().filter(|p| p.vendor == v).collect();
+        let matches: Vec<&DeviceProfile> = core.iter().copied().filter(|p| p.vendor == v).collect();
         if !matches.is_empty() {
             return matches[rng.gen_range(0..matches.len())];
         }
     }
-    vuln.pick(rng.gen_range(0..vuln.len()))
-        .expect("vuln db is non-empty here")
+    core[rng.gen_range(0..core.len())]
 }
 
 /// A MAC from the profile's vendor OUI plus random low bytes, so devices in a
@@ -273,6 +288,7 @@ fn asset_label_for_proto(p: ProfileProto) -> &'static str {
 fn asset_type_of(dev: &DeviceRecord) -> AssetType {
     match dev.asset_type.as_deref() {
         Some("Switch") => AssetType::Switch,
+        Some("Router") => AssetType::Router,
         Some("HMI") => AssetType::Hmi,
         Some("EWS") => AssetType::EngWorkstation,
         Some("Historian") => AssetType::Historian,
@@ -288,6 +304,7 @@ fn bom_vendor(asset_type: AssetType) -> &'static str {
     match asset_type {
         AssetType::Firewall => "Fortinet",
         AssetType::Switch => "Cisco Systems",
+        AssetType::Router => "Cisco Systems",
         AssetType::Hmi => "Advantech",
         AssetType::EngWorkstation => "Dell",
         AssetType::Historian => "Hewlett Packard",
@@ -301,6 +318,7 @@ fn bom_model(asset_type: AssetType) -> &'static str {
     match asset_type {
         AssetType::Firewall => "FortiGate 40F",
         AssetType::Switch => "Catalyst IE-3300",
+        AssetType::Router => "ISR 4321",
         AssetType::Hmi => "WebOP-2070T",
         AssetType::EngWorkstation => "OptiPlex 7090",
         AssetType::Historian => "ProLiant DL360",
@@ -320,6 +338,29 @@ fn is_named(seed: u64, ip: u32) -> bool {
     (h % 100) < 85
 }
 
+/// A deterministic vuln profile for a BOM infrastructure class ("Firewall" or
+/// "Router"), chosen by the profile's `asset_class` so a zone's firewall/router
+/// carries a real CVE-bearing SNMP identity (sysDescr + sysObjectID + firmware
+/// OID). None when the DB has no such profile, so fabrication falls back to an
+/// identity-only generic record. Indexed by (seed, ip) so the choice is stable.
+fn infra_profile<'a>(
+    vuln: &'a VulnDb,
+    class: &str,
+    seed: u64,
+    ip: u32,
+) -> Option<&'a DeviceProfile> {
+    let matches: Vec<&DeviceProfile> = vuln
+        .profiles()
+        .iter()
+        .filter(|p| p.asset_class.as_deref() == Some(class))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let h = (seed ^ u64::from(ip).wrapping_mul(0x0100_0000_01B3)).rotate_left(17) as usize;
+    Some(matches[h % matches.len()])
+}
+
 /// A believable, stable MAC for a BOM asset: the class vendor's OUI (or the IT
 /// pool when the vendor has none registered) with low bytes derived per-IP.
 fn bom_mac(oui: &OuiDb, vendor: &str, seed: u64, ip: u32) -> [u8; 6] {
@@ -331,24 +372,46 @@ fn bom_mac(oui: &OuiDb, vendor: &str, seed: u64, ip: u32) -> [u8; 6] {
     [prefix[0], prefix[1], prefix[2], low[3], low[4], low[5]]
 }
 
+/// Tag each zone with a DNS domain so the plant reads as one site spanning zones.
+/// Most zones share the primary domain (a single cross-zone identity a sensor
+/// correlates from the FQDN suffix); a minority take a secondary for variety.
+/// Deterministic from the seed and zone index (no RNG draw, so it does not
+/// perturb fabrication), run at plan time before `enrich_plant` so the names are
+/// sealed as FQDNs. No-op when `domains` is empty (DNS stays single-label).
+pub fn assign_domains(session: &mut Session, domains: &[String], seed: u64) {
+    if domains.is_empty() {
+        return;
+    }
+    for (i, sn) in session.subnets.iter_mut().enumerate() {
+        let h = (seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).rotate_left(29);
+        let domain = if domains.len() == 1 || (h % 100) < 75 {
+            domains[0].clone()
+        } else {
+            domains[1 + (i % (domains.len() - 1))].clone()
+        };
+        sn.domain = Some(domain);
+    }
+}
+
 /// After controllers are fabricated, name ~85% of the core devices and add each
 /// zone's bill of materials -- a zone-edge firewall at .1 plus HMI / engineering
-/// workstation / historian / server identities by Purdue level -- as
-/// identity-only assets (no CVE: they bind via their ARP is-at reply and are
-/// named by DNS, not by an OT session). Deterministic from the seed. Run at plan
-/// time so the supporting cast and the names are sealed into the ledger the
-/// daemon replays verbatim.
-pub fn enrich_plant(session: &mut Session, oui: &OuiDb, seed: u64) {
-    let zones: Vec<(usize, String, u8)> = session
+/// workstation / historian / server / router identities by Purdue level. The
+/// firewall and router carry a real CVE-bearing SNMP identity (from a vuln
+/// profile tagged with their asset class); the rest are identity-only (they bind
+/// via their ARP is-at reply and are named by DNS, not by an OT session).
+/// Deterministic from the seed. Run at plan time so the supporting cast and the
+/// names are sealed into the ledger the daemon replays verbatim.
+pub fn enrich_plant(session: &mut Session, vuln: &VulnDb, oui: &OuiDb, seed: u64) {
+    let zones: Vec<(usize, String, u8, Option<String>)> = session
         .subnets
         .iter()
         .enumerate()
-        .map(|(i, s)| (i, s.cidr.clone(), s.purdue_level))
+        .map(|(i, s)| (i, s.cidr.clone(), s.purdue_level, s.domain.clone()))
         .collect();
 
     // 1) Name ~85% of the fabricated core devices, per zone in IP order so a
     //    device's hostname index is stable.
-    for (zi, cidr, _lvl) in &zones {
+    for (zi, cidr, _lvl, domain) in &zones {
         let mut idxs: Vec<usize> = session
             .devices
             .iter()
@@ -361,7 +424,13 @@ pub fn enrich_plant(session: &mut Session, oui: &OuiDb, seed: u64) {
             if is_named(seed, ip_u32(&session.devices[di].ip)) {
                 let vendor = session.devices[di].vendor.clone();
                 let at = asset_type_of(&session.devices[di]);
-                session.devices[di].hostname = Some(bom::hostname_for(Some(&vendor), at, *zi, n));
+                session.devices[di].hostname = Some(bom::hostname_for(
+                    Some(&vendor),
+                    at,
+                    *zi,
+                    n,
+                    domain.as_deref(),
+                ));
             }
         }
     }
@@ -369,7 +438,7 @@ pub fn enrich_plant(session: &mut Session, oui: &OuiDb, seed: u64) {
     // 2) Add each zone's BOM as identity-only assets (the firewall claims the
     //    reserved .1; the rest take the next free host).
     let mut used: HashSet<Ipv4Addr> = session.used_ips();
-    for (zi, cidr, lvl) in &zones {
+    for (zi, cidr, lvl, domain) in &zones {
         let Ok(net) = cidr.parse::<Ipv4Net>() else {
             continue;
         };
@@ -386,21 +455,44 @@ pub fn enrich_plant(session: &mut Session, oui: &OuiDb, seed: u64) {
                 if used.contains(&ip) {
                     continue;
                 }
-                let vendor = bom_vendor(atype);
-                let mac = bom_mac(oui, vendor, seed, u32::from(ip));
+                // A CVE-bearing infrastructure class (firewall/router) takes a real
+                // SNMP profile so it carries CVEs and a firmware identity; every
+                // other class is identity-only (named by DNS, bound by ARP).
+                let cve_profile = atype
+                    .cve_bearing()
+                    .then(|| infra_profile(vuln, atype.label(), seed, u32::from(ip)))
+                    .flatten();
+                let (vendor, model, firmware, protocol, cves) = match cve_profile {
+                    Some(p) => (
+                        p.vendor.clone(),
+                        p.model.clone(),
+                        p.firmware.clone(),
+                        p.protocol.as_str().to_string(),
+                        p.cves.clone(),
+                    ),
+                    None => (
+                        bom_vendor(atype).to_string(),
+                        bom_model(atype).to_string(),
+                        "1.0".to_string(),
+                        "none".to_string(),
+                        Vec::new(),
+                    ),
+                };
+                let mac = bom_mac(oui, &vendor, seed, u32::from(ip));
                 let rec = DeviceRecord {
                     ip: ip.to_string(),
                     mac: fmt_mac(mac),
-                    vendor: vendor.to_string(),
-                    model: bom_model(atype).to_string(),
-                    firmware: "1.0".to_string(),
-                    protocol: "none".to_string(),
-                    cves: Vec::new(),
+                    vendor: vendor.clone(),
+                    model,
+                    firmware,
+                    protocol,
+                    cves,
                     subnet_cidr: cidr.clone(),
                     // Name the same ~85% share as the core devices, so overall DNS
                     // coverage lands in the 80-90% band (not every asset has a name).
-                    hostname: is_named(seed, u32::from(ip))
-                        .then(|| bom::hostname_for(Some(vendor), atype, *zi, n)),
+                    hostname: is_named(seed, u32::from(ip)).then(|| {
+                        bom::hostname_for(Some(&vendor), atype, *zi, n, domain.as_deref())
+                    }),
                     asset_type: Some(atype.label().to_string()),
                 };
                 if session.add_device(rec) {
@@ -506,7 +598,7 @@ mod tests {
         let controllers = fabricate(&mut s, &db(), &params, 64, &mut rng);
         let cve_before = s.devices.iter().filter(|d| !d.cves.is_empty()).count();
 
-        enrich_plant(&mut s, &OuiDb::embedded(), 2024);
+        enrich_plant(&mut s, &db(), &OuiDb::embedded(), 2024);
 
         // Every zone has a firewall at .1, plus an HMI and an engineering station.
         for sn in &s.subnets {
@@ -529,14 +621,33 @@ mod tests {
                 );
             }
         }
-        // Identity-only: the BOM adds no CVEs, so the vulnerable set stays the
-        // controllers (the ~10% spec holds).
+        // Before the BOM, the CVE-bearing set is exactly the fabricated core.
+        assert_eq!(
+            cve_before, controllers,
+            "the fabricated core carries the CVEs"
+        );
+        // The zone-edge firewall is now CVE-bearing (a real SNMP identity); the
+        // operator-facing classes (HMI/EWS/historian/server) stay identity-only.
+        let firewalls: Vec<&DeviceRecord> = s
+            .devices
+            .iter()
+            .filter(|d| d.asset_type.as_deref() == Some("Firewall"))
+            .collect();
+        assert!(!firewalls.is_empty());
+        assert!(
+            firewalls
+                .iter()
+                .all(|d| !d.cves.is_empty() && d.protocol == "switch_snmp"),
+            "every zone firewall carries a CVE over SNMP"
+        );
         let cve_after = s.devices.iter().filter(|d| !d.cves.is_empty()).count();
-        assert_eq!(cve_before, cve_after, "BOM adds no CVEs");
-        assert_eq!(cve_after, controllers, "only controllers carry CVEs");
+        assert!(cve_after > cve_before, "the BOM firewalls/routers add CVEs");
         for d in &s.devices {
-            if d.asset_type.as_deref() == Some("Firewall") {
-                assert!(d.cves.is_empty(), "the firewall is identity-only");
+            if matches!(
+                d.asset_type.as_deref(),
+                Some("HMI") | Some("EWS") | Some("Historian") | Some("Server")
+            ) {
+                assert!(d.cves.is_empty(), "{} is identity-only", d.ip);
             }
         }
         // Most core assets are named (BOM all named, controllers ~85%).
@@ -571,7 +682,7 @@ mod tests {
             &mut rng,
         );
         create_l3_zones(&mut s, &params, 3, &mut rng);
-        enrich_plant(&mut s, &OuiDb::embedded(), 99);
+        enrich_plant(&mut s, &db(), &OuiDb::embedded(), 99);
 
         let l3: HashSet<String> = s
             .subnets
@@ -589,12 +700,19 @@ mod tests {
             .collect();
         assert!(!l3_devs.is_empty(), "L3 zones are populated by the BOM");
         for d in &l3_devs {
-            assert!(d.cves.is_empty(), "L3 asset {} is identity-only", d.ip);
             assert_ne!(
                 d.asset_type.as_deref(),
                 Some("Controller"),
                 "L3 zones hold servers/hosts, not controllers"
             );
+            // The zone-edge firewall and router carry CVEs; servers and operator
+            // stations are identity-only.
+            match d.asset_type.as_deref() {
+                Some("Firewall") | Some("Router") => {
+                    assert!(!d.cves.is_empty(), "L3 {} carries a CVE", d.ip)
+                }
+                _ => assert!(d.cves.is_empty(), "L3 asset {} is identity-only", d.ip),
+            }
         }
         assert!(
             l3_devs

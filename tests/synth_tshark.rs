@@ -100,6 +100,8 @@ fn synthesized_assertions_dissect_in_tshark() {
         0x1234,
         "Moxa EDS-405A Series Managed Ethernet Switch, firmware V3.4",
         Some("1.3.6.1.4.1.8691.7.50"),
+        Some(snmp::DEFAULT_FIRMWARE_OID),
+        Some("V3.4"),
     );
     frames.push(a);
     frames.push(b);
