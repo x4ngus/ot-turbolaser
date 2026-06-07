@@ -791,6 +791,17 @@ pub(crate) fn stable_mac(seed: u64, ip: u32) -> [u8; 6] {
     [b[0] & 0xFC, b[1], b[2], b[3], b[4], b[5]]
 }
 
+/// Parse a colon-separated MAC string ("aa:bb:cc:dd:ee:ff") into six bytes,
+/// zero-filling any missing or malformed group, so a stored ledger MAC always
+/// yields a six-byte address. Companion to [`stable_mac`] (which produces them).
+pub(crate) fn parse_mac(s: &str) -> [u8; 6] {
+    let mut m = [0u8; 6];
+    for (i, part) in s.split(':').enumerate().take(6) {
+        m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
+    }
+    m
+}
+
 /// Pick a random network of the given prefix within 10/8 that does not overlap
 /// any already assigned network.
 fn pick_new_net(prefix: u8, rng: &mut ChaCha8Rng, assigned: &[(u32, u8)]) -> u32 {

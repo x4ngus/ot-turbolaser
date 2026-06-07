@@ -85,16 +85,6 @@ pub fn station_addr(subnet_cidr: &str) -> Ipv4Addr {
         .unwrap_or(Ipv4Addr::new(10, 0, 0, 250))
 }
 
-/// Parse a colon-separated MAC string into bytes, zero-filling any missing or
-/// malformed group, so a stored ledger MAC always yields six bytes.
-fn parse_mac(s: &str) -> [u8; 6] {
-    let mut m = [0u8; 6];
-    for (i, part) in s.split(':').enumerate().take(6) {
-        m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
-    }
-    m
-}
-
 /// Build the per-zone ARP communication graph as a flat edge list. Every real
 /// asset (fabricated device or capture host) appears as the OWNER of at least
 /// one edge, so it answers `is-at` and unions its MAC<->IP; no requester resolves
@@ -110,26 +100,20 @@ pub fn arp_edges(ledger: &Session, seed: u64) -> Vec<Edge> {
     // than O(zones x assets). A BTreeMap keeps zone order deterministic so a host
     // re-binds in the same cell every burst.
     let mut by_zone: BTreeMap<&str, Vec<Node>> = BTreeMap::new();
-    for d in &ledger.devices {
-        if let Ok(ip) = d.ip.parse::<Ipv4Addr>() {
-            by_zone
-                .entry(d.subnet_cidr.as_str())
-                .or_default()
-                .push(Node {
-                    ip,
-                    mac: parse_mac(&d.mac),
-                });
-        }
-    }
-    for h in &ledger.capture_hosts {
-        if let Ok(ip) = h.ip.parse::<Ipv4Addr>() {
-            by_zone
-                .entry(h.subnet_cidr.as_str())
-                .or_default()
-                .push(Node {
-                    ip,
-                    mac: parse_mac(&h.mac),
-                });
+    let devices = ledger
+        .devices
+        .iter()
+        .map(|d| (&d.ip, &d.mac, &d.subnet_cidr));
+    let hosts = ledger
+        .capture_hosts
+        .iter()
+        .map(|h| (&h.ip, &h.mac, &h.subnet_cidr));
+    for (ip, mac, cidr) in devices.chain(hosts) {
+        if let Ok(ip) = ip.parse::<Ipv4Addr>() {
+            by_zone.entry(cidr.as_str()).or_default().push(Node {
+                ip,
+                mac: l3::parse_mac(mac),
+            });
         }
     }
 
@@ -307,7 +291,7 @@ mod tests {
         }
         for (ip, owners) in fanout {
             assert!(
-                owners.len() <= CELL_SIZE - 1,
+                owners.len() < CELL_SIZE,
                 "requester {ip} resolves {} owners (> {})",
                 owners.len(),
                 CELL_SIZE - 1

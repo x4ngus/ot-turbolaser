@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(prof.runts, 0, "every ARP frame is padded to 60 bytes");
         assert_eq!(prof.locally_administered, 0, "all is-at MACs are global");
         assert!(
-            prof.max_fanout <= roles::CELL_SIZE - 1,
+            prof.max_fanout < roles::CELL_SIZE,
             "no requester sweeps the subnet (fan-out {})",
             prof.max_fanout
         );

@@ -353,7 +353,7 @@ impl SimulatorEngine {
             .iter()
             .filter_map(|d| {
                 let ip = d.ip.parse::<Ipv4Addr>().ok()?;
-                Some((u32::from(ip), parse_mac(&d.mac)))
+                Some((u32::from(ip), l3::parse_mac(&d.mac)))
             })
             .collect()
     }
@@ -601,6 +601,9 @@ impl SimulatorEngine {
         {
             let devices = &self.ledger.devices;
             let vuln = &self.vuln;
+            // Each zone's engineering-station identity, derived once per zone
+            // rather than re-parsing the CIDR for every device in it.
+            let mut station: HashMap<&str, (Ipv4Addr, [u8; 6])> = HashMap::new();
             for dev in devices {
                 // Own the profile so a missing-model fallback and the vuln borrow
                 // do not tangle; a device is never silently dropped.
@@ -612,14 +615,19 @@ impl SimulatorEngine {
                     }
                 };
                 if let Ok(dev_ip) = dev.ip.parse::<Ipv4Addr>() {
-                    let dev_mac = parse_mac(&dev.mac);
+                    let dev_mac = l3::parse_mac(&dev.mac);
+                    let (client_ip, client_mac) =
+                        *station.entry(dev.subnet_cidr.as_str()).or_insert_with(|| {
+                            let ip = roles::station_addr(&dev.subnet_cidr);
+                            (ip, l3::stable_mac(seed, u32::from(ip)))
+                        });
                     frames.extend(assert_identity(
                         dev_mac,
                         dev_ip,
-                        &dev.subnet_cidr,
+                        client_ip,
+                        client_mac,
                         &profile,
                         switch_beacons,
-                        seed,
                         nonce,
                     ));
                 }
@@ -642,21 +650,20 @@ impl SimulatorEngine {
 /// engineering station, which is what makes the sensor track it as an OT endpoint
 /// and union its MAC<->IP. A bare host seen only in replayed background traffic
 /// never unions; a parsed OT session is the lever (the fabricated devices and the
-/// CDP/LLDP-speaking switches prove it). `seed` derives the per-zone station MAC
-/// (one stable client per zone, never a MAC multi-homed across zones, which a
-/// sensor cannot fuse). `nonce` (the burst counter) varies the client ephemeral
-/// port per scan so each burst is a fresh connection the sensor parses anew.
+/// CDP/LLDP-speaking switches prove it). The caller passes the zone's stable
+/// engineering-station identity (`client_ip`/`client_mac`), one client per zone
+/// so its MAC is never multi-homed across zones (which a sensor cannot fuse).
+/// `nonce` (the burst counter) varies the client ephemeral port per scan so each
+/// burst is a fresh connection the sensor parses anew.
 fn assert_identity(
     mac: [u8; 6],
     ip: Ipv4Addr,
-    subnet_cidr: &str,
+    client_ip: Ipv4Addr,
+    client_mac: [u8; 6],
     profile: &DeviceProfile,
     switch_beacons: bool,
-    seed: u64,
     nonce: u64,
 ) -> Vec<Vec<u8>> {
-    let client_ip = roles::station_addr(subnet_cidr);
-    let client_mac = l3::stable_mac(seed, u32::from(client_ip));
     let client_port = ephemeral_port(nonce, ip);
 
     let mut frames: Vec<Vec<u8>> = Vec::new();
@@ -826,14 +833,6 @@ fn proto_from_str(s: &str) -> ProfileProto {
         "switch_snmp" => ProfileProto::SwitchSnmp,
         _ => ProfileProto::Enip,
     }
-}
-
-fn parse_mac(s: &str) -> [u8; 6] {
-    let mut m = [0u8; 6];
-    for (i, part) in s.split(':').enumerate().take(6) {
-        m[i] = u8::from_str_radix(part, 16).unwrap_or(0);
-    }
-    m
 }
 
 fn fmt_mac(m: [u8; 6]) -> String {
@@ -1017,13 +1016,15 @@ mod tests {
         seed: u64,
         nonce: u64,
     ) -> Vec<Vec<u8>> {
+        let client_ip = roles::station_addr(&d.subnet_cidr);
+        let client_mac = l3::stable_mac(seed, u32::from(client_ip));
         assert_identity(
-            parse_mac(&d.mac),
+            l3::parse_mac(&d.mac),
             d.ip.parse().unwrap(),
-            &d.subnet_cidr,
+            client_ip,
+            client_mac,
             p,
             switch_beacons,
-            seed,
             nonce,
         )
     }
@@ -1039,7 +1040,7 @@ mod tests {
     #[test]
     fn mac_and_station_addr() {
         assert_eq!(
-            parse_mac("00:0e:8c:11:22:33"),
+            l3::parse_mac("00:0e:8c:11:22:33"),
             [0x00, 0x0E, 0x8C, 0x11, 0x22, 0x33]
         );
         assert_eq!(

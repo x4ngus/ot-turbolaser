@@ -632,18 +632,17 @@ fn wire_carries_only_planned_coherent_frames() {
 }
 
 /// Every asset (device and capture host) must be bound MAC<->IP by its OWN
-/// BROADCAST ARP REQUEST: the asset asks "who has <gateway>?" with its own MAC
-/// and IP in the sender fields (oper=1, SHA=mac, SPA=ip, eth dst = broadcast).
-/// The field export proved a passive sensor forms the union from a request's
-/// sender, not from a reply: with the bridge flooding unicast, only assets that
-/// emitted their own request unioned, while assets seen only as the sender of a
-/// unicast is-at reply stayed split MAC-only/IP-only. Requests target the one
-/// shared zone gateway (many hosts -> one gateway), the benign pattern, never a
-/// per-host subnet scan. Every ARP frame must be padded to the 60-byte Ethernet
-/// minimum (a 42-byte runt is rejected). Regression guard for the binding
-/// collapse (split IP-only/MAC-only assets) the inversion fixes.
+/// authoritative ARP `is-at` REPLY: the asset answers "my IP is at my MAC"
+/// (oper=2, SHA=mac, SPA=ip), solicited by its control-cell master's who-has.
+/// The field export proved a passive sensor forms the union from the is-at
+/// reply's sender, not from a who-has request's sender: under v0.2.21 every asset
+/// broadcast its own request yet only the per-zone stations, the sole repliers,
+/// unioned. Solicitation stays distributed into small control cells (no host
+/// resolves the whole subnet, the scan signature the sensor suppresses). Every
+/// ARP frame must be padded to the 60-byte Ethernet minimum (a 42-byte runt is
+/// rejected). Regression guard for the split-asset collapse the is-at model fixes.
 #[test]
-fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
+fn synth_burst_binds_every_asset_via_is_at_replies() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -687,12 +686,12 @@ fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
         }
     }
 
-    // The bindings the REQUESTS carry: (sender MAC, sender IP) of each request,
+    // The bindings the REPLIES carry: (sender MAC, sender IP) of each is-at reply,
     // i.e. "this IP is at this MAC". Sender hardware addr at frame 22-28, sender
     // protocol addr at frame 28-32.
     let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp
         .iter()
-        .filter(|p| oper(&p.data) == 1)
+        .filter(|p| oper(&p.data) == 2)
         .map(|p| {
             let mut mac = [0u8; 6];
             mac.copy_from_slice(&p.data[22..28]);
@@ -701,7 +700,7 @@ fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
         })
         .collect();
 
-    // Every asset is the sender of one of those broadcast requests.
+    // Every asset is the sender of one of those is-at replies.
     let assets = engine
         .ledger()
         .devices
@@ -720,7 +719,7 @@ fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
         let a: Ipv4Addr = ip.parse().expect("asset ip parses");
         assert!(
             bound.contains(&(m, a.octets())),
-            "asset {ip} / {mac} emits its own broadcast ARP request"
+            "asset {ip} / {mac} emits its own is-at reply"
         );
         checked += 1;
     }
@@ -742,14 +741,14 @@ fn synth_burst_binds_every_asset_via_broadcast_arp_requests() {
     );
 }
 
-/// Every capture host emits its own broadcast ARP request in a SINGLE burst, not
-/// a rotating window. A host is born IP-only from its first replayed L3 frame, so
-/// its binding must be present from the host's creation or the asset sticks split
-/// (a window delayed the ARP and the field froze the split). The burst is
-/// self-paced (1ms per frame), so a full sweep spreads over ~1s rather than a
-/// line-rate microburst. Regression guard against re-introducing the window.
+/// Every capture host binds in a SINGLE burst, not a rotating window: it answers
+/// its own is-at reply (solicited by its control-cell master) the first burst it
+/// exists, so a host born IP-only from its first replayed L3 frame is bound at
+/// once. The burst is self-paced (1ms per frame), so a full sweep spreads over
+/// ~1s rather than a line-rate microburst. Regression guard against re-introducing
+/// the window.
 #[test]
-fn every_capture_host_emits_its_request_each_burst() {
+fn every_capture_host_binds_in_a_single_burst() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -774,12 +773,12 @@ fn every_capture_host_emits_its_request_each_burst() {
     let hosts = engine.ledger().capture_host_count();
     assert!(hosts > 150, "a large host fleet: {hosts}");
 
-    // ONE burst. Collect the sender of every broadcast request (oper=1).
+    // ONE burst. Collect the sender of every is-at reply (oper=2): the owners.
     let pcap = engine.red_tick(1, 60).expect("burst");
     let cap = pcapio::read(&pcap).unwrap();
     let bound: std::collections::HashSet<([u8; 6], [u8; 4])> = arp_frames(&cap)
         .iter()
-        .filter_map(|&(_, op, sha, spa)| (op == 1).then_some((sha, spa)))
+        .filter_map(|&(_, op, sha, spa)| (op == 2).then_some((sha, spa)))
         .collect();
 
     // Every capture host is bound in that single burst, no window to wait for.
@@ -788,19 +787,19 @@ fn every_capture_host_emits_its_request_each_burst() {
         let a: Ipv4Addr = h.ip.parse().expect("host ip parses");
         assert!(
             bound.contains(&(m, a.octets())),
-            "capture host {} / {} emits its own request in a single burst",
+            "capture host {} / {} answers its own is-at reply in a single burst",
             h.ip,
             h.mac
         );
     }
 }
 
-/// The zone gateway (engineering station) also binds itself: every asset
-/// resolves it (its MAC/IP otherwise land only in unicast replies), so it emits
-/// one broadcast request of its own per burst. Without this the station would be
-/// the one perpetually split asset.
+/// The zone station (.250) binds like every other asset: it leads control cell 0,
+/// so its first member resolves it and it answers with its own is-at reply.
+/// Without that the station (seen only as the requester polling its members) would
+/// be the one perpetually split asset.
 #[test]
-fn the_zone_gateway_emits_its_own_broadcast_request() {
+fn the_zone_station_binds_via_its_is_at_reply() {
     let dir = tempfile::tempdir().unwrap();
     let shm = dir.path().join("shm");
     let session = dir.path().join("session.json");
@@ -828,15 +827,15 @@ fn the_zone_gateway_emits_its_own_broadcast_request() {
     let pcap = engine.red_tick(1, 60).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
 
-    // The gateway is network+250 of each zone. It must appear as the SENDER of at
-    // least one broadcast request (sender protocol address ends in .250), so it
-    // binds MAC<->IP like every other asset rather than being seen only as the
-    // target everyone resolves.
-    let gateway_request = arp_frames(&cap)
+    // The station is network+250 of each zone. It must appear as the SENDER of at
+    // least one is-at reply (sender protocol address ends in .250), so it binds
+    // MAC<->IP like every other asset rather than being seen only as the requester
+    // polling its members.
+    let station_reply = arp_frames(&cap)
         .iter()
-        .any(|&(dst, op, _, spa)| op == 1 && dst == [0xff; 6] && spa[3] == 250);
+        .any(|&(_, op, _, spa)| op == 2 && spa[3] == 250);
     assert!(
-        gateway_request,
-        "the zone gateway (.250) emits its own broadcast ARP request so it binds"
+        station_reply,
+        "the zone station (.250) answers its own is-at reply so it binds"
     );
 }
