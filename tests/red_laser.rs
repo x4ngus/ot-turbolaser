@@ -204,6 +204,7 @@ fn sealed_session_never_cycles() {
         zone_name: "L1 ABB Basic Control Area 1".into(),
         purdue_level: 1,
         vendor: Some("ABB".into()),
+        ..Default::default()
     });
     sealed.sealed = true;
     sealed.save_atomic(&session).unwrap();
@@ -837,5 +838,150 @@ fn the_zone_station_binds_via_its_is_at_reply() {
     assert!(
         station_reply,
         "the zone station (.250) answers its own is-at reply so it binds"
+    );
+}
+
+/// The v0.3.2 content layer on the real wire: a sealed multi-level plant built
+/// the plan way (controllers + L3 ops zones, a shared DNS domain, then the bill
+/// of materials whose firewall and router carry real CVEs and whose hostnames are
+/// FQDNs), replayed with north-south conduit traffic on. tshark must dissect every
+/// frame (the firmware varbind, the FQDN DNS, the routed crossings) with none
+/// malformed; the DNS must carry the shared domain; and the ARP union gate must
+/// still hold (every ARP frame padded to 60 bytes, a broadcast request or a
+/// unicast reply). The new traffic is all non-ARP, so it adds nothing the sensor
+/// could mistake for a scan.
+#[test]
+fn north_south_and_fqdn_dns_dissect_and_keep_the_arp_gate() {
+    use ot_turbolaser::oui::OuiDb;
+    use ot_turbolaser::simulate::{devices, roles};
+    use ot_turbolaser::vuln::VulnDb;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    let dir = tempfile::tempdir().unwrap();
+    let shm = dir.path().join("shm");
+    let session = dir.path().join("session.json");
+
+    // Build a sealed plant the same way `plan --commit` does.
+    let mut s = Session::new(1337, 0);
+    let mut rng = ChaCha8Rng::seed_from_u64(1337);
+    let vuln = VulnDb::embedded().unwrap();
+    let params = devices::AllocParams {
+        max_subnets: 10,
+        max_devices: 200,
+        default_prefix: 24,
+    };
+    devices::fabricate(&mut s, &vuln, &params, 64, &mut rng);
+    devices::create_l3_zones(
+        &mut s,
+        &devices::AllocParams {
+            max_subnets: 16,
+            ..params
+        },
+        3,
+        &mut rng,
+    );
+    devices::assign_domains(
+        &mut s,
+        &[
+            "plant.corp.example".to_string(),
+            "dmz.corp.example".to_string(),
+        ],
+        1337,
+    );
+    devices::enrich_plant(&mut s, &vuln, &OuiDb::embedded(), 1337);
+    s.sealed = true;
+    s.save_atomic(&session).unwrap();
+
+    // The plant spans adjacent Purdue levels, so crossings exist; a zone firewall
+    // is CVE-bearing; some hostname is an FQDN under the shared domain.
+    assert!(
+        !roles::north_south_crossings(&s, s.seed, 2).is_empty(),
+        "a multi-level plant yields north-south crossings"
+    );
+    assert!(
+        s.devices
+            .iter()
+            .any(|d| d.asset_type.as_deref() == Some("Firewall") && !d.cves.is_empty()),
+        "a zone firewall carries a CVE"
+    );
+    assert!(
+        s.devices.iter().any(|d| d
+            .hostname
+            .as_deref()
+            .is_some_and(|h| h.contains(".plant.corp.example"))),
+        "a hostname is an FQDN under the shared domain"
+    );
+
+    let yaml = format!(
+        "iface: tl0
+mode: red_laser
+paths:
+  pool: {base}/pool
+  variants: {base}/variants
+  shm_dir: {shm}
+  status_file: {base}/status.json
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 5.0
+session:
+  path: {session}
+  seed: 1337
+north_south:
+  enabled: true
+  max_flows_per_pair: 2
+  cadence_runs: 1
+",
+        base = dir.path().display(),
+        shm = shm.display(),
+        session = session.display(),
+    );
+    let cfg_path = dir.path().join("replay.yaml");
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
+
+    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let pcap = engine.red_tick(0, 0).expect("identity burst");
+    let cap = pcapio::read(&pcap).unwrap();
+    assert!(!cap.packets.is_empty());
+
+    // The ARP union gate holds with the BOM, DNS, and north-south all on.
+    const BROADCAST: [u8; 6] = [0xff; 6];
+    let is_arp = |d: &[u8]| d.len() >= 42 && u16::from_be_bytes([d[12], d[13]]) == 0x0806;
+    let arp: Vec<&OwnedPacket> = cap.packets.iter().filter(|p| is_arp(&p.data)).collect();
+    assert!(!arp.is_empty(), "the burst still carries binding ARP");
+    for p in &arp {
+        assert!(p.data.len() >= 60, "ARP padded to 60 bytes, not a runt");
+        match u16::from_be_bytes([p.data[20], p.data[21]]) {
+            1 => assert_eq!(&p.data[0..6], &BROADCAST, "request is broadcast"),
+            2 => assert_ne!(&p.data[0..6], &BROADCAST, "reply is unicast"),
+            other => panic!("unexpected ARP opcode {other}"),
+        }
+    }
+
+    if !tshark_available() {
+        eprintln!("tshark not found; skipping dissector validation");
+        return;
+    }
+    let malformed = tshark(
+        &pcap,
+        &["-Y", "_ws.malformed", "-T", "fields", "-e", "frame.number"],
+    );
+    assert!(
+        malformed.trim().is_empty(),
+        "no malformed frames: {malformed}"
+    );
+    let names = tshark(&pcap, &["-Y", "dns", "-T", "fields", "-e", "dns.qry.name"]);
+    assert!(
+        names.contains("plant.corp.example"),
+        "DNS resolves the shared FQDN domain: {names:?}"
+    );
+    // The firewall SNMP identity carries the explicit firmware varbind OID.
+    let snmp = tshark(&pcap, &["-Y", "snmp", "-T", "fields", "-e", "snmp.name"]);
+    assert!(
+        snmp.contains("1.3.6.1.2.1.47.1.1.1.1.9"),
+        "SNMP carries the firmware-version OID: {snmp:?}"
     );
 }

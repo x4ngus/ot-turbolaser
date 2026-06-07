@@ -175,6 +175,7 @@ mod tests {
             zone_name: "Z".into(),
             purdue_level: 1,
             vendor: None,
+            ..Default::default()
         });
         for i in 1..=n {
             // Distinct, globally-administered MAC per host (as stable_mac yields).

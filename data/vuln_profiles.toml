@@ -16,8 +16,13 @@
 #   cves                     advisory-confirmed CVE ids for this model+firmware
 #   enip_*                   CIP Identity object numerics (enip profiles)
 #   enip_product_name        exact CIP ProductName when it differs from model
-#   sys_descr                SNMP sysDescr / LLDP system description (switch profiles)
-#   sys_object_id            SNMP sysObjectID.0 enterprise OID (switch profiles)
+#   sys_descr                SNMP sysDescr / LLDP system description (switch_snmp profiles)
+#   sys_object_id            SNMP sysObjectID.0 enterprise OID (switch_snmp profiles)
+#   firmware_oid             firmware-version OID bound to firmware in the SNMP response
+#                            (defaults to ENTITY-MIB entPhysicalFirmwareRev when unset)
+#   asset_class              BOM class this SNMP profile fills: Firewall | Router (a
+#                            zone's firewall/router then carries a real CVE; switch
+#                            profiles leave it unset). Firewalls/routers send no LLDP/CDP.
 #   modbus_*                 Modbus device-id object overrides (modbus profiles)
 
 [[profile]]
@@ -152,3 +157,45 @@ purdue_level = 1
 oui = "00:0E:8C"
 cves = ["CVE-2016-9159"]    # private-key/credential disclosure over port 102 (ICSA-16-348-05, S7-300/400)
 s7_order_number = "6ES7 414-3EM07-0AB0"
+
+# --- Zone-edge firewalls and routers (the conduit boundary). Same switch_snmp
+# carrier as managed switches (sysDescr + sysObjectID + an explicit firmware OID),
+# tagged with asset_class so the bill of materials gives a zone's firewall/router
+# a real CVE-bearing identity. Verify each CVE, firmware, and sysObjectID sub-id
+# against the current advisory before relying on it.
+
+[[profile]]
+vendor = "Fortinet"
+model = "FortiGate 100E"
+firmware = "6.0.4"
+protocol = "switch_snmp"
+asset_class = "Firewall"
+purdue_level = 3
+oui = "00:09:0F"
+cves = ["CVE-2018-13379"]   # FortiOS SSL VPN path-traversal credential disclosure, 6.0.0-6.0.4
+sys_descr = "FortiGate-100E v6.0.4,build0231,FortiOS"
+sys_object_id = "1.3.6.1.4.1.12356.101.1.1000"   # fnFortiGate model arc; verify per model
+
+[[profile]]
+vendor = "Palo Alto Networks"
+model = "PA-820 Next-Generation Firewall"
+firmware = "10.2.8"
+protocol = "switch_snmp"
+asset_class = "Firewall"
+purdue_level = 3
+oui = "00:1B:17"
+cves = ["CVE-2024-3400"]    # PAN-OS GlobalProtect command injection, fixed in 10.2.9-h1
+sys_descr = "Palo Alto Networks PA-820 series firewall, PAN-OS 10.2.8"
+sys_object_id = "1.3.6.1.4.1.25461.2.3.18"   # panPA product arc; verify per model
+
+[[profile]]
+vendor = "Cisco Systems"
+model = "ISR 4321 Integrated Services Router"
+firmware = "16.09.04"
+protocol = "switch_snmp"
+asset_class = "Router"
+purdue_level = 3
+oui = "00:00:0C"
+cves = ["CVE-2023-20198"]   # IOS XE web UI privilege escalation (cisco-sa-iosxe-webui-privesc-j22SaA4z)
+sys_descr = "Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 16.9.4, RELEASE SOFTWARE (fc2)"
+sys_object_id = "1.3.6.1.4.1.9.1.2069"   # ciscoProducts arc; verify the exact sub-id per model

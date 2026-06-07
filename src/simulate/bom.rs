@@ -12,6 +12,7 @@
 pub enum AssetType {
     Controller,
     Switch,
+    Router,
     Hmi,
     EngWorkstation,
     Historian,
@@ -25,6 +26,7 @@ impl AssetType {
         match self {
             AssetType::Controller => "Controller",
             AssetType::Switch => "Switch",
+            AssetType::Router => "Router",
             AssetType::Hmi => "HMI",
             AssetType::EngWorkstation => "EWS",
             AssetType::Historian => "Historian",
@@ -38,6 +40,7 @@ impl AssetType {
         match self {
             AssetType::Controller => "PLC",
             AssetType::Switch => "SW",
+            AssetType::Router => "RTR",
             AssetType::Hmi => "HMI",
             AssetType::EngWorkstation => "EWS",
             AssetType::Historian => "HIST",
@@ -46,11 +49,15 @@ impl AssetType {
         }
     }
 
-    /// CVE-bearing by construction? Only controllers and switches carry CVEs in
-    /// v0.3.1, so the vulnerable share stays ~the fabricated controller fleet.
-    /// (Flipping a class to CVE-bearing later is a one-line change here.)
+    /// CVE-bearing by construction? Controllers and switches carry CVEs from the
+    /// fabricated core; the zone-edge firewall and router carry them too (v0.3.2)
+    /// via an SNMP profile with an explicit firmware OID. HMIs, workstations,
+    /// historians, and servers stay identity-only.
     pub fn cve_bearing(self) -> bool {
-        matches!(self, AssetType::Controller | AssetType::Switch)
+        matches!(
+            self,
+            AssetType::Controller | AssetType::Switch | AssetType::Router | AssetType::Firewall
+        )
     }
 }
 
@@ -78,9 +85,11 @@ pub fn bom_for(purdue_level: u8) -> Vec<BomEntry> {
             (AssetType::EngWorkstation, 1),
             (AssetType::Historian, 1),
         ],
-        // L3 (operations / DCS): mostly servers + operator stations.
+        // L3 (operations / DCS): mostly servers + operator stations, with a
+        // zone-edge router to the levels below it.
         3 => vec![
             (AssetType::Firewall, 1),
+            (AssetType::Router, 1),
             (AssetType::Switch, 1),
             (AssetType::Historian, 1),
             (AssetType::Server, 4),
@@ -106,16 +115,19 @@ fn vendor_style(vendor: Option<&str>) -> (&'static str, &'static str) {
 /// A recognisable, deterministic OT hostname: `<AREA>-<nn>-<TOKEN>-<nn>` for a
 /// controller (e.g. `LINE-01-PLC-02`, `CELL-03-S7-01`), or `<TOKEN>-<nn>-<nn>`
 /// for infrastructure and servers (`HMI-01-01`, `FW-04`, `HIST-02`, `SRV-05-03`).
-/// No domain suffix yet (the FQDN domain is a future attribute). 1-based indices.
+/// When `domain` is set the name is a fully-qualified `<host>.<domain>` (e.g.
+/// `LINE-01-PLC-02.plant.corp.example`); several zones share one domain so the
+/// sensor reads a cross-zone site identity from the suffix. 1-based indices.
 pub fn hostname_for(
     vendor: Option<&str>,
     asset_type: AssetType,
     area_idx: usize,
     dev_idx: usize,
+    domain: Option<&str>,
 ) -> String {
     let area = area_idx + 1;
     let dev = dev_idx + 1;
-    match asset_type {
+    let host = match asset_type {
         AssetType::Controller => {
             let (prefix, token) = vendor_style(vendor);
             format!("{prefix}-{area:02}-{token}-{dev:02}")
@@ -124,6 +136,10 @@ pub fn hostname_for(
         AssetType::Firewall => format!("FW-{area:02}"),
         AssetType::Historian => format!("HIST-{area:02}"),
         other => format!("{}-{area:02}-{dev:02}", other.host_token()),
+    };
+    match domain {
+        Some(d) if !d.is_empty() => format!("{host}.{d}"),
+        _ => host,
     }
 }
 
@@ -154,14 +170,19 @@ mod tests {
     }
 
     #[test]
-    fn only_controllers_and_switches_are_cve_bearing() {
-        assert!(AssetType::Controller.cve_bearing());
-        assert!(AssetType::Switch.cve_bearing());
+    fn infrastructure_is_cve_bearing_hosts_are_not() {
+        for t in [
+            AssetType::Controller,
+            AssetType::Switch,
+            AssetType::Router,
+            AssetType::Firewall,
+        ] {
+            assert!(t.cve_bearing(), "{} carries CVEs", t.label());
+        }
         for t in [
             AssetType::Hmi,
             AssetType::EngWorkstation,
             AssetType::Historian,
-            AssetType::Firewall,
             AssetType::Server,
         ] {
             assert!(!t.cve_bearing(), "{} is identity-only", t.label());
@@ -170,20 +191,49 @@ mod tests {
 
     #[test]
     fn hostnames_follow_vendor_conventions() {
-        let rk = hostname_for(Some("Rockwell Automation"), AssetType::Controller, 0, 1);
+        let rk = hostname_for(
+            Some("Rockwell Automation"),
+            AssetType::Controller,
+            0,
+            1,
+            None,
+        );
         assert_eq!(rk, "LINE-01-PLC-02");
-        let sm = hostname_for(Some("Siemens AG"), AssetType::Controller, 2, 0);
+        let sm = hostname_for(Some("Siemens AG"), AssetType::Controller, 2, 0, None);
         assert_eq!(sm, "CELL-03-S7-01");
-        assert_eq!(hostname_for(None, AssetType::Firewall, 3, 0), "FW-04");
-        assert_eq!(hostname_for(None, AssetType::Historian, 1, 0), "HIST-02");
-        assert_eq!(hostname_for(None, AssetType::Hmi, 0, 0), "HMI-01-01");
-        assert_eq!(hostname_for(None, AssetType::Server, 4, 2), "SRV-05-03");
+        assert_eq!(hostname_for(None, AssetType::Firewall, 3, 0, None), "FW-04");
+        assert_eq!(
+            hostname_for(None, AssetType::Historian, 1, 0, None),
+            "HIST-02"
+        );
+        assert_eq!(hostname_for(None, AssetType::Hmi, 0, 0, None), "HMI-01-01");
+        assert_eq!(
+            hostname_for(None, AssetType::Server, 4, 2, None),
+            "SRV-05-03"
+        );
+    }
+
+    #[test]
+    fn a_domain_makes_the_name_an_fqdn() {
+        let fqdn = hostname_for(
+            Some("Rockwell Automation"),
+            AssetType::Controller,
+            0,
+            1,
+            Some("plant.corp.example"),
+        );
+        assert_eq!(fqdn, "LINE-01-PLC-02.plant.corp.example");
+        // An empty domain is treated as no domain (single-label).
+        assert_eq!(
+            hostname_for(None, AssetType::Firewall, 3, 0, Some("")),
+            "FW-04"
+        );
     }
 
     #[test]
     fn hostnames_are_deterministic() {
-        let a = hostname_for(Some("ABB"), AssetType::Controller, 1, 1);
-        let b = hostname_for(Some("ABB"), AssetType::Controller, 1, 1);
+        let a = hostname_for(Some("ABB"), AssetType::Controller, 1, 1, None);
+        let b = hostname_for(Some("ABB"), AssetType::Controller, 1, 1, None);
         assert_eq!(a, b);
         assert_eq!(a, "LINE-02-AC500-02");
     }
