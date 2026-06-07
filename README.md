@@ -5,108 +5,85 @@
 # ot-turbolaser
 
 A headless ICS/OT pcap replay appliance. It puts a believable industrial network
-on the wire, downrange to a passive monitoring sensor, on an isolated segment with
-no route to anything real. Use it to exercise protocol parsers and detections, or
-to build a baseline, without ever touching a production network.
+on the wire downrange to a passive monitoring sensor, all on an isolated segment
+with no route to anything real. Use it to exercise protocol parsers and detections, 
+or to practice building OT baselines, without ever touching a production network.
 
-It replays OT captures continuously with fresh but genuine-looking addresses and
-timing. In red laser mode it overlays a designed plant — Purdue-levelled zones of
-controllers, HMIs, engineering stations, servers, and zone-edge firewalls, each
+It replays OT pcaps continuously with fresh genuine-looking addresses and timing. 
+In red laser mode it overlays a simulated plant: Complete with Purdue-levelled zones 
+of controllers, HMIs, engineering stations, servers, and conduit firewalls, each
 with a real vendor MAC, a resolvable hostname, and (for the controllers) real
-CVEs. Every asset lands as one coherent record: MAC, IP, vendor, and name. These
-are not the assets you're looking for.
+CVEs.
 
 ## Safety
 
-This appliance must never bridge to a production or uplinked network. It is built
-to feed a passive sensor on an isolated segment with no route off the box. The
-network setup script refuses to attach the bridge to a physical NIC, and warns
-loudly. Read the warning. Do not override it on a live network.
+**This appliance must never bridge to a production or uplinked network**. 
+Turbolaser is built to feed a passive sensor on an isolated segment with no route 
+off the box. The network setup script refuses to attach the bridge to a physical NIC, 
+and warns loudly. Read the warning. Do not override it on a live network.
 
 ## How it works
 
-- The replay port sits on an isolated Linux bridge with no uplink.
-- tcpreplay sends each capture's original MAC addresses, and a plain bridge will
-  not forward that traffic to the sensor. So a port mirror is mandatory: the host
-  copies the replay port to the sensor's monitor port, which runs in promiscuous
-  mode. A tc (clsact/mirred) helper and an Open vSwitch helper are both provided;
-  tc is the default.
-- The replayed addresses are rewritten to a fresh internal network, but the
-  conversations are preserved: the same hosts keep talking to the same hosts, so
-  the sensor sees genuine-looking traffic. The mapping is stable for a session, so
-  a capture replays to the same addresses every run.
-- Payload-level device identity (Modbus unit id, EtherNet/IP and CIP identity,
-  S7comm SZL, DNP3 link addresses) is pre-baked offline by `reload` into variant
-  pcaps, never mutated in the hot path.
+- The replay port sits on an isolated Linux bridge with no uplink. tcpreplay
+  sends each capture's original MACs, so a port mirror copies the replay port to
+  the sensor's (promiscuous) monitor port. A `tc` (clsact/mirred) helper and an
+  Open vSwitch helper are provided.
+- Replayed addresses are rewritten to a fresh internal network, but conversations
+  are preserved (the same hosts keep talking), and the mapping is stable per
+  session, so a capture replays to the same addresses every run.
+- Device identity payloads (Modbus unit id, EtherNet/IP and CIP identity,
+  S7comm SZL, DNP3 link addresses) are pre-baked offline for simulated control
+  traffic and directional awareness.
 
 ## Red laser and green laser
 
-Two modes:
+Two modes are available:
 
-- **red_laser** is the adversarial mode. On top of the replayed chatter it
-  fabricates a believable ICS plant and feeds it to the sensor.
-- **green_laser** is the accurate mode. It replays a fixed, reproducible baseline
-  and derives zones read-only from the capture's real addresses and MAC OUIs, with
-  no fabrication. Green replays captures as-is, so the plan==wire and unionised-asset
-  guarantees below are red-laser properties; in green, the public-source backstop is
-  what keeps a routable address off the wire.
+- **red_laser** — adversarial. Fabricates a believable ICS plant for the sensor.
+- **green_laser** — accurate. It replays a captured baseline and derives zones
+  from the capture's real addresses and OUIs, with no fabrication.
 
-The former names `variety` and `baseline` still parse as aliases.
+The red-laser schematics:
 
-In red laser the fabricated plant includes:
-
-- Named zones grouped by subnet, following the Purdue/IEC-62443 model and the
-  dominant vendor OUI (for example "Siemens SIMATIC Basic Control Area 1"), with
-  managed switches as the conduits between zones.
-- Devices carrying real, advisory-sourced vendor/model/firmware identities that
-  trigger CVE matches, delivered as complete, established protocol sessions
-  (EtherNet/IP List Identity over UDP; Modbus 0x2B/0x0E and S7comm SZL over a full
-  TCP handshake, COTP and S7 setup, and a graceful teardown), each opened from a
-  fresh ephemeral client port so the sensor sees a distinct, attributable scan.
-  Every asset is bound MAC-to-IP by a solicited ARP reply (a per-zone
-  engineering station asks "who has ip?", the asset answers "ip is at mac"
-  unicast), padded to the 60-byte Ethernet minimum, which is the association a
-  passive sensor trusts (the source MAC of an L3 frame could be a router, so it
-  is not, and an unsolicited gratuitous broadcast it does not bind from);
-  switches add LLDP/CDP. The fabricated fleet spreads across every carrier
-  protocol, so none is left unrepresented. The remap also drops any frame whose
-  payload still carries an original address (NBNS/DHCP/DNS embed them), so a
-  remapped capture can
-  never surface a real host on the sensor.
-- Replayed capture traffic mapped into the matching vendor zone, so the
-  control-system subnets hold real device relationships, not just the synthetic
-  identities.
-- Rare external-threat injections: a real host is occasionally re-originated from
-  an external address with a desktop MAC, at most once a day.
-
-A persistent session ledger holds the plant, bounds it to at most 10 zones and
-2000 devices, keeps IP assignments unique, and survives restarts. It is the ground
-truth you can diff against the sensor.
+- **Zones** grouped by subnet on the Purdue/IEC-62443 model, named by dominant
+  vendor (e.g. "Siemens SIMATIC Basic Control Area 1"). Each control zone carries
+  a bill of materials — controllers, a managed switch, an HMI, an engineering
+  workstation, a zone-edge firewall at `.1` and L3 operations (DCS) zones add
+  historians, OPC/domain/application servers, and operator stations.
+- **Full identity per asset (MAC ↔ IP ↔ DNS)** each device binds MAC & IP from 
+  authoritative ARP `is-at` replies, carries a real vendor OUI, and resolves a
+  recognisable hostname (`LINE-01-PLC`, `CELL-02-S7`) via a per-zone DNS resolver.
+- **CVEs** inserted using controller firmware, advisory-sourced and delivered as
+  complete OT protocol sessions (EtherNet/IP, Modbus, S7comm, SNMP).
+- **Replayed capture traffic** is mapped into the matching vendor zone, so the
+  subnets hold real device relationships, not just made up identities. The
+  mapping drops any frame whose payload still embeds an original address, so a
+  real host never surfaces on the sensor.
+- **Rare external-threat injections**: a real host is promoted to an external
+  address, at most once a day. This is part of a suite of threat hunt scenarios
+  being continuously built into the application.
 
 ### Plan it, then fire
 
-Design the plant once and lock it in, so the sensor sees the same network every
+Design the simulation and lock it in, so the sensor sees the same networks every
 run:
 
-- `turbolaser plan` previews the fabricated zones, devices, and CVE assignments
-  without sending traffic.
-- `turbolaser plan --commit` fabricates the plant from your `session.seed` and
-  writes it to a sealed ledger. The daemon then replays that sealed plant
-  verbatim, with no drift between what you planned and what the sensor sees.
+- `turbolaser reset` clears the ledger for a fresh plant layout.
+- `turbolaser plan` previews the fabricated zones, devices, and CVE assignments.
+- `turbolaser plan --commit` fabricates the zones from your plan and writes it
+  to a ledger. Turbolaser then simulated those plant networks faithfully.
 - `turbolaser zones` shows the current map (green derives it from the captures;
   red reads the ledger).
-- `turbolaser reset` clears the ledger for a fresh plant.
 - `turbolaser pewpew` reports the wire footprint against the plan, the zone list,
   throughput, and the last threat injection (`status` is a deprecated alias).
 
-Pin `session.seed` in the config so plan and run agree. The plant, CVE profiles,
-external ranges, and zone affinity are all configurable; see the comments in
-`conf/replay.yaml`. The bundled OUI and vulnerable-profile databases can be
-overridden on disk.
+The plant, CVE profiles, external ranges, and zone affinity are all configurable; 
+see the comments in `conf/replay.yaml`. The bundled OUI and vulnerable-profile 
+databases can be overridden on disk to suit your testing scenario.
 
 ## Quickstart
 
-The appliance is a single static Rust binary; `bootstrap` installs the tcpreplay
+The appliance is a single static Rust binary. `bootstrap` installs the tcpreplay
 and iproute2 tools it drives.
 
 ```
@@ -117,8 +94,7 @@ just bootstrap        # build, install the binary, the unit, and a default confi
 just reload n=16
 ```
 
-For red laser, pin `session.seed` in `conf/replay.yaml`, then commit the plant so
-the sensor sees the same network every run:
+For red laser operations review/approve `conf/replay.yaml`, then commit the plan:
 
 ```
 turbolaser plan --config conf/replay.yaml --commit
@@ -203,33 +179,10 @@ Two common layouts:
 
 ## Running in a Proxmox LXC
 
-For the full walkthrough, see [docs/proxmox.md](docs/proxmox.md): a quick
-copy-and-paste path up front, then the complete end-to-end Dell R740 reference
-(CT template selection, host and guest network settings, and the host-side SPAN
-mirror).
-
-Use a privileged container (the daemon needs `CAP_NET_RAW` and `CAP_NET_ADMIN` for
-raw transmit and for `ip`/`tc`). Give the container two NICs on an isolated Linux
-bridge that has no uplink, mapped to the replay and sensor ports. A minimal Debian
-12 container idles well under 256 MB.
-
-```
-# on the appliance (container), as root:
-scripts/bootstrap.sh                 # tcpreplay + iproute2 (add --ovs for OVS)
-cargo build --release                # or copy in a prebuilt static binary
-sudo scripts/install.sh              # lays out /opt/replay, installs the unit
-# edit /opt/replay/conf/replay.yaml: iface, net.sensor_port, mode, session.seed
-turbolaser reload --in /opt/replay/pcaps/pool/<cap>.pcap \
-    --out-dir /opt/replay/pcaps/variants --count 16
-turbolaser plan --config /opt/replay/conf/replay.yaml --commit   # red laser: seal the plant
-turbolaser fire
-turbolaser pewpew
-```
+For the full walkthrough, see [docs/proxmox.md](docs/proxmox.md).
 
 ## Verifying on the sensor
 
-- After `turbolaser fire`, confirm the topology print and that net-setup refuses
-  a physical NIC if you point it at one.
 - With a capture replaying, run `tshark -i <sensor_port>` and confirm the sensor
   receives unicast frames, not just broadcast and multicast. Watch the mirror
   counters with `tc -s filter show dev <iface> egress`.
