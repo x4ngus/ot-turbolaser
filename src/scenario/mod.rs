@@ -66,10 +66,22 @@ mod tests {
 
     #[test]
     fn guard_matches_and_mismatches() {
-        assert!(guard_ledger_scenario(None, None).is_ok(), "generic vs generic");
+        assert!(
+            guard_ledger_scenario(None, None).is_ok(),
+            "generic vs generic"
+        );
         assert!(guard_ledger_scenario(Some("stuxnet"), Some("stuxnet")).is_ok());
-        assert!(guard_ledger_scenario(Some("stuxnet"), None).is_err(), "scenario vs generic");
-        assert!(guard_ledger_scenario(None, Some("triton")).is_err(), "generic vs scenario");
-        assert!(guard_ledger_scenario(Some("stuxnet"), Some("triton")).is_err(), "wrong scenario");
+        assert!(
+            guard_ledger_scenario(Some("stuxnet"), None).is_err(),
+            "scenario vs generic"
+        );
+        assert!(
+            guard_ledger_scenario(None, Some("triton")).is_err(),
+            "generic vs scenario"
+        );
+        assert!(
+            guard_ledger_scenario(Some("stuxnet"), Some("triton")).is_err(),
+            "wrong scenario"
+        );
     }
 }

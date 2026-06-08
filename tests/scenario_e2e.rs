@@ -102,7 +102,11 @@ enrich: true
     // The plant is pinned and sealed with the scenario tag.
     assert_eq!(engine.ledger().scenario.as_deref(), Some("teststx"));
     assert!(
-        engine.ledger().devices.iter().any(|d| d.ip == "10.20.10.11"),
+        engine
+            .ledger()
+            .devices
+            .iter()
+            .any(|d| d.ip == "10.20.10.11"),
         "the S7 CPU is pinned"
     );
 
@@ -152,7 +156,10 @@ session:
         &pack.join("plant.yaml"),
         "zones:\n  - { cidr: 10.20.10.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.20.10.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP', ip: 10.20.10.11 }\n",
     );
-    write(&pack.join("playbook.yaml"), "phases:\n  - id: x\n    events: []\n");
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: x\n    events: []\n",
+    );
     write(&pack.join("profiles.toml"), "");
 
     // Build and persist the scenario plant.
@@ -186,9 +193,20 @@ fn all_shipped_packs_are_internally_consistent() {
         let spec = plant::PlantSpec::load(&t.pack_dir.join(&t.plant))
             .unwrap_or_else(|e| panic!("{name} plant: {e}"));
         let vuln = VulnDb::load_overlay(&t.pack_dir.join(&t.profiles));
-        let s = plant::build_sealed_session(&spec, &vuln, &OuiDb::embedded(), 1337, 0, name, &cfg.dns.domains)
-            .unwrap_or_else(|e| panic!("{name} plant build: {e}"));
-        assert!(s.is_sealed() && s.device_count() > 0, "{name} pins a sealed plant");
+        let s = plant::build_sealed_session(
+            &spec,
+            &vuln,
+            &OuiDb::embedded(),
+            1337,
+            0,
+            name,
+            &cfg.dns.domains,
+        )
+        .unwrap_or_else(|e| panic!("{name} plant build: {e}"));
+        assert!(
+            s.is_sealed() && s.device_count() > 0,
+            "{name} pins a sealed plant"
+        );
         assert_eq!(s.scenario.as_deref(), Some(name));
 
         // Every playbook event that names an explicit ip must hit a pinned device.
@@ -212,7 +230,11 @@ fn all_shipped_packs_are_internally_consistent() {
         for n in 0..40u64 {
             frames.extend(eng.phase_frames(&s, &vuln, n));
         }
-        let has = |needle: &[u8]| frames.iter().any(|f| f.windows(needle.len()).any(|w| w == needle));
+        let has = |needle: &[u8]| {
+            frames
+                .iter()
+                .any(|f| f.windows(needle.len()).any(|w| w == needle))
+        };
         let (label, signature): (&str, &[u8]) = match name {
             "stuxnet" => ("S7 PLC-STOP", b"P_PROGRAM"),
             "triton" => ("TriStation implant", b"imain"), // chunked into 6-byte download packets
@@ -220,6 +242,9 @@ fn all_shipped_packs_are_internally_consistent() {
             "ukraine2015" => ("KillDisk share write", b"ADMIN$"),
             other => panic!("unexpected pack {other}"),
         };
-        assert!(has(signature), "{name}: {label} signature not found on the wire");
+        assert!(
+            has(signature),
+            "{name}: {label} signature not found on the wire"
+        );
     }
 }

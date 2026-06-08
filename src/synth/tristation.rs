@@ -120,7 +120,10 @@ pub fn program_download(
     };
     let chunk = chunk.max(1);
     let mut frames = vec![
-        l.request(&ts_message(TS_ALLOCATE_PROGRAM, &(payload.len() as u32).to_le_bytes())),
+        l.request(&ts_message(
+            TS_ALLOCATE_PROGRAM,
+            &(payload.len() as u32).to_le_bytes(),
+        )),
         l.reply(&ts_message(TS_ALLOCATE_RESP, &[0x00])),
     ];
     for (i, c) in payload.chunks(chunk).enumerate() {

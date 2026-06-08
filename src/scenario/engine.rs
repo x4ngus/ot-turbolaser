@@ -94,7 +94,12 @@ impl ScenarioEngine {
         // sequence spreads across successive bursts instead of one microburst.
         while self.event_cursor < events_len {
             let ev = self.current_phase().events[self.event_cursor].clone();
-            let ev_frames = self.render_event(&ev, ledger, vuln, nonce.wrapping_add(self.event_cursor as u64));
+            let ev_frames = self.render_event(
+                &ev,
+                ledger,
+                vuln,
+                nonce.wrapping_add(self.event_cursor as u64),
+            );
             if !frames.is_empty() && frames.len() + ev_frames.len() > self.max_frames_per_burst {
                 break;
             }
@@ -123,7 +128,13 @@ impl ScenarioEngine {
     /// Render one event to frames, resolving its target against the plant. An
     /// event whose target cannot be resolved is skipped (returns no frames), so a
     /// misauthored playbook degrades rather than panics.
-    fn render_event(&self, ev: &Event, ledger: &Session, vuln: &VulnDb, nonce: u64) -> Vec<Vec<u8>> {
+    fn render_event(
+        &self,
+        ev: &Event,
+        ledger: &Session,
+        vuln: &VulnDb,
+        nonce: u64,
+    ) -> Vec<Vec<u8>> {
         let port = 49152 + (nonce % 16384) as u16;
         // Most actions run as the zone engineering station against the target
         // device; `on_target` resolves both endpoints once so each arm is just
@@ -138,56 +149,113 @@ impl ScenarioEngine {
                 let (maj, min) = parse_version(&dev.firmware);
                 s7_szl::exchange(cmac, dmac, cip, dip, port, &order, maj, min)
             }),
-            EmitKind::S7ProgramDownload => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                let block = ev.block_id.clone().unwrap_or_else(|| "_0800001P".to_string());
-                let payload = payload_bytes(ev.payload_hex.as_deref(), b"\x70\x70\x01\x02\x03\x04");
-                s7_control::program_download(cmac, dmac, cip, dip, port, &block, &payload)
-            }),
+            EmitKind::S7ProgramDownload => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    let block = ev
+                        .block_id
+                        .clone()
+                        .unwrap_or_else(|| "_0800001P".to_string());
+                    let payload =
+                        payload_bytes(ev.payload_hex.as_deref(), b"\x70\x70\x01\x02\x03\x04");
+                    s7_control::program_download(cmac, dmac, cip, dip, port, &block, &payload)
+                })
+            }
             EmitKind::S7Write => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
                 s7_control::write_db_word(
-                    cmac, dmac, cip, dip, port,
-                    ev.db.unwrap_or(1), ev.offset.unwrap_or(0), ev.value.unwrap_or(0),
+                    cmac,
+                    dmac,
+                    cip,
+                    dip,
+                    port,
+                    ev.db.unwrap_or(1),
+                    ev.offset.unwrap_or(0),
+                    ev.value.unwrap_or(0),
                 )
             }),
             EmitKind::S7Stop => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
                 s7_control::plc_stop(cmac, dmac, cip, dip, port)
             }),
-            EmitKind::ModbusWrite => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                modbus_write::write_single_register(
-                    cmac, dmac, cip, dip, port,
-                    ev.unit.unwrap_or(1), ev.register.unwrap_or(0), ev.value.unwrap_or(0),
-                )
-            }),
-            EmitKind::TristationStatus => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                tristation::get_cp_status(cmac, dmac, cip, dip, port)
-            }),
-            EmitKind::TristationDownload => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                let payload = payload_bytes(ev.payload_hex.as_deref(), b"imain.bin\x00inject.bin");
-                tristation::program_download(cmac, dmac, cip, dip, port, &payload, ev.chunk.unwrap_or(8))
-            }),
-            EmitKind::Iec104Interrogation => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                iec104::interrogation(cmac, dmac, cip, dip, port, ev.common_addr.unwrap_or(1))
-            }),
-            EmitKind::Iec104Command => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                iec104::single_command(
-                    cmac, dmac, cip, dip, port,
-                    ev.common_addr.unwrap_or(1), ev.ioa.unwrap_or(1), ev.close.unwrap_or(false),
-                )
-            }),
+            EmitKind::ModbusWrite => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    modbus_write::write_single_register(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        ev.unit.unwrap_or(1),
+                        ev.register.unwrap_or(0),
+                        ev.value.unwrap_or(0),
+                    )
+                })
+            }
+            EmitKind::TristationStatus => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    tristation::get_cp_status(cmac, dmac, cip, dip, port)
+                })
+            }
+            EmitKind::TristationDownload => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    let payload =
+                        payload_bytes(ev.payload_hex.as_deref(), b"imain.bin\x00inject.bin");
+                    tristation::program_download(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        &payload,
+                        ev.chunk.unwrap_or(8),
+                    )
+                })
+            }
+            EmitKind::Iec104Interrogation => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    iec104::interrogation(cmac, dmac, cip, dip, port, ev.common_addr.unwrap_or(1))
+                })
+            }
+            EmitKind::Iec104Command => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    iec104::single_command(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        ev.common_addr.unwrap_or(1),
+                        ev.ioa.unwrap_or(1),
+                        ev.close.unwrap_or(false),
+                    )
+                })
+            }
             EmitKind::Wiper => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                let share = ev.share.clone().unwrap_or_else(|| format!("\\\\{dip}\\ADMIN$\\update.dll"));
+                let share = ev
+                    .share
+                    .clone()
+                    .unwrap_or_else(|| format!("\\\\{dip}\\ADMIN$\\update.dll"));
                 ioc::smb_share_write(cmac, dmac, cip, dip, port, &share)
             }),
-            EmitKind::MoxaBrick => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
-                let fw = payload_bytes(ev.payload_hex.as_deref(), b"\xde\xad\xbe\xef");
-                ioc::moxa_brick(cmac, dmac, cip, dip, port, &fw)
-            }),
-            EmitKind::RemoteAccess => self.on_target(ledger, &ev.target, |dev, _cip, _cmac, hip, hmac| {
-                // External actor -> the host, forwarded by the zone gateway; the
-                // station source is unused here.
-                let gw = self.gateway_mac(ledger, &dev.subnet_cidr);
-                ioc::remote_access(gw, self.external_ip(), hmac, hip, port, ev.port.unwrap_or(5938))
-            }),
+            EmitKind::MoxaBrick => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    let fw = payload_bytes(ev.payload_hex.as_deref(), b"\xde\xad\xbe\xef");
+                    ioc::moxa_brick(cmac, dmac, cip, dip, port, &fw)
+                })
+            }
+            EmitKind::RemoteAccess => {
+                self.on_target(ledger, &ev.target, |dev, _cip, _cmac, hip, hmac| {
+                    // External actor -> the host, forwarded by the zone gateway; the
+                    // station source is unused here.
+                    let gw = self.gateway_mac(ledger, &dev.subnet_cidr);
+                    ioc::remote_access(
+                        gw,
+                        self.external_ip(),
+                        hmac,
+                        hip,
+                        port,
+                        ev.port.unwrap_or(5938),
+                    )
+                })
+            }
             EmitKind::C2Beacon => {
                 // The infected host is the target, else the first device.
                 let host = resolve(ledger, &ev.target).or_else(|| ledger.devices.first());
@@ -336,7 +404,11 @@ fn payload_bytes(hex: Option<&str>, default: &[u8]) -> Vec<u8> {
     if digits.len() < 2 {
         return default.to_vec();
     }
-    digits.chunks(2).filter(|c| c.len() == 2).map(|c| c[0] << 4 | c[1]).collect()
+    digits
+        .chunks(2)
+        .filter(|c| c.len() == 2)
+        .map(|c| c[0] << 4 | c[1])
+        .collect()
 }
 
 #[cfg(test)]
@@ -409,7 +481,9 @@ mod tests {
         // The rogue value 1410 is on the wire, sourced from the .250 station.
         let value_present = frames.iter().any(|f| {
             let l = crate::proto::frame::parse_layout(f).unwrap();
-            f[l.payload..l.end].windows(2).any(|w| w == 1410u16.to_be_bytes())
+            f[l.payload..l.end]
+                .windows(2)
+                .any(|w| w == 1410u16.to_be_bytes())
         });
         assert!(value_present, "rogue setpoint 1410 emitted");
     }
@@ -439,7 +513,10 @@ mod tests {
         let mut e = engine(
             "phases:\n  - id: x\n    events:\n      - { emit: s7_stop, target: { ip: 10.99.99.99 } }\n",
         );
-        assert!(e.phase_frames(&led, &vuln, 0).is_empty(), "no frames, no panic");
+        assert!(
+            e.phase_frames(&led, &vuln, 0).is_empty(),
+            "no frames, no panic"
+        );
     }
 
     #[test]

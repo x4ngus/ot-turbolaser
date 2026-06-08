@@ -40,7 +40,15 @@ pub fn c2_beacon(
     qid: u16,
 ) -> Vec<Vec<u8>> {
     let mut frames = vec![
-        dns::query(host_mac, resolver_mac, host_ip, resolver_ip, client_port, qid, c2.domain),
+        dns::query(
+            host_mac,
+            resolver_mac,
+            host_ip,
+            resolver_ip,
+            client_port,
+            qid,
+            c2.domain,
+        ),
         dns::response(
             resolver_mac,
             host_mac,
@@ -61,7 +69,13 @@ pub fn c2_beacon(
         c2.port,
     );
     s.open();
-    s.client_says(format!("GET /ping HTTP/1.1\r\nHost: {}\r\nUser-Agent: \r\n\r\n", c2.domain).as_bytes());
+    s.client_says(
+        format!(
+            "GET /ping HTTP/1.1\r\nHost: {}\r\nUser-Agent: \r\n\r\n",
+            c2.domain
+        )
+        .as_bytes(),
+    );
     s.server_says(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
     s.close();
     frames.extend(s.into_frames());
@@ -107,7 +121,14 @@ pub fn smb_share_write(
     client_port: u16,
     share: &str,
 ) -> Vec<Vec<u8>> {
-    let mut s = TcpSession::new(client_mac, server_mac, client_ip, server_ip, client_port, 445);
+    let mut s = TcpSession::new(
+        client_mac,
+        server_mac,
+        client_ip,
+        server_ip,
+        client_port,
+        445,
+    );
     s.open();
     s.client_says(&smb2_write(share));
     s.server_says(&smb2_write_response(share.len() as u32));
@@ -231,7 +252,9 @@ mod tests {
     fn payload_contains(frames: &[Vec<u8>], needle: &[u8]) -> bool {
         frames.iter().any(|f| {
             let l = parse_layout(f).unwrap();
-            f[l.payload..l.end].windows(needle.len()).any(|w| w == needle)
+            f[l.payload..l.end]
+                .windows(needle.len())
+                .any(|w| w == needle)
         })
     }
 
@@ -254,7 +277,10 @@ mod tests {
         );
         clean(&frames);
         // The domain rides both the DNS query and the HTTP Host header.
-        assert!(payload_contains(&frames, b"mypremierfutbol"), "domain on wire");
+        assert!(
+            payload_contains(&frames, b"mypremierfutbol"),
+            "domain on wire"
+        );
         // The C2 address is the destination of the TCP beacon.
         let to_c2 = frames.iter().any(|f| {
             let l = parse_layout(f).unwrap();

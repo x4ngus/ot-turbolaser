@@ -928,7 +928,9 @@ fn deep_merge(base: &mut Value, overlay: Value) {
             if let Some(map) = base.as_mapping_mut() {
                 for (k, ov) in over {
                     match map.entry(k) {
-                        serde_norway::mapping::Entry::Occupied(mut e) => deep_merge(e.get_mut(), ov),
+                        serde_norway::mapping::Entry::Occupied(mut e) => {
+                            deep_merge(e.get_mut(), ov)
+                        }
                         serde_norway::mapping::Entry::Vacant(e) => {
                             e.insert(ov);
                         }
@@ -1236,7 +1238,10 @@ target:
         .unwrap();
 
         let cfg = load_with_scenario(&base, Some("demo")).expect("overlay loads");
-        assert_eq!(cfg.synthesis.target_devices, 8, "scenario overrode the base");
+        assert_eq!(
+            cfg.synthesis.target_devices, 8,
+            "scenario overrode the base"
+        );
         let t = cfg.target.expect("target present after overlay");
         assert_eq!(t.name, "demo");
         assert_eq!(t.actors.c2_domains, vec!["evil.example".to_string()]);
@@ -1248,7 +1253,10 @@ target:
 
         // No scenario is byte-identical to load(): plain red laser, no target.
         let plain = load_with_scenario(&base, None).expect("plain load");
-        assert!(plain.target.is_none(), "no scenario means no target overlay");
+        assert!(
+            plain.target.is_none(),
+            "no scenario means no target overlay"
+        );
     }
 
     #[test]

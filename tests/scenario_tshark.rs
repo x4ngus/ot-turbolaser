@@ -110,7 +110,10 @@ fn scenario_attack_frames_dissect_in_tshark() {
             tshark(&p, &["-q", "-z", "io,phs"])
         );
         let m = malformed(&p);
-        assert!(m.trim().is_empty(), "{name}: tshark found malformed frames: {m}");
+        assert!(
+            m.trim().is_empty(),
+            "{name}: tshark found malformed frames: {m}"
+        );
     }
 
     // Stuxnet: S7comm program-download / write / stop, on established sessions.
@@ -120,7 +123,10 @@ fn scenario_attack_frames_dissect_in_tshark() {
         dissects(&p, "tcp.flags.syn==1 && tcp.flags.ack==0"),
         "Stuxnet S7 actions open a TCP handshake"
     );
-    assert!(dissects(&p, "cotp.type==0x0e"), "S7 COTP connection request present");
+    assert!(
+        dissects(&p, "cotp.type==0x0e"),
+        "S7 COTP connection request present"
+    );
 
     // Oldsmar: Modbus write of the NaOH dose setpoint (function code 6).
     let p = dir.path().join("oldsmar.pcap");
@@ -133,11 +139,17 @@ fn scenario_attack_frames_dissect_in_tshark() {
     // Triton: TriStation is proprietary (no Wireshark dissector); a sensor keys
     // it by port, so verify the UDP/1502 transport is present and clean.
     let p = dir.path().join("triton.pcap");
-    assert!(dissects(&p, "udp.port==1502"), "Triton rides TriStation UDP/1502");
+    assert!(
+        dissects(&p, "udp.port==1502"),
+        "Triton rides TriStation UDP/1502"
+    );
 
     // Ukraine: IEC 60870-5-104 control + the real BlackEnergy C2 on the wire.
     let p = dir.path().join("ukraine2015.pcap");
-    assert!(dissects(&p, "104apci"), "Ukraine IEC 60870-5-104 must dissect");
+    assert!(
+        dissects(&p, "104apci"),
+        "Ukraine IEC 60870-5-104 must dissect"
+    );
     assert!(
         dissects(&p, "ip.addr==5.149.254.114"),
         "the real published BlackEnergy3 C2 address reaches the wire"

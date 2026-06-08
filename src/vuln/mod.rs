@@ -314,10 +314,18 @@ cves = ["CVE-2016-9159"]
         let db = VulnDb::load_overlay(&pack);
         // The new model is present, the embedded infra profiles survive, and the
         // overridden model now carries the pack firmware.
-        assert!(db.by_model("Triconex Tricon MP3008").is_some(), "pack model added");
-        assert!(db.by_model("FortiGate 100E").is_some(), "embedded infra kept");
+        assert!(
+            db.by_model("Triconex Tricon MP3008").is_some(),
+            "pack model added"
+        );
+        assert!(
+            db.by_model("FortiGate 100E").is_some(),
+            "embedded infra kept"
+        );
         assert_eq!(
-            db.by_model("SIMATIC S7-300 CPU 315-2 PN/DP").unwrap().firmware,
+            db.by_model("SIMATIC S7-300 CPU 315-2 PN/DP")
+                .unwrap()
+                .firmware,
             "V3.X.OVERRIDE",
             "pack overrides the embedded model"
         );

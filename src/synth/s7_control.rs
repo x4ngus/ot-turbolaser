@@ -16,9 +16,7 @@
 
 use std::net::Ipv4Addr;
 
-use super::s7_common::{
-    cotp_cc, cotp_cr, s7_setup_request, s7_setup_response, tpkt_cotp, S7_PORT,
-};
+use super::s7_common::{cotp_cc, cotp_cr, s7_setup_request, s7_setup_response, tpkt_cotp, S7_PORT};
 use super::session::TcpSession;
 
 const ROSCTR_JOB: u8 = 0x01;
@@ -115,7 +113,7 @@ fn write_db_word_request(db: u16, byte_offset: u16, value: u16) -> Vec<u8> {
         0x01, // number of elements: 1
         (db >> 8) as u8,
         (db & 0xff) as u8, // DB number
-        0x84, // area: data block (DB)
+        0x84,              // area: data block (DB)
         ((bit_addr >> 16) & 0xff) as u8,
         ((bit_addr >> 8) & 0xff) as u8,
         (bit_addr & 0xff) as u8,
@@ -138,7 +136,17 @@ fn write_var_response() -> Vec<u8> {
 
 fn request_download(block_id: &str) -> Vec<u8> {
     let desc = block_descriptor(block_id);
-    let mut param = vec![FN_REQUEST_DOWNLOAD, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let mut param = vec![
+        FN_REQUEST_DOWNLOAD,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ];
     param.push(desc.len() as u8);
     param.extend_from_slice(&desc);
     param.push(0x01); // length-string marker
@@ -153,7 +161,17 @@ fn request_download_ack() -> Vec<u8> {
 
 fn download_block(block_id: &str, mc7: &[u8]) -> Vec<u8> {
     let desc = block_descriptor(block_id);
-    let mut param = vec![FN_DOWNLOAD_BLOCK, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let mut param = vec![
+        FN_DOWNLOAD_BLOCK,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ];
     param.push(desc.len() as u8);
     param.extend_from_slice(&desc);
     s7_job(&param, mc7)
@@ -166,7 +184,17 @@ fn download_block_ack(mc7: &[u8]) -> Vec<u8> {
 
 fn download_ended(block_id: &str) -> Vec<u8> {
     let desc = block_descriptor(block_id);
-    let mut param = vec![FN_DOWNLOAD_ENDED, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let mut param = vec![
+        FN_DOWNLOAD_ENDED,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    ];
     param.push(desc.len() as u8);
     param.extend_from_slice(&desc);
     s7_job(&param, &[])
@@ -214,7 +242,10 @@ pub fn write_db_word(
         client_ip,
         plc_ip,
         client_port,
-        &[(write_db_word_request(db, byte_offset, value), write_var_response())],
+        &[(
+            write_db_word_request(db, byte_offset, value),
+            write_var_response(),
+        )],
     )
 }
 
@@ -287,7 +318,10 @@ mod tests {
         let (cm, pm, ci, pi) = endpoints();
         let frames = plc_stop(cm, pm, ci, pi, 50001);
         assert_session_clean(&frames);
-        assert!(carries_function(&frames, FN_PLC_STOP), "0x29 PLC stop present");
+        assert!(
+            carries_function(&frames, FN_PLC_STOP),
+            "0x29 PLC stop present"
+        );
     }
 
     #[test]
@@ -299,7 +333,9 @@ mod tests {
         assert!(carries_function(&frames, FN_WRITE_VAR), "0x05 write var");
         let value_present = frames.iter().any(|f| {
             let l = parse_layout(f).unwrap();
-            f[l.payload..l.end].windows(2).any(|w| w == 1410u16.to_be_bytes())
+            f[l.payload..l.end]
+                .windows(2)
+                .any(|w| w == 1410u16.to_be_bytes())
         });
         assert!(value_present, "the rogue value 1410 is on the wire");
     }

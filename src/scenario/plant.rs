@@ -98,7 +98,13 @@ impl PlantSpec {
 /// A believable, stable MAC for a pinned device: a vendor OUI (the profile's, the
 /// spec vendor's via the OUI DB, or the IT pool) with per-IP low bytes -- the
 /// same construction the bill of materials uses, so the plant reads consistently.
-fn pinned_mac(oui_db: &OuiDb, vendor: &str, profile_oui: Option<[u8; 3]>, seed: u64, ip: Ipv4Addr) -> [u8; 6] {
+fn pinned_mac(
+    oui_db: &OuiDb,
+    vendor: &str,
+    profile_oui: Option<[u8; 3]>,
+    seed: u64,
+    ip: Ipv4Addr,
+) -> [u8; 6] {
     let salt = u64::from(u32::from(ip));
     let low = l3::stable_mac(seed, u32::from(ip));
     let prefix = profile_oui
@@ -196,7 +202,9 @@ pub fn build_sealed_session(
                 d.protocol.clone().unwrap_or_else(|| "none".to_string()),
                 Vec::new(),
                 None,
-                d.asset_type.clone().unwrap_or_else(|| "Controller".to_string()),
+                d.asset_type
+                    .clone()
+                    .unwrap_or_else(|| "Controller".to_string()),
             ),
         };
         let rec = DeviceRecord {
@@ -282,23 +290,48 @@ enrich: true
         let spec = PlantSpec::parse(spec_yaml()).expect("spec parses");
         let vuln = VulnDb::embedded().unwrap();
         let oui = OuiDb::embedded();
-        let s = build_sealed_session(&spec, &vuln, &oui, 1337, 100, "stuxnet", &["plant.example".into()])
-            .expect("builds");
+        let s = build_sealed_session(
+            &spec,
+            &vuln,
+            &oui,
+            1337,
+            100,
+            "stuxnet",
+            &["plant.example".into()],
+        )
+        .expect("builds");
 
         assert!(s.is_sealed(), "scenario ledger is sealed");
         assert_eq!(s.scenario.as_deref(), Some("stuxnet"));
         // The S7-300 is pinned at its IP with the profile's CVE.
-        let cpu = s.devices.iter().find(|d| d.ip == "10.20.10.11").expect("s7 pinned");
+        let cpu = s
+            .devices
+            .iter()
+            .find(|d| d.ip == "10.20.10.11")
+            .expect("s7 pinned");
         assert_eq!(cpu.model, "SIMATIC S7-300 CPU 315-2 PN/DP");
-        assert!(cpu.cves.iter().any(|c| c == "CVE-2016-9159"), "carries the CVE");
-        assert_eq!(cpu.hostname.as_deref(), Some("A87-CPU"), "explicit hostname kept");
+        assert!(
+            cpu.cves.iter().any(|c| c == "CVE-2016-9159"),
+            "carries the CVE"
+        );
+        assert_eq!(
+            cpu.hostname.as_deref(),
+            Some("A87-CPU"),
+            "explicit hostname kept"
+        );
         // The identity-only SIS is pinned with no CVE.
-        let sis = s.devices.iter().find(|d| d.ip == "10.20.10.20").expect("sis pinned");
+        let sis = s
+            .devices
+            .iter()
+            .find(|d| d.ip == "10.20.10.20")
+            .expect("sis pinned");
         assert_eq!(sis.asset_type.as_deref(), Some("SIS"));
         assert!(sis.cves.is_empty(), "identity-only device has no CVE");
         // enrich added the zone's firewall at .1.
         assert!(
-            s.devices.iter().any(|d| d.ip == "10.20.10.1" && d.asset_type.as_deref() == Some("Firewall")),
+            s.devices
+                .iter()
+                .any(|d| d.ip == "10.20.10.1" && d.asset_type.as_deref() == Some("Firewall")),
             "enrich added the BOM firewall"
         );
     }

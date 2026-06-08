@@ -100,9 +100,21 @@ pub fn single_command(
         IEC104_PORT,
     );
     start_link(&mut s);
-    s.client_says(&i_frame(0, 0, &asdu(TID_SINGLE_CMD, COT_ACT, common_addr, ioa, &[sco])));
-    s.server_says(&i_frame(0, 1, &asdu(TID_SINGLE_CMD, COT_ACTCON, common_addr, ioa, &[sco])));
-    s.server_says(&i_frame(1, 1, &asdu(TID_SINGLE_CMD, COT_ACTTERM, common_addr, ioa, &[sco])));
+    s.client_says(&i_frame(
+        0,
+        0,
+        &asdu(TID_SINGLE_CMD, COT_ACT, common_addr, ioa, &[sco]),
+    ));
+    s.server_says(&i_frame(
+        0,
+        1,
+        &asdu(TID_SINGLE_CMD, COT_ACTCON, common_addr, ioa, &[sco]),
+    ));
+    s.server_says(&i_frame(
+        1,
+        1,
+        &asdu(TID_SINGLE_CMD, COT_ACTTERM, common_addr, ioa, &[sco]),
+    ));
     s.client_says(&s_frame(2));
     s.close();
     s.into_frames()
@@ -131,8 +143,16 @@ pub fn double_command(
         IEC104_PORT,
     );
     start_link(&mut s);
-    s.client_says(&i_frame(0, 0, &asdu(TID_DOUBLE_CMD, COT_ACT, common_addr, ioa, &[dco])));
-    s.server_says(&i_frame(0, 1, &asdu(TID_DOUBLE_CMD, COT_ACTCON, common_addr, ioa, &[dco])));
+    s.client_says(&i_frame(
+        0,
+        0,
+        &asdu(TID_DOUBLE_CMD, COT_ACT, common_addr, ioa, &[dco]),
+    ));
+    s.server_says(&i_frame(
+        0,
+        1,
+        &asdu(TID_DOUBLE_CMD, COT_ACTCON, common_addr, ioa, &[dco]),
+    ));
     s.client_says(&s_frame(1));
     s.close();
     s.into_frames()
@@ -166,12 +186,24 @@ pub fn interrogation(
     s.server_says(&i_frame(
         0,
         1,
-        &asdu(TID_INTERROGATION, COT_ACTCON, common_addr, 0, &[QOI_STATION]),
+        &asdu(
+            TID_INTERROGATION,
+            COT_ACTCON,
+            common_addr,
+            0,
+            &[QOI_STATION],
+        ),
     ));
     s.server_says(&i_frame(
         1,
         1,
-        &asdu(TID_INTERROGATION, COT_ACTTERM, common_addr, 0, &[QOI_STATION]),
+        &asdu(
+            TID_INTERROGATION,
+            COT_ACTTERM,
+            common_addr,
+            0,
+            &[QOI_STATION],
+        ),
     ));
     s.client_says(&s_frame(2));
     s.close();
@@ -220,7 +252,11 @@ mod tests {
         // STARTDT act is the first client data segment after the handshake.
         let l = parse_layout(&frames[3]).unwrap();
         let pdu = &frames[3][l.payload..l.end];
-        assert_eq!(pdu, &[0x68, 0x04, STARTDT_ACT, 0x00, 0x00, 0x00], "STARTDT act");
+        assert_eq!(
+            pdu,
+            &[0x68, 0x04, STARTDT_ACT, 0x00, 0x00, 0x00],
+            "STARTDT act"
+        );
         assert!(carries_type(&frames, TID_SINGLE_CMD), "C_SC_NA_1 present");
     }
 
@@ -229,7 +265,10 @@ mod tests {
         let (cm, rm, ci, ri) = endpoints();
         let frames = interrogation(cm, rm, ci, ri, 50011, 1);
         assert_clean(&frames);
-        assert!(carries_type(&frames, TID_INTERROGATION), "C_IC_NA_1 present");
+        assert!(
+            carries_type(&frames, TID_INTERROGATION),
+            "C_IC_NA_1 present"
+        );
         let qoi_present = frames.iter().any(|f| {
             let l = parse_layout(f).unwrap();
             let pdu = &f[l.payload..l.end];
