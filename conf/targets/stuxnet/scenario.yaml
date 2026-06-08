@@ -1,0 +1,33 @@
+# Stuxnet -- Siemens S7 / Natanz uranium-enrichment sabotage (2010).
+#
+# Overlays red laser: this file deep-merges over conf/replay.yaml. Real published
+# indicators are emitted (ioc_fidelity: real) only onto the isolated bridge; set
+# ioc_fidelity: standin for a lab that wants zero real attribution on the wire.
+
+target:
+  name: stuxnet
+  description: Siemens S7-300/400 centrifuge sabotage (Natanz, 2010)
+  campaign: oneshot
+  ioc_fidelity: real
+  actors:
+    # Real Stuxnet C2 domains -- the canonical network indicator (HTTP/80,
+    # GET index.php?data=...). Long since sinkholed.
+    c2_domains: ["www.mypremierfutbol.com", "www.todaysfutbol.com"]
+    # The Symantec W32.Stuxnet Dossier publishes the domains above, not a literal
+    # C2 IP (the servers were in Malaysia and Denmark and were redirected/sinkholed
+    # in 2010). This documentation-range address is only what the real domains
+    # resolve to for the beacon's DNS leg.
+    c2_ips: ["203.0.113.7"]
+    # Host-level artifacts a sensor/EDR would surface (indicator strings only).
+    artifacts:
+      - "s7otbxdx.dll"   # the Step7 man-in-the-middle DLL
+      - "mrxnet.sys"     # rootkit driver
+      - "mrxcls.sys"     # loader driver
+      - "~WTR4132.tmp"
+      - "~WTR4141.tmp"
+      - "oem7a.pnf"
+
+# Site identity for the fabricated plant's DNS.
+dns:
+  enabled: true
+  domains: ["fep.natanz.example"]

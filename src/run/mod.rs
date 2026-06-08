@@ -34,7 +34,7 @@ use status::{Status, StatusZone};
 
 pub fn run(args: &RunArgs) -> i32 {
     init_logger();
-    let cfg = match config::load(&args.config) {
+    let cfg = match config::load_with_scenario(&args.config, args.scenario.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             error!("config: {e}");
@@ -70,16 +70,25 @@ pub fn run(args: &RunArgs) -> i32 {
     // Red laser drives a persistent simulator (zones, devices, identity
     // assertions). Green laser only reads the OUI table to label derived zones.
     let mut engine = match cfg.mode {
-        Mode::RedLaser => {
-            let e = SimulatorEngine::red(&cfg, started);
-            info!(
-                "red laser session: seed={:#018x} devices={} zones={}",
-                e.seed(),
-                e.ledger().device_count(),
-                e.ledger().subnet_count()
-            );
-            Some(e)
-        }
+        Mode::RedLaser => match SimulatorEngine::red(&cfg, started) {
+            Ok(e) => {
+                let scn = e
+                    .scenario_name()
+                    .map(|n| format!(" scenario={n}"))
+                    .unwrap_or_default();
+                info!(
+                    "red laser session: seed={:#018x} devices={} zones={}{scn}",
+                    e.seed(),
+                    e.ledger().device_count(),
+                    e.ledger().subnet_count()
+                );
+                Some(e)
+            }
+            Err(err) => {
+                error!("red laser: {err}");
+                return 1;
+            }
+        },
         Mode::GreenLaser => None,
     };
     let oui = OuiDb::load(&cfg.oui_db.path);
@@ -319,7 +328,7 @@ impl PpsState {
 
 fn base_status(cfg: &Config, started: u64, run: u64, last_packets: Option<u64>) -> Status {
     Status {
-        schema: 3,
+        schema: 4,
         pid: std::process::id(),
         state: String::new(),
         laser: cfg.mode.as_str().to_string(),
@@ -346,6 +355,9 @@ fn base_status(cfg: &Config, started: u64, run: u64, last_packets: Option<u64>) 
         cycle: 0,
         last_threat_unix: None,
         zones: Vec::new(),
+        scenario: None,
+        phase: None,
+        technique_ids: Vec::new(),
         updated_unix: 0,
         started_unix: started,
     }
@@ -388,6 +400,14 @@ fn apply_sim_status(
                     })
                     .collect();
                 s.zone_count = s.zones.len();
+                // Under a target scenario, surface the active attack and phase,
+                // and label the laser `target:<name>` so `pewpew` reads clearly.
+                s.scenario = e.scenario_name().map(String::from);
+                s.phase = e.scenario_phase_label();
+                s.technique_ids = e.scenario_techniques();
+                if let Some(name) = e.scenario_name() {
+                    s.laser = format!("target:{name}");
+                }
             }
         }
         Mode::GreenLaser => {
@@ -517,7 +537,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("\"mode\""), "deprecated mode field is gone");
         assert!(json.contains("\"laser\""));
-        assert!(json.contains("\"schema\":3"));
+        assert!(json.contains("\"schema\":4"));
         for key in [
             "pps",
             "mbps",
@@ -526,6 +546,9 @@ mod tests {
             "max_assets",
             "target_devices",
             "sealed",
+            "scenario",
+            "phase",
+            "technique_ids",
         ] {
             assert!(json.contains(&format!("\"{key}\"")), "field {key} present");
         }

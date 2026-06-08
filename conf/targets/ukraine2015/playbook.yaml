@@ -1,0 +1,37 @@
+# Ukraine 2015 attack timeline, phased after the public ATT&CK-for-ICS 2015
+# Ukraine Electric Power Attack (campaign C0028): intrusion via BlackEnergy and
+# VPN, RTU interrogation, breaker-open commands, then destruction (KillDisk and
+# the serial-converter firmware brick).
+
+phases:
+  - id: intrusion
+    name: "Spear-phish / BlackEnergy3"
+    techniques: [T0865, T0859, T0822]   # spearphishing attachment, valid accounts, external remote services
+    dwell_runs: 2
+    events:
+      - { emit: c2_beacon }
+      - { emit: remote_access, target: { ip: 10.90.30.20 }, port: 1194 }   # VPN into the DMS
+
+  - id: recon
+    name: "RTU interrogation"
+    techniques: [T0840, T0846, T0888]   # network connection enumeration, remote system discovery
+    dwell_runs: 2
+    events:
+      - { emit: iec104_interrogation, target: { ip: 10.90.10.11 } }
+      - { emit: iec104_interrogation, target: { ip: 10.90.10.12 } }
+
+  - id: trip
+    name: "Breaker open (SCADA hijack)"
+    techniques: [T0855, T0831, T0813]   # unauthorized command message, manipulation of control, denial of control
+    dwell_runs: 4
+    events:
+      - { emit: iec104_command, target: { ip: 10.90.10.11 }, ioa: 1001, close: false }
+      - { emit: iec104_command, target: { ip: 10.90.10.12 }, ioa: 1002, close: false }
+
+  - id: destruction
+    name: "KillDisk + converter brick"
+    techniques: [T0809, T0837, T0816]   # data destruction, loss of productivity, device restart/shutdown
+    dwell_runs: 2
+    events:
+      - { emit: wiper, target: { ip: 10.90.30.20 } }
+      - { emit: moxa_brick, target: { ip: 10.90.10.30 } }

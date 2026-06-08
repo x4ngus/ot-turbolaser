@@ -1,0 +1,16 @@
+# The petrochemical plant: a basic process control (DCS) zone and the safety
+# instrumented system (SIS) zone with the Triconex controller.
+
+zones:
+  - { cidr: 10.50.30.0/24, name: "Refinery DCS (BPCS)", purdue_level: 2, vendor: "Schneider Electric" }
+  - { cidr: 10.50.10.0/24, name: "Safety Instrumented System", purdue_level: 1, vendor: "Schneider Electric" }
+
+devices:
+  # The TriStation 1131 engineering workstation (the trilog.exe host).
+  - { zone: 10.50.30.0/24, asset_type: EWS, vendor: "Schneider Electric", model: "TriStation 1131 Workstation", protocol: none, ip: 10.50.30.20, hostname: TRISTATION-EWS }
+  # Basic process control (Modicon M340) -- embedded CVE-bearing Modbus identity.
+  - { zone: 10.50.30.0/24, model: "Modicon M340 BMXP342020", ip: 10.50.30.11, hostname: BPCS-M340 }
+  # The Triconex Tricon MP3008 safety controller (TriStation/UDP-1502), identity-only.
+  - { zone: 10.50.10.0/24, asset_type: SIS, vendor: "Schneider Electric", model: "Triconex Tricon MP3008", protocol: tristation, ip: 10.50.10.11, hostname: SIS-TRICON }
+
+enrich: true

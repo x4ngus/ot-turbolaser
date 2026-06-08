@@ -16,17 +16,18 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::cli::{PlanArgs, ResetArgs, ZonesArgs};
-use crate::config::{self, Config, Mode};
+use crate::config::{self, Config, Mode, TargetCfg};
 use crate::ledger::{self, Session};
 use crate::oui::OuiDb;
 use crate::pcapio::Capture;
 use crate::proto::l3;
+use crate::scenario::{guard_ledger_scenario, plant};
 use crate::vuln::VulnDb;
 
 /// `turbolaser zones`: show the current zone map. Green laser derives it from
 /// the configured captures on demand; red laser reads the session ledger.
 pub fn cmd_zones(args: &ZonesArgs) -> i32 {
-    let cfg = match config::load(&args.config) {
+    let cfg = match config::load_with_scenario(&args.config, args.scenario.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
@@ -50,6 +51,11 @@ pub fn cmd_zones(args: &ZonesArgs) -> i32 {
         }
         Mode::RedLaser => match Session::load(&cfg.session.path) {
             Ok(Some(s)) => {
+                let active = cfg.target.as_ref().map(|t| t.name.as_str());
+                if let Err(e) = guard_ledger_scenario(s.scenario.as_deref(), active) {
+                    eprintln!("session: {e}");
+                    return 2;
+                }
                 render_session(&s, args.json);
                 0
             }
@@ -76,7 +82,7 @@ pub fn cmd_zones(args: &ZonesArgs) -> i32 {
 
 /// `turbolaser reset`: clear the red-laser session ledger for a fresh feed.
 pub fn cmd_reset(args: &ResetArgs) -> i32 {
-    let cfg = match config::load(&args.config) {
+    let cfg = match config::load_with_scenario(&args.config, args.scenario.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
@@ -107,50 +113,70 @@ pub fn cmd_reset(args: &ResetArgs) -> i32 {
 /// sending any traffic. Shares the allocator with the run loop, so it matches
 /// what red laser will emit for the same seed.
 pub fn cmd_plan(args: &PlanArgs) -> i32 {
-    let cfg = match config::load(&args.config) {
+    let cfg = match config::load_with_scenario(&args.config, args.scenario.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
             return 2;
         }
     };
-    let vuln = VulnDb::load(&cfg.oui_db.vuln_path);
-    if vuln.is_empty() {
-        eprintln!("no vulnerable-device profiles available");
-        return 1;
-    }
     let seed = cfg.session.seed.unwrap_or_else(rand::random);
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let params = devices::AllocParams {
-        max_subnets: ledger::effective_subnet_cap(cfg.zones.max_subnets),
-        max_devices: ledger::effective_device_cap(cfg.synthesis.max_devices),
-        default_prefix: cfg.zones.default_prefix,
-    };
-    let target = args.devices.unwrap_or(cfg.synthesis.target_devices);
-    let mut s = Session::new(seed, now_unix());
-    // Fabricate the L1/L2 control zones (capped at 10, the field-zone budget),
-    // then add a few L3 operations (DCS) zones in the headroom above them.
-    let fab_params = devices::AllocParams {
-        max_subnets: params.max_subnets.min(10),
-        ..params
-    };
-    let added = devices::fabricate(&mut s, &vuln, &fab_params, target, &mut rng);
-    devices::create_l3_zones(&mut s, &params, 3, &mut rng);
-    // Tag each zone with a shared DNS domain before naming, so hostnames seal as
-    // fully-qualified `<host>.<domain>` and the sensor reads a cross-zone site
-    // identity from the suffix.
-    if cfg.dns.enabled {
-        devices::assign_domains(&mut s, &cfg.dns.domains, seed);
-    }
-    // Add the supporting cast (firewall at .1, HMI, engineering station,
-    // historian, servers) and DNS hostnames off the same seed, then record the
-    // full fabricated count so a sealed plan's drift check (device_count ==
-    // target_devices) accounts for the BOM. The BOM is identity-only, so the
-    // CVE-bearing set stays the controllers.
     let oui = OuiDb::load(&cfg.oui_db.path);
-    devices::enrich_plant(&mut s, &vuln, &oui, seed);
-    s.target_devices = s.device_count();
+
+    // A scenario pins its plant from the pack's spec; the generic path fabricates
+    // a believable random plant. Both yield a sealed-able session and a device
+    // count for the headline.
+    let (mut s, added) = if let Some(target) = &cfg.target {
+        match build_scenario_plan(&cfg, target, &oui, seed) {
+            Ok(s) => {
+                let n = s.device_count();
+                (s, n)
+            }
+            Err(e) => {
+                eprintln!("scenario plan: {e}");
+                return 1;
+            }
+        }
+    } else {
+        let vuln = VulnDb::load(&cfg.oui_db.vuln_path);
+        if vuln.is_empty() {
+            eprintln!("no vulnerable-device profiles available");
+            return 1;
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let params = devices::AllocParams {
+            max_subnets: ledger::effective_subnet_cap(cfg.zones.max_subnets),
+            max_devices: ledger::effective_device_cap(cfg.synthesis.max_devices),
+            default_prefix: cfg.zones.default_prefix,
+        };
+        let target_n = args.devices.unwrap_or(cfg.synthesis.target_devices);
+        let mut s = Session::new(seed, now_unix());
+        // Fabricate the L1/L2 control zones (capped at 10, the field-zone budget),
+        // then add a few L3 operations (DCS) zones in the headroom above them.
+        let fab_params = devices::AllocParams {
+            max_subnets: params.max_subnets.min(10),
+            ..params
+        };
+        let added = devices::fabricate(&mut s, &vuln, &fab_params, target_n, &mut rng);
+        devices::create_l3_zones(&mut s, &params, 3, &mut rng);
+        // Tag each zone with a shared DNS domain before naming, so hostnames seal
+        // as fully-qualified `<host>.<domain>` and the sensor reads a cross-zone
+        // site identity from the suffix.
+        if cfg.dns.enabled {
+            devices::assign_domains(&mut s, &cfg.dns.domains, seed);
+        }
+        // Add the supporting cast (firewall at .1, HMI, engineering station,
+        // historian, servers) and DNS hostnames off the same seed.
+        devices::enrich_plant(&mut s, &vuln, &oui, seed);
+        s.target_devices = s.device_count();
+        (s, added)
+    };
     s.max_assets = ledger::effective_asset_cap(cfg.synthesis.max_assets);
+    let scenario_tag = cfg
+        .target
+        .as_ref()
+        .map(|t| format!(" [scenario {}]", t.name))
+        .unwrap_or_default();
 
     // --commit persists this fabricated session as the authoritative ledger the
     // daemon replays verbatim. A bare `plan` only previews.
@@ -178,7 +204,7 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
             render_session(&s, true);
         } else {
             println!(
-                "committed plan: seed={seed:#018x}, {added} device(s) across {} zone(s) -> {}",
+                "committed plan{scenario_tag}: seed={seed:#018x}, {added} device(s) across {} zone(s) -> {}",
                 s.subnet_count(),
                 cfg.session.path.display()
             );
@@ -191,7 +217,7 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
         render_session(&s, true);
     } else {
         println!(
-            "plan (preview, no traffic): seed={seed:#018x}, fabricated {added} device(s) across {} zone(s)",
+            "plan{scenario_tag} (preview, no traffic): seed={seed:#018x}, {added} device(s) across {} zone(s)",
             s.subnet_count()
         );
         render_session(&s, false);
@@ -220,6 +246,22 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
         );
     }
     0
+}
+
+/// Build a scenario's sealed plant from its pack: overlay the pack's CVE profiles
+/// on the embedded DB, load the plant spec, and pin it into the same sealed
+/// session the daemon replays verbatim.
+fn build_scenario_plan(
+    cfg: &Config,
+    target: &TargetCfg,
+    oui: &OuiDb,
+    seed: u64,
+) -> Result<Session, String> {
+    let vuln = VulnDb::load_overlay(&target.pack_dir.join(&target.profiles));
+    if vuln.is_empty() {
+        return Err("no vulnerable-device profiles available".into());
+    }
+    plant::pin_from_pack(target, &vuln, oui, seed, now_unix(), &cfg.dns.domains)
 }
 
 fn now_unix() -> u64 {

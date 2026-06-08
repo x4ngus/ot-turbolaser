@@ -133,6 +133,35 @@ impl TcpSession {
     }
 }
 
+/// A one-shot request/response TCP exchange: handshake, the client's request,
+/// the server's response, then a graceful close. The common shape for a
+/// single-PDU OT identity read or register write.
+#[allow(clippy::too_many_arguments)]
+pub fn request_response(
+    client_mac: [u8; 6],
+    server_mac: [u8; 6],
+    client_ip: Ipv4Addr,
+    server_ip: Ipv4Addr,
+    client_port: u16,
+    server_port: u16,
+    request: &[u8],
+    response: &[u8],
+) -> Vec<Vec<u8>> {
+    let mut s = TcpSession::new(
+        client_mac,
+        server_mac,
+        client_ip,
+        server_ip,
+        client_port,
+        server_port,
+    );
+    s.open();
+    s.client_says(request);
+    s.server_says(response);
+    s.close();
+    s.into_frames()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

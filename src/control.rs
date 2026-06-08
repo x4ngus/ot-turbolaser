@@ -165,7 +165,23 @@ fn render_pewpew(v: &serde_json::Value, state: &str) {
     let iface = s("iface").unwrap_or("?");
     println!("turbolaser pewpew  [{state}]  {laser} on {iface}");
 
-    if laser == "red_laser" {
+    // Under a target scenario the laser reads `target:<name>`; show the active
+    // attack, its current phase, and the ATT&CK-for-ICS techniques in play.
+    if let Some(scenario) = s("scenario") {
+        println!("  -- target scenario --");
+        println!("    scenario      : {scenario}");
+        println!("    phase         : {}", s("phase").unwrap_or("?"));
+        if let Some(tids) = v.get("technique_ids").and_then(|x| x.as_array()) {
+            let ids: Vec<&str> = tids.iter().filter_map(|t| t.as_str()).collect();
+            if !ids.is_empty() {
+                println!("    att&ck (ics)  : {}", ids.join(" "));
+            }
+        }
+    }
+
+    // The wire-footprint group applies to the whole red-laser family; a scenario
+    // is reported by the dedicated `scenario` field rather than parsing `laser`.
+    if laser == "red_laser" || s("scenario").is_some() {
         let device_count = u("device_count").unwrap_or(0);
         let capture = u("capture_host_count").unwrap_or(0);
         let total = u("total_wire_assets").unwrap_or(0);

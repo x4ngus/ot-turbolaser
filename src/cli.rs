@@ -58,6 +58,8 @@ pub enum Command {
     /// Validate the MAC<->IP union: profile the emitted ARP burst against the
     /// reference OT bands and/or score a passive-sensor asset export against the plan.
     Verify(VerifyArgs),
+    /// List the installed target scenarios (the red-laser attack packs).
+    Targets(TargetsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -68,6 +70,10 @@ pub struct RunArgs {
     /// Run a single replay iteration then exit. For testing.
     #[arg(long)]
     pub once: bool,
+    /// Load a target scenario (a pack under the config's `targets/` dir),
+    /// overlaying its attack on red laser. Omit for the generic plant.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -117,10 +123,26 @@ pub struct StatusArgs {
 pub struct CheckArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+    /// Validate the config with a target scenario overlaid.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct ZonesArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// Show the map for a target scenario's plant.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TargetsArgs {
+    /// Path to the replay config; its sibling `targets/` dir is scanned.
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
     /// Emit raw JSON instead of a human summary.
@@ -132,6 +154,9 @@ pub struct ZonesArgs {
 pub struct ResetArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+    /// Resolve the session path with a target scenario overlaid.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -141,6 +166,10 @@ pub struct PlanArgs {
     /// Emit raw JSON instead of a human summary.
     #[arg(long)]
     pub json: bool,
+    /// Preview (or commit) a target scenario's pinned plant instead of the
+    /// generic fabricated one.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
     /// Intended fleet size to fabricate. Defaults to synthesis.target_devices.
     #[arg(long)]
     pub devices: Option<usize>,

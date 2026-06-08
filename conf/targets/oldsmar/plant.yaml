@@ -1,0 +1,14 @@
+# The water-treatment plant: the SCADA/HMI supervisory zone and the chemical
+# dosing control zone with the sodium-hydroxide doser (the setpoint target).
+
+zones:
+  - { cidr: 10.70.20.0/24, name: "Plant SCADA / HMI", purdue_level: 2, vendor: "Schneider Electric" }
+  - { cidr: 10.70.10.0/24, name: "Chemical Dosing Control", purdue_level: 1, vendor: "Schneider Electric" }
+
+devices:
+  # The TeamViewer-reachable HMI workstation (Windows 7), identity-only.
+  - { zone: 10.70.20.0/24, asset_type: HMI, vendor: "Advantech", model: "SCADA HMI (Windows 7)", protocol: none, ip: 10.70.20.20, hostname: WTP-HMI-01 }
+  # Sodium-hydroxide dosing controller (Modbus) -- the setpoint-excursion target.
+  - { zone: 10.70.10.0/24, model: "Modicon M340 BMXP342020", ip: 10.70.10.11, hostname: NAOH-DOSER }
+
+enrich: true

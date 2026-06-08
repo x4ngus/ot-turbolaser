@@ -1,0 +1,19 @@
+# Oldsmar -- Florida water-treatment HMI setpoint tamper (Feb 2021, CISA AA21-042A).
+#
+# Remote access to a TeamViewer-reachable HMI, then a Modbus write driving the
+# sodium-hydroxide (lye) dose setpoint from 100 ppm to 11,100 ppm. No public
+# malware was involved, so there are no file artifacts; the indicator is the
+# remote-access pattern plus the setpoint excursion.
+
+target:
+  name: oldsmar
+  description: Water-treatment NaOH setpoint excursion (Oldsmar, 2021)
+  campaign: oneshot
+  ioc_fidelity: real
+  actors:
+    # The remote-access source (documentation range).
+    external_cidrs: ["198.51.100.0/24"]
+
+dns:
+  enabled: true
+  domains: ["wtp.oldsmar.example"]

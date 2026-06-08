@@ -1,0 +1,3 @@
+# Oldsmar scenario CVE profiles, overlaid on the embedded set. The chemical
+# dosing controller is modelled with the embedded Modicon M340 Modbus profile;
+# the HMI is identity-only (plant.yaml). No additional profiles are required.

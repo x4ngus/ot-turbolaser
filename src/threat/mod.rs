@@ -19,6 +19,7 @@ use crate::ledger::PromotedHost;
 use crate::oui::OuiDb;
 use crate::pcapio::Capture;
 use crate::proto::frame::{parse_layout, L3Kind, ParsedFrame};
+use crate::proto::l3;
 
 /// The hard minimum between promotions. A config may widen the interval but
 /// never make threats more frequent than once a day.
@@ -78,13 +79,6 @@ impl ThreatScheduler {
 fn is_unicast(addr: Ipv4Addr) -> bool {
     let o0 = addr.octets()[0];
     o0 != 0 && o0 != 127 && o0 < 224
-}
-
-fn fmt_mac(m: [u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        m[0], m[1], m[2], m[3], m[4], m[5]
-    )
 }
 
 /// Pick an external address from the first usable configured range. Asserts the
@@ -188,7 +182,7 @@ pub fn promote_host(
     Some(PromotedHost {
         original_ip: host.to_string(),
         external_ip: external.to_string(),
-        mac: fmt_mac(mac),
+        mac: l3::fmt_mac(mac),
         promoted_unix: now,
     })
 }

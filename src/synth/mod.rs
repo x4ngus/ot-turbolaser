@@ -11,17 +11,33 @@ pub mod cdp;
 pub mod dns;
 pub mod enip_identity;
 pub mod eth;
+pub mod iec104;
+pub mod ioc;
 pub mod lldp;
 pub mod modbus_devid;
+pub mod modbus_write;
+pub mod s7_common;
+pub mod s7_control;
 pub mod s7_szl;
 pub mod session;
 pub mod snmp;
+pub mod tristation;
 
 use std::time::Duration;
 
 use pcap_file::pcap::PcapHeader;
 
 use crate::pcapio::{Capture, OwnedPacket};
+
+/// First two integer groups of a firmware string as a major/minor pair, e.g.
+/// "V4.2.1" -> (4, 2). The version a protocol identity assertion carries.
+pub fn parse_version(fw: &str) -> (u8, u8) {
+    let mut groups = fw
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().unwrap_or(0).min(255) as u8);
+    (groups.next().unwrap_or(0), groups.next().unwrap_or(0))
+}
 
 /// Collect synthesized frames into a Capture for tmpfs write and replay. Frames
 /// are stamped a millisecond apart so tcpreplay paces them in order.
@@ -37,5 +53,18 @@ pub fn to_capture(frames: Vec<Vec<u8>>) -> Capture {
                 data,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version;
+
+    #[test]
+    fn version_parsing() {
+        assert_eq!(parse_version("V4.2.1"), (4, 2));
+        assert_eq!(parse_version("20.011"), (20, 11));
+        assert_eq!(parse_version("07.0.02"), (7, 0));
+        assert_eq!(parse_version("none"), (0, 0));
     }
 }

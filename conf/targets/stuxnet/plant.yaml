@@ -1,0 +1,20 @@
+# The Natanz fuel-enrichment plant as a passive sensor would see it: a
+# WinCC/Step7 operations zone above the S7 control zones that drive the
+# centrifuge cascade. `enrich: true` adds the supporting cast (zone firewall,
+# switch, historian) around the pinned kit.
+
+zones:
+  - { cidr: 10.10.30.0/24, name: "FEP Operations (WinCC/Step7)", purdue_level: 3, vendor: "Siemens AG" }
+  - { cidr: 10.10.20.0/24, name: "Cascade Protection (S7-417)", purdue_level: 1, vendor: "Siemens AG" }
+  - { cidr: 10.10.10.0/24, name: "Centrifuge Drive Control (S7-315)", purdue_level: 1, vendor: "Siemens AG" }
+
+devices:
+  # The Step7/WinCC engineering station the s7otbxdx DLL rode (identity-only).
+  - { zone: 10.10.30.0/24, asset_type: EWS, vendor: "Siemens AG", model: "SIMATIC Field PG (Step7/WinCC)", protocol: none, ip: 10.10.30.20, hostname: STEP7-ENG }
+  # The S7-417 cascade-protection CPU (CVE-bearing S7 identity).
+  - { zone: 10.10.20.0/24, model: "SIMATIC S7-417 CPU", ip: 10.10.20.11, hostname: A87-PROT }
+  # S7-300 315-2 centrifuge-drive controllers (the rotor-speed sabotage target).
+  - { zone: 10.10.10.0/24, model: "SIMATIC S7-300 CPU 315-2 PN/DP", ip: 10.10.10.11, hostname: A21-DRIVE-1 }
+  - { zone: 10.10.10.0/24, model: "SIMATIC S7-300 CPU 315-2 PN/DP", ip: 10.10.10.12, hostname: A21-DRIVE-2 }
+
+enrich: true

@@ -7,6 +7,7 @@
 
 use ipnet::Ipv4Net;
 use serde::Deserialize;
+use serde_norway::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -50,6 +51,10 @@ pub struct Config {
     pub session: SessionCfg,
     #[serde(default)]
     pub oui_db: OuiDbCfg,
+    // v0.4 target layer. Present only when a scenario pack is loaded; absent is
+    // plain red laser, so existing configs and green laser are unaffected.
+    #[serde(default)]
+    pub target: Option<TargetCfg>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -610,6 +615,103 @@ impl Default for OuiDbCfg {
     }
 }
 
+/// Active target-scenario overlay. A scenario pack under `conf/targets/<name>/`
+/// pins a specific real-world attack: its YAML merges over the base config, its
+/// `profiles.toml` overlays the CVE database, its `plant` spec is fabricated as a
+/// sealed ledger, and its `playbook` drives the phased attack emission. Absent is
+/// generic red laser. Built by [`load_with_scenario`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetCfg {
+    /// Scenario identifier, e.g. "stuxnet". Matches the pack directory name.
+    pub name: String,
+    /// One-line human description, shown by `turbolaser targets`.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// CVE-profile pack, relative to the pack dir. Overlays the embedded DB.
+    #[serde(default = "default_profiles_file")]
+    pub profiles: PathBuf,
+    /// Phased attack playbook, relative to the pack dir.
+    #[serde(default = "default_playbook_file")]
+    pub playbook: PathBuf,
+    /// Plant spec (exact zones and devices), relative to the pack dir.
+    #[serde(default = "default_plant_file")]
+    pub plant: PathBuf,
+    /// One-shot campaign (hold the final impact) or loop (restart the timeline).
+    #[serde(default)]
+    pub campaign: Campaign,
+    /// Cap on attack-action frames appended to a single burst, so a long
+    /// sequence (an S7 download, an IEC-104 sweep) spreads across announces
+    /// instead of arriving as one microburst the sensor drops.
+    #[serde(default = "default_max_frames_per_burst")]
+    pub max_frames_per_burst: usize,
+    /// Emit the real published network indicators, or documentation stand-ins.
+    #[serde(default)]
+    pub ioc_fidelity: IocFidelity,
+    /// Threat-actor network identity (external ranges, C2, artifacts) the
+    /// playbook's IOC events draw on.
+    #[serde(default)]
+    pub actors: ActorsCfg,
+    /// Absolute pack directory, filled by the loader (never from YAML), so the
+    /// plant, playbook, and profile loaders resolve their relative paths.
+    #[serde(skip)]
+    pub pack_dir: PathBuf,
+}
+
+/// Whether a scenario timeline runs once or repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Campaign {
+    /// Run the phases once, then hold the final (impact) phase.
+    #[default]
+    Oneshot,
+    /// Restart from the first phase after the last.
+    Loop,
+}
+
+/// How literal the emitted network indicators are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IocFidelity {
+    /// Emit the real published indicators (domains/IPs/artifacts) from the pack.
+    #[default]
+    Real,
+    /// Swap every network indicator for an RFC-5737 documentation stand-in.
+    Standin,
+}
+
+/// Threat-actor network identity for a scenario. All optional; the playbook's
+/// IOC events reference these.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ActorsCfg {
+    /// Non-RFC1918 source ranges the actor appears to operate from.
+    #[serde(default)]
+    pub external_cidrs: Vec<String>,
+    /// C2 domains resolved or queried during the campaign.
+    #[serde(default)]
+    pub c2_domains: Vec<String>,
+    /// C2 IPv4 addresses contacted during the campaign.
+    #[serde(default)]
+    pub c2_ips: Vec<String>,
+    /// Named artifacts (filenames, hashes) surfaced as host-level IOCs.
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+}
+
+fn default_profiles_file() -> PathBuf {
+    PathBuf::from("profiles.toml")
+}
+fn default_playbook_file() -> PathBuf {
+    PathBuf::from("playbook.yaml")
+}
+fn default_plant_file() -> PathBuf {
+    PathBuf::from("plant.yaml")
+}
+fn default_max_frames_per_burst() -> usize {
+    64
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
         if self.iface.trim().is_empty() {
@@ -721,6 +823,30 @@ impl Config {
                 return Err(format!("{name} must be absolute: {}", p.display()));
             }
         }
+        if let Some(t) = &self.target {
+            // A scenario overlays red laser: it reuses the fabrication, remap, and
+            // identity machinery. Refuse a scenario that tried to switch the mode
+            // or disable the remap, with a message that names the scenario rather
+            // than leaving the generic red-laser invariant to fire confusingly.
+            if self.mode != Mode::RedLaser {
+                return Err(format!(
+                    "target scenario {:?} requires mode red_laser (it overlays red laser)",
+                    t.name
+                ));
+            }
+            if !self.l3.remap {
+                return Err(format!(
+                    "target scenario {:?} requires l3.remap = true (red laser is plan==wire)",
+                    t.name
+                ));
+            }
+            if t.name.trim().is_empty() {
+                return Err("target.name must not be empty".into());
+            }
+            if t.max_frames_per_burst == 0 {
+                return Err("target.max_frames_per_burst must be > 0".into());
+            }
+        }
         Ok(())
     }
 }
@@ -733,6 +859,87 @@ pub fn load(path: &Path) -> Result<Config, String> {
         serde_norway::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     cfg.validate()?;
     Ok(cfg)
+}
+
+/// Read and validate a config, optionally overlaying a named target scenario.
+///
+/// With `scenario = None` this is byte-identical to [`load`] (the plain
+/// red/green-laser path). With a name, the pack at
+/// `<config_dir>/targets/<name>/scenario.yaml` is deep-merged over the base
+/// config (maps recurse; scalars and sequences replace), then the merged whole
+/// is deserialized and validated, so `deny_unknown_fields` still holds across
+/// the combined document. The absolute pack directory is recorded on the
+/// resulting `target` block so the plant, playbook, and profile loaders resolve
+/// their relative paths.
+pub fn load_with_scenario(base: &Path, scenario: Option<&str>) -> Result<Config, String> {
+    let Some(name) = scenario else {
+        return load(base);
+    };
+    // The name indexes a directory, so reject anything that could escape it.
+    if name.trim().is_empty() || name.contains(['/', '\\', '.']) {
+        return Err(format!(
+            "invalid scenario name {name:?} (use a bare slug like 'stuxnet')"
+        ));
+    }
+    let base_text =
+        std::fs::read_to_string(base).map_err(|e| format!("reading {}: {e}", base.display()))?;
+    let pack_dir = base
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("targets")
+        .join(name);
+    let scenario_path = pack_dir.join("scenario.yaml");
+    let scen_text = std::fs::read_to_string(&scenario_path)
+        .map_err(|e| format!("reading scenario {}: {e}", scenario_path.display()))?;
+
+    let mut merged: Value = serde_norway::from_str(&base_text)
+        .map_err(|e| format!("parsing {}: {e}", base.display()))?;
+    let overlay: Value = serde_norway::from_str(&scen_text)
+        .map_err(|e| format!("parsing {}: {e}", scenario_path.display()))?;
+    deep_merge(&mut merged, overlay);
+
+    let mut cfg: Config = serde_norway::from_value(merged)
+        .map_err(|e| format!("merging scenario {name} over {}: {e}", base.display()))?;
+    match cfg.target.as_mut() {
+        Some(t) => {
+            // Canonicalise so the recorded dir is absolute regardless of how the
+            // base config path was given; fall back to the joined path if the
+            // filesystem cannot resolve it.
+            t.pack_dir = std::fs::canonicalize(&pack_dir).unwrap_or(pack_dir);
+        }
+        None => {
+            return Err(format!(
+                "scenario {name} did not set a `target:` block in {}",
+                scenario_path.display()
+            ));
+        }
+    }
+    cfg.validate()?;
+    Ok(cfg)
+}
+
+/// Deep-merge `overlay` onto `base`: where both sides are mappings, merge keys
+/// recursively; otherwise (a scalar, a sequence, or a type change) the overlay
+/// replaces the base wholesale. So a scenario overrides a list (e.g.
+/// `dns.domains`, `threats.external_cidrs`) entirely rather than appending to it.
+fn deep_merge(base: &mut Value, overlay: Value) {
+    match overlay {
+        Value::Mapping(over) => {
+            if let Some(map) = base.as_mapping_mut() {
+                for (k, ov) in over {
+                    match map.entry(k) {
+                        serde_norway::mapping::Entry::Occupied(mut e) => deep_merge(e.get_mut(), ov),
+                        serde_norway::mapping::Entry::Vacant(e) => {
+                            e.insert(ov);
+                        }
+                    }
+                }
+            } else {
+                *base = Value::Mapping(over);
+            }
+        }
+        other => *base = other,
+    }
 }
 
 fn require_positive(name: &str, v: Option<f64>) -> Result<f64, String> {
@@ -970,5 +1177,105 @@ gap:
         let mut no_mean = gap(GapDist::ExpPoisson);
         no_mean.mean_secs = None;
         assert!(no_mean.validate().is_err());
+    }
+
+    #[test]
+    fn deep_merge_overrides_scalars_and_replaces_sequences() {
+        let mut base: Value =
+            serde_norway::from_str("a: 1\nb:\n  c: 2\n  d: 3\nlist: [1, 2, 3]\n").unwrap();
+        let over: Value = serde_norway::from_str("a: 9\nb:\n  c: 20\nlist: [7]\ne: 5\n").unwrap();
+        deep_merge(&mut base, over);
+        let m = base.as_mapping().unwrap();
+        assert_eq!(m.get("a").unwrap().as_u64(), Some(9), "scalar overridden");
+        let b = m.get("b").unwrap().as_mapping().unwrap();
+        assert_eq!(b.get("c").unwrap().as_u64(), Some(20), "nested overridden");
+        assert_eq!(b.get("d").unwrap().as_u64(), Some(3), "untouched key kept");
+        let list = m.get("list").unwrap().as_sequence().unwrap();
+        assert_eq!(list.len(), 1, "sequence replaced, not concatenated");
+        assert_eq!(m.get("e").unwrap().as_u64(), Some(5), "new key added");
+    }
+
+    #[test]
+    fn unknown_target_field_is_rejected() {
+        // deny_unknown_fields on TargetCfg guards against a typo'd scenario key.
+        let yaml = "iface: tl0
+mode: red_laser
+paths:
+  pool: /a
+  variants: /b
+  shm_dir: /c
+  status_file: /d
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 1.0
+target:
+  name: x
+  bogus_field: 1
+";
+        let r: Result<Config, _> = serde_norway::from_str(yaml);
+        assert!(r.is_err(), "an unknown field under target must be rejected");
+    }
+
+    #[test]
+    fn scenario_overlay_merges_and_records_pack_dir() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let conf_dir = dir.path().join("conf");
+        std::fs::create_dir_all(&conf_dir).unwrap();
+        let base = conf_dir.join("replay.yaml");
+        std::fs::copy("conf/replay.yaml", &base).unwrap();
+        let pack = conf_dir.join("targets").join("demo");
+        std::fs::create_dir_all(&pack).unwrap();
+        let mut f = std::fs::File::create(pack.join("scenario.yaml")).unwrap();
+        write!(
+            f,
+            "synthesis:\n  target_devices: 8\ntarget:\n  name: demo\n  actors:\n    c2_domains: [\"evil.example\"]\n"
+        )
+        .unwrap();
+
+        let cfg = load_with_scenario(&base, Some("demo")).expect("overlay loads");
+        assert_eq!(cfg.synthesis.target_devices, 8, "scenario overrode the base");
+        let t = cfg.target.expect("target present after overlay");
+        assert_eq!(t.name, "demo");
+        assert_eq!(t.actors.c2_domains, vec!["evil.example".to_string()]);
+        assert!(
+            t.pack_dir.ends_with("targets/demo"),
+            "pack dir recorded: {:?}",
+            t.pack_dir
+        );
+
+        // No scenario is byte-identical to load(): plain red laser, no target.
+        let plain = load_with_scenario(&base, None).expect("plain load");
+        assert!(plain.target.is_none(), "no scenario means no target overlay");
+    }
+
+    #[test]
+    fn scenario_without_target_block_is_an_error() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let conf_dir = dir.path().join("conf");
+        std::fs::create_dir_all(&conf_dir).unwrap();
+        let base = conf_dir.join("replay.yaml");
+        std::fs::copy("conf/replay.yaml", &base).unwrap();
+        let pack = conf_dir.join("targets").join("nodecl");
+        std::fs::create_dir_all(&pack).unwrap();
+        // Overrides a value but never declares `target:`.
+        let mut f = std::fs::File::create(pack.join("scenario.yaml")).unwrap();
+        write!(f, "synthesis:\n  target_devices: 4\n").unwrap();
+        let err = load_with_scenario(&base, Some("nodecl")).unwrap_err();
+        assert!(err.contains("did not set a `target:` block"), "{err}");
+    }
+
+    #[test]
+    fn invalid_scenario_names_are_rejected() {
+        let base = std::path::Path::new("conf/replay.yaml");
+        for bad in ["../escape", "a/b", "with.dot", ""] {
+            assert!(
+                load_with_scenario(base, Some(bad)).is_err(),
+                "name {bad:?} must be rejected"
+            );
+        }
     }
 }

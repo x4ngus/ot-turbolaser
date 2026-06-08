@@ -80,7 +80,7 @@ threats:
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
     // Constructed at t=0; a promotion is never due before the 24h floor.
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     assert!(
         engine.maybe_promote(&pool_pcap, 1).is_none(),
         "no promotion within the 24h floor"

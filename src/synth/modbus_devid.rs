@@ -6,14 +6,14 @@
 
 use std::net::Ipv4Addr;
 
-use super::session::TcpSession;
+use super::session;
 
 const MODBUS_PORT: u16 = 502;
 const FUNC_MEI: u8 = 0x2B;
 const MEI_DEVICE_ID: u8 = 0x0E;
 
 /// Wrap a PDU in an MBAP header. The length field counts the unit id plus PDU.
-fn mbap(unit: u8, pdu: &[u8]) -> Vec<u8> {
+pub(crate) fn mbap(unit: u8, pdu: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&0x0001u16.to_be_bytes()); // transaction id
     b.extend_from_slice(&0x0000u16.to_be_bytes()); // protocol id
@@ -71,14 +71,16 @@ pub fn exchange(
     unit: u8,
     id: &ModbusDevId,
 ) -> Vec<Vec<u8>> {
-    let req = read_device_id_request(unit);
-    let resp = read_device_id_response(unit, id);
-    let mut s = TcpSession::new(tool_mac, dev_mac, tool_ip, dev_ip, tool_port, MODBUS_PORT);
-    s.open();
-    s.client_says(&req);
-    s.server_says(&resp);
-    s.close();
-    s.into_frames()
+    session::request_response(
+        tool_mac,
+        dev_mac,
+        tool_ip,
+        dev_ip,
+        tool_port,
+        MODBUS_PORT,
+        &read_device_id_request(unit),
+        &read_device_id_response(unit, id),
+    )
 }
 
 #[cfg(test)]

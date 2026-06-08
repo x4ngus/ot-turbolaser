@@ -63,7 +63,7 @@ pub fn fabricate(
         let mac = make_mac(profile, rng);
         let rec = DeviceRecord {
             ip: ip.to_string(),
-            mac: fmt_mac(mac),
+            mac: l3::fmt_mac(mac),
             vendor: profile.vendor.clone(),
             model: profile.model.clone(),
             firmware: profile.firmware.clone(),
@@ -265,13 +265,6 @@ fn make_mac(profile: &DeviceProfile, rng: &mut ChaCha8Rng) -> [u8; 6] {
             [b0, rng.gen(), rng.gen(), rng.gen(), rng.gen(), rng.gen()]
         }
     }
-}
-
-fn fmt_mac(m: [u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        m[0], m[1], m[2], m[3], m[4], m[5]
-    )
 }
 
 /// The asset-class label for a fabricated, CVE-bearing device: switches speak
@@ -481,7 +474,7 @@ pub fn enrich_plant(session: &mut Session, vuln: &VulnDb, oui: &OuiDb, seed: u64
                 let mac = bom_mac(oui, &vendor, seed, u32::from(ip));
                 let rec = DeviceRecord {
                     ip: ip.to_string(),
-                    mac: fmt_mac(mac),
+                    mac: l3::fmt_mac(mac),
                     vendor: vendor.clone(),
                     model,
                     firmware,

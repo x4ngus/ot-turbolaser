@@ -13,6 +13,7 @@ pub mod pcapio;
 pub mod proto;
 pub mod reload;
 pub mod run;
+pub mod scenario;
 pub mod simulate;
 pub mod synth;
 pub mod threat;
@@ -38,14 +39,20 @@ pub fn dispatch(cli: Cli) -> i32 {
         Command::NetSetup(a) => control::net_setup(&a),
         Command::NetTeardown(a) => control::net_teardown(&a),
         Command::Verify(a) => validate::cmd_verify(&a),
+        Command::Targets(a) => scenario::cmd_targets(&a),
     }
 }
 
 fn check(a: &cli::CheckArgs) -> i32 {
-    match config::load(&a.config) {
+    match config::load_with_scenario(&a.config, a.scenario.as_deref()) {
         Ok(cfg) => {
+            let scenario = cfg
+                .target
+                .as_ref()
+                .map(|t| format!(" scenario={}", t.name))
+                .unwrap_or_default();
             println!(
-                "config OK: iface={} mode={} rate={:?} gap={:?}",
+                "config OK: iface={} mode={}{scenario} rate={:?} gap={:?}",
                 cfg.iface,
                 cfg.mode.as_str(),
                 cfg.rate.model,

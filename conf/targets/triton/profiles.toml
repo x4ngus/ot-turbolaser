@@ -1,0 +1,5 @@
+# Triton scenario CVE profiles, overlaid on the embedded set. The Modicon M340
+# BPCS is already embedded (CVE-2018-7811). The Triconex Tricon MP3008 safety
+# controller speaks TriStation (UDP/1502), which is not a passive-identity
+# carrier, so it is pinned as an identity-only device in plant.yaml rather than a
+# read-identity profile. No additional profiles are required here.

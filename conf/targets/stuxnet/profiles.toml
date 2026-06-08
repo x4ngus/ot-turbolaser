@@ -1,0 +1,13 @@
+# Stuxnet scenario CVE profiles, overlaid on the embedded set (the S7-300 315-2
+# and S7-400 414-3 CPUs are already embedded). Adds the S7-400 417-class cascade
+# protection CPU. Verify each pairing against the current advisory.
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-417 CPU"
+firmware = "V5.2.0"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2016-9159"]   # credential disclosure over port 102 (ICSA-16-348-05, S7-300/400)
+s7_order_number = "6ES7 417-4XT07-0AB0"
