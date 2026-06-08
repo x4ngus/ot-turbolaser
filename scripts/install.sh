@@ -49,6 +49,9 @@ ln -sf "$PREFIX/bin/turbolaser" /usr/local/bin/turbolaser
 RESTARTED=0
 if [[ -d /etc/systemd/system ]]; then
     install -m 0644 systemd/ot-turbolaser.service /etc/systemd/system/ot-turbolaser.service
+    # Templated unit for running a target scenario as the daemon
+    # (systemctl start ot-turbolaser@stuxnet); the plain unit runs generic red laser.
+    install -m 0644 systemd/ot-turbolaser@.service /etc/systemd/system/ot-turbolaser@.service
     systemctl daemon-reload || true
     # On an upgrade of a running appliance, roll the daemon onto the freshly
     # installed binary so the operator never has to restart by hand. A stale

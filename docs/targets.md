@@ -26,6 +26,23 @@ turbolaser pewpew  --config <cfg>           # readout shows the scenario + curre
 
 Without `--scenario`, every command is the generic red laser it always was.
 
+### Running a scenario as the daemon
+
+`fire`/`halt` and the stock `ot-turbolaser.service` run **generic** red laser and
+do not take `--scenario`. To run a scenario as the persistent service, use the
+templated unit, which threads the scenario name through to `run`:
+
+```
+systemctl start ot-turbolaser@stuxnet     # run the stuxnet scenario as the daemon
+systemctl stop  ot-turbolaser@stuxnet
+```
+
+Do not `plan --scenario <name> --commit` and then `fire`: the stock unit launches
+a generic `run`, which refuses the scenario-tagged ledger and (with
+`Restart=always`) crash-loops. Either launch via `ot-turbolaser@<name>` (or a
+manual `turbolaser run --scenario <name>`), or run `turbolaser reset` to return
+the plant to generic before `fire`.
+
 ## Containment (read this)
 
 Scenario packs carry **real published indicators** (C2 domains, artifact names,
@@ -136,6 +153,11 @@ An event's `target` selects a plant device by `ip`, `model`, or `asset_type`
 | `remote_access` | TCP | `target`, `port` |
 | `wiper` | SMB2 /445 | `target`, `share` |
 | `moxa_brick` | UDP /4800 | `target`, `payload_hex` |
+
+Where an emit accepts `payload_hex`, it is a bare hex string (e.g. `7070010203`);
+non-hex characters are ignored. A payload large enough to push a frame over the
+link MTU is dropped from that burst with a warning, so a mis-sized pack value
+never aborts the replay run.
 
 A new protocol emitter is a `synth` module plus an `EmitKind` arm; the framework,
 config, status, and CLI need no change to gain a new scenario.

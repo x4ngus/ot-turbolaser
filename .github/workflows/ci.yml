@@ -27,4 +27,8 @@ jobs:
       - name: Build
         run: cargo build --release --verbose
       - name: Test
+        env:
+          # tshark is installed above; require it so a lost dissector fails the
+          # scenario gate loudly instead of skipping it.
+          OT_REQUIRE_TSHARK: "1"
         run: cargo test --all --verbose

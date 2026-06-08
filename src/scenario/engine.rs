@@ -93,9 +93,9 @@ impl ScenarioEngine {
         // Emit from the cursor, bounded by the per-burst frame cap so a long
         // sequence spreads across successive bursts instead of one microburst.
         while self.event_cursor < events_len {
-            let ev = self.current_phase().events[self.event_cursor].clone();
+            let ev = &self.playbook.phases[self.phase_idx].events[self.event_cursor];
             let ev_frames = self.render_event(
-                &ev,
+                ev,
                 ledger,
                 vuln,
                 nonce.wrapping_add(self.event_cursor as u64),
@@ -504,6 +504,39 @@ mod tests {
         assert_eq!(e.phase_id(), "impact", "oneshot holds the final phase");
         let frames = e.phase_frames(&led, &vuln, 3);
         assert!(!frames.is_empty(), "impact keeps emitting while held");
+    }
+
+    #[test]
+    fn loop_campaign_wraps_to_the_first_phase() {
+        let led = ledger_with_s7();
+        let vuln = VulnDb::embedded().unwrap();
+        let mut e = engine(
+            "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n  - id: impact\n    events:\n      - { emit: s7_stop, target: { ip: 10.20.10.11 } }\n",
+        );
+        e.campaign = Campaign::Loop;
+        assert_eq!(e.phase_id(), "recon");
+        e.phase_frames(&led, &vuln, 0); // recon spent -> advance
+        assert_eq!(e.phase_id(), "impact");
+        e.phase_frames(&led, &vuln, 1); // impact spent, last phase -> wrap
+        assert_eq!(e.phase_id(), "recon", "loop wraps to the first phase");
+    }
+
+    #[test]
+    fn long_event_sequence_splits_across_bursts_under_the_cap() {
+        let led = ledger_with_s7();
+        let vuln = VulnDb::embedded().unwrap();
+        // Three reads in one phase with a per-burst cap of 1: each event yields
+        // several frames, so only one event is consumed per burst and the rest
+        // spread across following bursts instead of one microburst.
+        let mut e = engine(
+            "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n",
+        );
+        e.max_frames_per_burst = 1;
+        let b0 = e.phase_frames(&led, &vuln, 0);
+        assert!(!b0.is_empty(), "the first event still emits");
+        assert_eq!(e.event_cursor, 1, "only one event consumed under the cap");
+        e.phase_frames(&led, &vuln, 1);
+        assert_eq!(e.event_cursor, 2, "the next event lands on the next burst");
     }
 
     #[test]

@@ -82,6 +82,10 @@ pub fn write_multiple_registers(
     addr: u16,
     values: &[u16],
 ) -> Vec<Vec<u8>> {
+    // FC16 caps at 123 registers: the PDU byte-count is a single u8 (123 * 2 =
+    // 246 fits, 124+ would truncate). Clamp so the byte-count, the quantity, and
+    // the payload can never disagree.
+    let values = &values[..values.len().min(0x7b)];
     session::request_response(
         client_mac,
         dev_mac,
@@ -146,5 +150,33 @@ mod tests {
         assert_eq!(pdu[7], FUNC_WRITE_MULTIPLE, "FC 0x10");
         assert_eq!(u16::from_be_bytes([pdu[10], pdu[11]]), 2, "quantity");
         assert_eq!(pdu[12], 4, "byte count = 2 registers * 2");
+    }
+
+    #[test]
+    fn write_multiple_clamps_to_modbus_max_registers() {
+        // A request over the 123-register FC16 limit is clamped so the u8
+        // byte-count field stays consistent with the quantity and payload instead
+        // of truncating (124 registers would write a byte count of 248 then 0).
+        let values = vec![1u16; 200];
+        let frames = write_multiple_registers(
+            [0; 6],
+            [0; 6],
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            40002,
+            1,
+            0x0064,
+            &values,
+        );
+        assert_clean(&frames);
+        let l = parse_layout(&frames[3]).unwrap();
+        let pdu = &frames[3][l.payload..l.end];
+        assert_eq!(pdu[7], FUNC_WRITE_MULTIPLE, "FC 0x10");
+        assert_eq!(
+            u16::from_be_bytes([pdu[10], pdu[11]]),
+            123,
+            "quantity clamped to the FC16 max"
+        );
+        assert_eq!(pdu[12], 246, "byte count = 123 * 2, no u8 truncation");
     }
 }

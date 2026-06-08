@@ -150,7 +150,7 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
             default_prefix: cfg.zones.default_prefix,
         };
         let target_n = args.devices.unwrap_or(cfg.synthesis.target_devices);
-        let mut s = Session::new(seed, now_unix());
+        let mut s = Session::new(seed, crate::now_unix());
         // Fabricate the L1/L2 control zones (capped at 10, the field-zone budget),
         // then add a few L3 operations (DCS) zones in the headroom above them.
         let fab_params = devices::AllocParams {
@@ -261,14 +261,14 @@ fn build_scenario_plan(
     if vuln.is_empty() {
         return Err("no vulnerable-device profiles available".into());
     }
-    plant::pin_from_pack(target, &vuln, oui, seed, now_unix(), &cfg.dns.domains)
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    plant::pin_from_pack(
+        target,
+        &vuln,
+        oui,
+        seed,
+        crate::now_unix(),
+        &cfg.dns.domains,
+    )
 }
 
 /// Read and merge a bounded slice of the configured captures, for green-laser

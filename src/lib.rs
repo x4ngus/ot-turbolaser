@@ -22,6 +22,16 @@ pub mod vuln;
 
 use cli::{Cli, Command};
 
+/// Current unix time in whole seconds, or 0 if the clock predates the epoch.
+/// Shared by the run loop and the simulate commands so the appliance stamps
+/// time one way.
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Dispatch a parsed CLI to the matching subcommand. Returns a process exit
 /// code: 0 on success, non-zero on error.
 pub fn dispatch(cli: Cli) -> i32 {

@@ -84,8 +84,10 @@ pub fn fabricate(
 
 /// The next host in `net` not already in `used`, skipping network+1 which is
 /// reserved for the zone-edge firewall gateway (added by `enrich_plant`). Pure
-/// helper so fabrication keeps one growing set instead of rebuilding it.
-fn next_free_in(net: Ipv4Net, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
+/// helper so fabrication keeps one growing set instead of rebuilding it. Shared
+/// with the sealed scenario plant so its auto-assigned devices skip the gateway
+/// slot too.
+pub(crate) fn next_free_in(net: Ipv4Net, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
     let gateway = Ipv4Addr::from(u32::from(net.network()).saturating_add(1));
     net.hosts().find(|ip| *ip != gateway && !used.contains(ip))
 }

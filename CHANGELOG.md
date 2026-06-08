@@ -3,6 +3,43 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0-alpha.2] - 2026-06-08
+
+Second alpha of the 0.4.0 line: hardening from a full code review of the scenario
+framework. No behaviour change to the shipped scenarios or to generic red laser;
+all fixes close latent edges a hand-authored pack or an unusual deploy could hit.
+
+### Added
+- **Templated systemd unit** `ot-turbolaser@.service` to run a target scenario as
+  the daemon (`systemctl start ot-turbolaser@stuxnet`). The stock unit and
+  `fire`/`halt` still run generic red laser; `docs/targets.md` now documents the
+  difference and warns that committing a scenario plant and then `fire`-ing the
+  stock unit crash-loops.
+
+### Fixed
+- **Oversized synth frames no longer abort the replay.** A misauthored scenario
+  `payload_hex` (Moxa brick, S7 download, TriStation) could build a frame over the
+  link MTU; the synth burst now drops such frames with a warning, the same guard
+  the remap path already applied to replayed captures, instead of failing the
+  whole tcpreplay run with EMSGSIZE.
+- **Auto-assigned pinned devices skip the firewall slot.** A plant device that
+  omits `ip:` under `enrich: true` no longer lands on network+1 (the gateway slot
+  enrich reserves for the zone firewall/DNS resolver), which previously left that
+  zone with no firewall. It now uses the same gateway-skipping allocator as the
+  generic fabricator.
+- **Modbus FC16 clamps to 123 registers** so the single-byte PDU byte-count can
+  never truncate or disagree with the register payload.
+
+### Changed
+- **Status heartbeat note:** the heartbeat `schema` moved 3 -> 4 in alpha.1 with
+  the additive `scenario`, `phase`, and `technique_ids` fields. The in-tree reader
+  (`pewpew`) is field-tolerant; an external consumer keyed on `schema == 3` must
+  accept 4.
+- CI now requires tshark for the scenario dissector gate (`OT_REQUIRE_TSHARK`), so
+  a lost dissector fails the build instead of skipping the gate. Added tests for
+  the Modbus clamp, the auto-IP firewall slot, looped-campaign phase wrap, and the
+  per-burst frame-cap split.
+
 ## [0.4.0-alpha.1] - 2026-06-08
 
 First pre-release (alpha) of the 0.4.0 line, for validation on the isolated

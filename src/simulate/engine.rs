@@ -563,7 +563,20 @@ impl SimulatorEngine {
             return None;
         }
         let out = self.shm_dir.join("synth-identity.pcap");
-        match pcapio::write(&out, &synth::to_capture(frames)) {
+        // The burst is our own construction, but a misauthored scenario
+        // payload_hex could build a frame over the link MTU, and one oversized
+        // frame aborts the whole tcpreplay run (EMSGSIZE). Guard the synth burst
+        // the same way the remap path guards replayed captures, rather than wedge
+        // the run on a bad pack value.
+        let mut cap = synth::to_capture(frames);
+        let oversize = l3::drop_oversize_frames(&mut cap, l3::STANDARD_FRAME_BYTES);
+        if oversize > 0 {
+            log::warn!(
+                "synth: dropped {oversize} scenario/identity frame(s) over {} bytes",
+                l3::STANDARD_FRAME_BYTES
+            );
+        }
+        match pcapio::write(&out, &cap) {
             Ok(()) => Some(out),
             Err(e) => {
                 log::warn!("could not write identity pcap: {e}");

@@ -96,6 +96,13 @@ fn dump_scenario_pcaps() {
 #[test]
 fn scenario_attack_frames_dissect_in_tshark() {
     if !tshark_available() {
+        // CI installs tshark and sets OT_REQUIRE_TSHARK, so a CI run that lost the
+        // dissector fails loudly rather than passing the gate vacuously; a local
+        // run without tshark still skips.
+        assert!(
+            std::env::var_os("OT_REQUIRE_TSHARK").is_none(),
+            "OT_REQUIRE_TSHARK is set but tshark was not found"
+        );
         eprintln!("tshark not found; skipping scenario dissector validation");
         return;
     }

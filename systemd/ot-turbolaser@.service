@@ -1,0 +1,42 @@
+[Unit]
+Description=ot-turbolaser ICS/OT pcap replay appliance (scenario %i)
+Documentation=https://github.com/x4ngus/ot-turbolaser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Templated unit for running a target scenario as the daemon: %i is the scenario
+# name, e.g. `systemctl start ot-turbolaser@stuxnet`. The plain ot-turbolaser
+# unit runs generic red laser; this one threads --scenario through to `run` so
+# the persistent service drives the pinned attack. Network setup/teardown is the
+# same isolated-bridge config and refuses to attach to a physical uplink.
+ExecStartPre=/opt/replay/bin/turbolaser net-setup --config /opt/replay/conf/replay.yaml
+ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml --scenario %i
+ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
+Restart=always
+RestartSec=3
+
+# Creates /run/ot-turbolaser (0755) for the status heartbeat, cleaned on stop.
+RuntimeDirectory=ot-turbolaser
+RuntimeDirectoryMode=0755
+
+# Creates /var/lib/ot-turbolaser (0750) for the persistent red-laser session
+# ledger, preserved across restarts. Cleared with `turbolaser reset`.
+StateDirectory=ot-turbolaser
+StateDirectoryMode=0750
+
+# Raw AF_PACKET TX for tcpreplay, plus tc/ip for the network setup.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Hardening that works inside an LXC container, the primary target. These do not
+# need a mount namespace. The optional systemd/hardening.conf drop-in applies the
+# namespace-based hardening on a bare-metal host or VM; install it under
+# /etc/systemd/system/ot-turbolaser@.service.d/ to cover this unit too.
+NoNewPrivileges=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

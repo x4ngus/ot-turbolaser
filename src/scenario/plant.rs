@@ -158,10 +158,6 @@ pub fn build_sealed_session(
     // (which would otherwise rename the named share).
     let mut explicit_names: Vec<(String, String)> = Vec::new();
     for d in &spec.devices {
-        let net: Ipv4Net = d
-            .zone
-            .parse()
-            .map_err(|_| format!("device zone {:?} is not a valid CIDR", d.zone))?;
         if !s.has_subnet(&d.zone) {
             return Err(format!("device references undeclared zone {}", d.zone));
         }
@@ -169,9 +165,19 @@ pub fn build_sealed_session(
             Some(ip) => ip
                 .parse::<Ipv4Addr>()
                 .map_err(|_| format!("device ip {ip:?} is not valid"))?,
-            None => s
-                .next_free_ip(net)
-                .ok_or_else(|| format!("zone {} is exhausted", d.zone))?,
+            None => {
+                // Auto-assign the next free host, skipping network+1: enrich_plant
+                // reserves that slot for the zone firewall/DNS resolver, so an
+                // ip-less device must not land on it (the generic fabricator skips
+                // it the same way). The zone was already validated as a CIDR when
+                // its subnet was added, so this re-parse cannot realistically fail.
+                let net: Ipv4Net = d
+                    .zone
+                    .parse()
+                    .map_err(|_| format!("device zone {:?} is not a valid CIDR", d.zone))?;
+                devices::next_free_in(net, &s.used_ips())
+                    .ok_or_else(|| format!("zone {} is exhausted", d.zone))?
+            }
         };
 
         // A model that resolves to a profile makes a CVE-bearing device that
@@ -349,5 +355,43 @@ enrich: true
         assert_eq!(dev.model, "Custom RTU 560", "descriptive model kept");
         assert!(dev.cves.is_empty(), "an unresolved model is identity-only");
         assert_eq!(dev.asset_type.as_deref(), Some("RTU"));
+    }
+
+    #[test]
+    fn auto_assigned_device_skips_the_firewall_slot() {
+        // A device that omits `ip:` under enrich must not land on network+1 (.1),
+        // which enrich reserves for the zone firewall and DNS resolver. Regression
+        // for the auto-assign-vs-firewall collision: before the fix the device
+        // took .1 and that zone lost its firewall.
+        let yaml = "zones:\n  - { cidr: 10.20.10.0/24, name: Z, purdue_level: 1, vendor: 'Siemens AG' }\ndevices:\n  - { zone: 10.20.10.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP' }\nenrich: true\n";
+        let spec = PlantSpec::parse(yaml).unwrap();
+        let vuln = VulnDb::embedded().unwrap();
+        let s = build_sealed_session(
+            &spec,
+            &vuln,
+            &OuiDb::embedded(),
+            1337,
+            0,
+            "x",
+            &["plant.example".into()],
+        )
+        .unwrap();
+        // The firewall still owns the gateway slot.
+        let fw = s
+            .devices
+            .iter()
+            .find(|d| d.ip == "10.20.10.1")
+            .expect("enrich kept the firewall at .1");
+        assert_eq!(fw.asset_type.as_deref(), Some("Firewall"));
+        // The auto-assigned CPU sits elsewhere, not on the gateway slot.
+        let cpu = s
+            .devices
+            .iter()
+            .find(|d| d.model == "SIMATIC S7-300 CPU 315-2 PN/DP")
+            .expect("cpu pinned");
+        assert_ne!(
+            cpu.ip, "10.20.10.1",
+            "auto-assign skipped the firewall slot"
+        );
     }
 }

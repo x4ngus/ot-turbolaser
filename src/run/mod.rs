@@ -59,7 +59,7 @@ pub fn run(args: &RunArgs) -> i32 {
         cfg.watchdog.flatline_secs,
         shutdown.clone(),
     );
-    let started = now_unix();
+    let started = crate::now_unix();
     let mut run_counter: u64 = 0;
     // Carried across iterations: the last completed run's packet count (so the
     // heartbeat is never null once a run finishes) and the tx-rate sampler (so
@@ -155,7 +155,7 @@ pub fn run(args: &RunArgs) -> i32 {
         // genuine host in this capture, replacing the file to send when it fires.
         let mut promoted: Option<PathBuf> = None;
         if let Some(e) = engine.as_mut() {
-            promoted = e.maybe_promote(file_to_send, now_unix());
+            promoted = e.maybe_promote(file_to_send, crate::now_unix());
         }
         let file_to_send: &Path = promoted.as_deref().unwrap_or(file_to_send);
 
@@ -237,7 +237,7 @@ pub fn run(args: &RunArgs) -> i32 {
         // rather than the capture's line rate, so the ARP resolutions arrive
         // paced over the burst instead of as one microburst the sensor drops.
         if let Some(e) = engine.as_mut() {
-            if let Some(p) = e.red_tick(run_counter, now_unix()) {
+            if let Some(p) = e.red_tick(run_counter, crate::now_unix()) {
                 match replay::run_once(&cfg.iface, &p, &[], &watchdog) {
                     Ok(res) if res.success => {
                         info!("run={run_counter} identities sent: {}", res.detail)
@@ -282,7 +282,7 @@ fn init_logger() {
 }
 
 fn write(cfg: &Config, s: &mut Status, rates: &mut PpsState) {
-    s.updated_unix = now_unix();
+    s.updated_unix = crate::now_unix();
     s.total_tx_packets = read_tx_packets(&cfg.iface);
     s.pps = rates.pps;
     s.mbps = rates.mbps;
@@ -475,13 +475,6 @@ fn has_public_source(path: &Path, max_bytes: u64) -> bool {
     cap.packets
         .iter()
         .any(|p| l3::carries_public_address(&p.data))
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
