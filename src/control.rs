@@ -8,7 +8,7 @@
 //! alias).
 
 use crate::cli::{FireArgs, NetArgs, NetShowArgs, StatusArgs};
-use crate::config::{self, MirrorMode};
+use crate::config;
 use crate::ledger::Session;
 use crate::netinfo::{self, Datapath};
 use crate::scenario::guard_ledger_scenario;
@@ -114,10 +114,7 @@ fn run_net_script(name: &str, config: &Path) -> i32 {
             return 2;
         }
     };
-    let mode = match cfg.net.mirror {
-        MirrorMode::Tc => "tc",
-        MirrorMode::Ovs => "ovs",
-    };
+    let mode = cfg.net.mirror.as_str();
     let status = Command::new("bash")
         .arg(&script)
         .arg("--mode")
@@ -174,10 +171,7 @@ pub fn net_show(args: &NetShowArgs) -> i32 {
     let replay = cfg.iface.clone();
     let bridge = cfg.net.bridge.clone();
     let sensor = cfg.net.sensor_port.clone();
-    let mode = match cfg.net.mirror {
-        MirrorMode::Tc => "tc",
-        MirrorMode::Ovs => "ovs",
-    };
+    let mode = cfg.net.mirror.as_str();
 
     let replay_exists = netinfo::iface_exists(&replay);
     let sensor_exists = netinfo::iface_exists(&sensor);
@@ -186,19 +180,34 @@ pub fn net_show(args: &NetShowArgs) -> i32 {
     let bridge_physical_member = members.iter().find(|m| netinfo::is_physical(m)).cloned();
     let mirror_present = detect_mirror(mode, &replay, &sensor);
 
-    // The live probe is the decisive check: sample both counters across a window
-    // and see whether frames actually move to the sensor right now.
-    let (tx_delta, rx_delta) = if args.probe_secs > 0 && replay_exists && sensor_exists {
-        let tx0 = netinfo::sysfs_stat(&replay, "tx_packets");
-        let rx0 = netinfo::sysfs_stat(&sensor, "rx_packets");
+    // The live probe is the decisive check: sample tx/rx across a window and see
+    // whether frames actually move to the sensor right now. The post-window
+    // sample is also the counter we display, so each is read only once.
+    let probe = args.probe_secs > 0 && replay_exists && sensor_exists;
+    let (tx0, rx0) = if probe {
+        (
+            netinfo::sysfs_stat(&replay, "tx_packets"),
+            netinfo::sysfs_stat(&sensor, "rx_packets"),
+        )
+    } else {
+        (None, None)
+    };
+    if probe {
         std::thread::sleep(std::time::Duration::from_secs(args.probe_secs));
-        let tx1 = netinfo::sysfs_stat(&replay, "tx_packets");
-        let rx1 = netinfo::sysfs_stat(&sensor, "rx_packets");
-        (counter_delta(tx0, tx1), counter_delta(rx0, rx1))
+    }
+    let replay_tx_packets = netinfo::sysfs_stat(&replay, "tx_packets");
+    let sensor_rx_packets = netinfo::sysfs_stat(&sensor, "rx_packets");
+    let (tx_delta, rx_delta) = if probe {
+        (
+            counter_delta(tx0, replay_tx_packets),
+            counter_delta(rx0, sensor_rx_packets),
+        )
     } else {
         (None, None)
     };
 
+    // Gather the snapshot once; both renderers read from it, so the readout shows
+    // the same instant the verdict was computed on.
     let d = Datapath {
         mirror_mode: mode.to_string(),
         replay: replay.clone(),
@@ -207,12 +216,17 @@ pub fn net_show(args: &NetShowArgs) -> i32 {
         replay_exists,
         replay_up: replay_exists && netinfo::link_up(&replay),
         replay_master: netinfo::master(&replay),
+        replay_mtu: netinfo::mtu(&replay),
         bridge_exists,
         bridge_physical_member,
         sensor_exists,
         sensor_up: sensor_exists && netinfo::link_up(&sensor),
         sensor_promisc: netinfo::promisc(&sensor).unwrap_or(false),
         mirror_present,
+        replay_tx_packets,
+        replay_tx_dropped: netinfo::sysfs_stat(&replay, "tx_dropped"),
+        sensor_rx_packets,
+        sensor_rx_dropped: netinfo::sysfs_stat(&sensor, "rx_dropped"),
         tx_delta,
         rx_delta,
     };
@@ -234,16 +248,14 @@ pub fn net_show(args: &NetShowArgs) -> i32 {
             "exit_code": health.exit_code(),
             "mirror_mode": d.mirror_mode,
             "replay": { "iface": d.replay, "exists": d.replay_exists, "up": d.replay_up,
-                        "master": d.replay_master, "mtu": netinfo::mtu(&replay),
-                        "tx_packets": netinfo::sysfs_stat(&replay, "tx_packets"),
-                        "tx_dropped": netinfo::sysfs_stat(&replay, "tx_dropped"),
+                        "master": d.replay_master, "mtu": d.replay_mtu,
+                        "tx_packets": d.replay_tx_packets, "tx_dropped": d.replay_tx_dropped,
                         "tx_delta": d.tx_delta },
             "bridge": { "iface": d.bridge, "exists": d.bridge_exists,
                         "members": members, "physical_member": d.bridge_physical_member },
             "sensor": { "iface": d.sensor, "exists": d.sensor_exists, "up": d.sensor_up,
                         "promisc": d.sensor_promisc,
-                        "rx_packets": netinfo::sysfs_stat(&sensor, "rx_packets"),
-                        "rx_dropped": netinfo::sysfs_stat(&sensor, "rx_dropped"),
+                        "rx_packets": d.sensor_rx_packets, "rx_dropped": d.sensor_rx_dropped,
                         "rx_delta": d.rx_delta },
             "mirror_present": d.mirror_present,
             "findings": f,
@@ -342,7 +354,15 @@ fn render_net_show(
     findings: &[netinfo::Finding],
     probe_secs: u64,
 ) {
-    let onoff = |b: bool| if b { "up" } else { "DOWN" };
+    let iface_state = |exists: bool, up: bool| {
+        if !exists {
+            "MISSING"
+        } else if up {
+            "up"
+        } else {
+            "DOWN"
+        }
+    };
     println!(
         "turbolaser net-show  [{}]  ({} mirror)",
         format!("{health:?}").to_lowercase(),
@@ -353,23 +373,19 @@ fn render_net_show(
     println!(
         "    iface         : {} ({})",
         d.replay,
-        if d.replay_exists {
-            onoff(d.replay_up)
-        } else {
-            "MISSING"
-        }
+        iface_state(d.replay_exists, d.replay_up)
     );
     println!(
         "    bridge master : {}",
         d.replay_master.as_deref().unwrap_or("none")
     );
-    if let Some(mtu) = netinfo::mtu(&d.replay) {
+    if let Some(mtu) = d.replay_mtu {
         println!("    mtu           : {mtu}");
     }
     println!(
         "    tx packets    : {}  (dropped {})",
-        opt(netinfo::sysfs_stat(&d.replay, "tx_packets")),
-        opt(netinfo::sysfs_stat(&d.replay, "tx_dropped"))
+        opt(d.replay_tx_packets),
+        opt(d.replay_tx_dropped)
     );
 
     println!("  -- isolated bridge --");
@@ -398,11 +414,7 @@ fn render_net_show(
     println!(
         "    iface         : {} ({})",
         d.sensor,
-        if d.sensor_exists {
-            onoff(d.sensor_up)
-        } else {
-            "MISSING"
-        }
+        iface_state(d.sensor_exists, d.sensor_up)
     );
     println!(
         "    promiscuous   : {}",
@@ -410,8 +422,8 @@ fn render_net_show(
     );
     println!(
         "    rx packets    : {}  (dropped {})",
-        opt(netinfo::sysfs_stat(&d.sensor, "rx_packets")),
-        opt(netinfo::sysfs_stat(&d.sensor, "rx_dropped"))
+        opt(d.sensor_rx_packets),
+        opt(d.sensor_rx_dropped)
     );
 
     println!("  -- mirror --");

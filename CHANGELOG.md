@@ -3,6 +3,24 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0-beta.3] - 2026-06-10
+
+Internal cleanups from a quality pass over the beta work. No behaviour change.
+
+### Changed
+- `net-show` gathers the interface counters once into its snapshot and both the
+  human and JSON renderers read from it, instead of re-opening `/sys` per output
+  line; the readout now reflects the same instant the verdict was computed on.
+- Pack validation is centralised in one `scenario::build_validated_plant`
+  sequence that `plan` and `check`/`fire` (via `preflight`) share, so they cannot
+  drift on what a valid pack is.
+- Added `MirrorMode::as_str()` (matching `Mode::as_str()`) in place of two inline
+  match arms; the plant hostname re-qualification is a single pass.
+- `install.sh` system integration (PATH symlink, systemd units, `/var/lib`) is now
+  gated by an explicit `OT_INSTALL_SYSTEM` flag (default on) rather than inferred
+  from `PREFIX`, so a real install under a non-default prefix is not silently left
+  non-functional; the install-layout smoke test sets `OT_INSTALL_SYSTEM=0`.
+
 ## [0.4.0-beta.2] - 2026-06-10
 
 A content-fidelity fix on top of beta.1.

@@ -31,22 +31,40 @@ pub fn guard_ledger_scenario(ledger: Option<&str>, active: Option<&str>) -> Resu
     ))
 }
 
-/// Validate a scenario pack end to end without committing or sending traffic:
-/// overlay its CVE profiles, build (and discard) its sealed plant, and load its
-/// playbook. Returns the first error, so `check`/`plan` reject a broken pack at
-/// pre-flight instead of letting the daemon discover it only at its first start.
-/// A config with no `target:` is a generic run and validates trivially.
+/// Build a scenario's sealed plant from its pack and validate its playbook in one
+/// sequence: overlay the pack's CVE profiles, load (validate) the playbook, then
+/// pin the plant into a sealed [`Session`]. The single definition that `plan`
+/// (which keeps the session to commit) and [`preflight`] (which discards it) both
+/// use, so the validation order lives in one place rather than being copied per
+/// caller. The daemon's first-run build in `SimulatorEngine::red` shares the same
+/// `pin_from_pack`/`ScenarioEngine::load` pieces but owns its own load-or-build
+/// and persistence lifecycle.
+pub fn build_validated_plant(
+    cfg: &crate::config::Config,
+    target: &crate::config::TargetCfg,
+    oui: &crate::oui::OuiDb,
+    seed: u64,
+    now_unix: u64,
+) -> Result<crate::ledger::Session, String> {
+    let vuln = crate::vuln::VulnDb::load_overlay(&target.pack_dir.join(&target.profiles));
+    if vuln.is_empty() {
+        return Err("no vulnerable-device profiles available".into());
+    }
+    engine::ScenarioEngine::load(target, seed)?; // validate the playbook
+    plant::pin_from_pack(target, &vuln, oui, seed, now_unix, &cfg.dns.domains)
+}
+
+/// Validate a scenario pack end to end without committing or sending traffic, so
+/// `check`/`plan`/`fire` reject a broken pack at pre-flight instead of letting the
+/// daemon discover it only at its first start. A config with no `target:` is a
+/// generic run and validates trivially.
 pub fn preflight(cfg: &crate::config::Config) -> Result<(), String> {
     let Some(t) = cfg.target.as_ref() else {
         return Ok(());
     };
-    // Embedded OUI and a fixed seed keep pre-flight self-contained: it checks the
-    // pack's structure (zones, devices, profiles, playbook), not the eventual
-    // wire identities, so it must not depend on the configured OUI file existing
-    // or on any particular seed.
     // A malformed profiles.toml is not fatal (load_overlay keeps the embedded set
-    // and only logs it), but a silent drop hides a typo'd CVE profile from the
-    // operator. Surface it loudly at pre-flight so `check`/`plan`/`fire` report it.
+    // and only logs it, and check/plan run without a logger), but a silent drop
+    // hides a typo'd CVE profile from the operator. Surface it here.
     let profiles_path = t.pack_dir.join(&t.profiles);
     if let Ok(text) = std::fs::read_to_string(&profiles_path) {
         if !text.trim().is_empty() {
@@ -58,12 +76,12 @@ pub fn preflight(cfg: &crate::config::Config) -> Result<(), String> {
             }
         }
     }
-    let vuln = crate::vuln::VulnDb::load_overlay(&profiles_path);
+    // Embedded OUI and a fixed seed keep pre-flight self-contained: it checks the
+    // pack's structure, not the eventual wire identities, so it must not depend on
+    // the configured OUI file or any particular seed.
     let oui = crate::oui::OuiDb::embedded();
     let seed = cfg.session.seed.unwrap_or(0);
-    plant::pin_from_pack(t, &vuln, &oui, seed, 0, &cfg.dns.domains)?;
-    engine::ScenarioEngine::load(t, seed)?;
-    Ok(())
+    build_validated_plant(cfg, t, &oui, seed, 0).map(|_| ())
 }
 
 /// `turbolaser targets`: list the installed scenario packs.

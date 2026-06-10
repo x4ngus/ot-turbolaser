@@ -410,6 +410,16 @@ pub enum MirrorMode {
     Ovs,
 }
 
+impl MirrorMode {
+    /// Canonical string passed to the net scripts and shown by net-show.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MirrorMode::Tc => "tc",
+            MirrorMode::Ovs => "ovs",
+        }
+    }
+}
+
 /// Red-laser zone fabrication. The hard caps live in the ledger; config can
 /// lower them but never raise them.
 #[derive(Debug, Deserialize)]

@@ -21,7 +21,7 @@ use crate::ledger::{self, Session};
 use crate::oui::OuiDb;
 use crate::pcapio::Capture;
 use crate::proto::l3;
-use crate::scenario::{guard_ledger_scenario, plant};
+use crate::scenario::guard_ledger_scenario;
 use crate::vuln::VulnDb;
 
 /// `turbolaser zones`: show the current zone map. Green laser derives it from
@@ -248,30 +248,17 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
     0
 }
 
-/// Build a scenario's sealed plant from its pack: overlay the pack's CVE profiles
-/// on the embedded DB, load the plant spec, and pin it into the same sealed
-/// session the daemon replays verbatim.
+/// Build a scenario's sealed plant from its pack and validate its playbook, then
+/// pin it into the sealed session the daemon replays verbatim. Thin wrapper over
+/// the shared [`crate::scenario::build_validated_plant`] sequence so `plan` and
+/// `check`/`fire` agree on what a valid pack is.
 fn build_scenario_plan(
     cfg: &Config,
     target: &TargetCfg,
     oui: &OuiDb,
     seed: u64,
 ) -> Result<Session, String> {
-    let vuln = VulnDb::load_overlay(&target.pack_dir.join(&target.profiles));
-    if vuln.is_empty() {
-        return Err("no vulnerable-device profiles available".into());
-    }
-    // Validate the playbook too, so `plan` rejects a broken timeline at pre-flight
-    // exactly as the daemon would; `pin_from_pack` only covers the plant.
-    crate::scenario::engine::ScenarioEngine::load(target, seed)?;
-    plant::pin_from_pack(
-        target,
-        &vuln,
-        oui,
-        seed,
-        crate::now_unix(),
-        &cfg.dns.domains,
-    )
+    crate::scenario::build_validated_plant(cfg, target, oui, seed, crate::now_unix())
 }
 
 /// Read and merge a bounded slice of the configured captures, for green-laser

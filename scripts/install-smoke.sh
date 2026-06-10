@@ -15,7 +15,9 @@ cleanup() { rm -rf "$PREFIX"; }
 trap cleanup EXIT
 
 echo "install-smoke: laying the tree into $PREFIX"
-PREFIX="$PREFIX" scripts/install.sh >/dev/null
+# OT_INSTALL_SYSTEM=0: lay only the runtime tree, no PATH symlink / systemd units /
+# /var/lib, so the smoke test is hermetic and needs no root.
+PREFIX="$PREFIX" OT_INSTALL_SYSTEM=0 scripts/install.sh >/dev/null
 
 BIN="$PREFIX/bin/turbolaser"
 CFG="$PREFIX/conf/replay.yaml"

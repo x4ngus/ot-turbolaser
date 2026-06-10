@@ -5,7 +5,8 @@
 #
 # PREFIX is overridable (PREFIX=/tmp/tl-test scripts/install.sh) so the
 # install-layout smoke test can lay the tree into a sandbox; defaults to the
-# appliance path the systemd unit runs.
+# appliance path the systemd unit runs. Set OT_INSTALL_SYSTEM=0 to lay only the
+# runtime tree and skip system integration (PATH symlink, systemd units, /var/lib).
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/replay}"
@@ -78,12 +79,13 @@ if [[ -d conf/targets ]]; then
     done
 fi
 
-# A sandbox install (PREFIX overridden, e.g. the install-layout smoke test) lays
-# only the runtime tree under PREFIX. The global PATH symlink and the systemd
-# units are real-appliance integration into system paths, skipped unless we are
-# installing to the default prefix, so the smoke test stays hermetic and rootless.
-SYSTEM_INTEGRATION=0
-[[ "$PREFIX" == /opt/replay ]] && SYSTEM_INTEGRATION=1
+# System integration = the global PATH symlink, the systemd units, and the
+# /var/lib state dir (writes to system paths). On by default for a real appliance
+# install regardless of PREFIX, so a deploy under a non-default prefix is not
+# silently left non-functional. A sandbox install (the install-layout smoke test)
+# sets OT_INSTALL_SYSTEM=0 to lay only the runtime tree under PREFIX, staying
+# hermetic and rootless.
+SYSTEM_INTEGRATION="${OT_INSTALL_SYSTEM:-1}"
 
 if [[ "$SYSTEM_INTEGRATION" == 1 ]]; then
     # The persistent session-ledger dir. On the appliance the systemd unit's

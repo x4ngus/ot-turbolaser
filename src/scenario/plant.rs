@@ -262,16 +262,16 @@ pub fn build_sealed_session(
     // Re-assert spec-given hostnames, which enrich may have overwritten, and seal
     // each as an FQDN under its zone domain so an explicit name reads the same way
     // the generic fabricator's names do (a bare name already containing a dot is
-    // left as-is).
+    // left as-is). Map each zone to its domain once so this is a single mutable
+    // pass over the devices.
+    let zone_domain: std::collections::HashMap<String, String> = s
+        .subnets
+        .iter()
+        .filter_map(|sn| sn.domain.clone().map(|dom| (sn.cidr.clone(), dom)))
+        .collect();
     for (ip, name) in explicit_names {
-        let domain = s.devices.iter().find(|d| d.ip == ip).and_then(|d| {
-            s.subnets
-                .iter()
-                .find(|sn| sn.cidr == d.subnet_cidr)
-                .and_then(|sn| sn.domain.clone())
-        });
         if let Some(dev) = s.devices.iter_mut().find(|d| d.ip == ip) {
-            dev.hostname = Some(match domain {
+            dev.hostname = Some(match zone_domain.get(&dev.subnet_cidr) {
                 Some(dom) if !name.contains('.') => format!("{name}.{dom}"),
                 _ => name,
             });

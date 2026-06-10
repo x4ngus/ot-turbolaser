@@ -110,6 +110,7 @@ pub struct Datapath {
     pub replay_up: bool,
     /// The bridge the replay port is enslaved to (tc mode), if any.
     pub replay_master: Option<String>,
+    pub replay_mtu: Option<u64>,
     pub bridge_exists: bool,
     /// A physical member of the isolated bridge: an isolation breach.
     pub bridge_physical_member: Option<String>,
@@ -118,6 +119,13 @@ pub struct Datapath {
     pub sensor_promisc: bool,
     /// A mirror/span from the replay port to the sensor port was found.
     pub mirror_present: bool,
+    // Raw counters, read once at gather time (the probe's post-window sample),
+    // so the JSON and human renders show the same instant the verdict assessed
+    // rather than re-opening sysfs per output line.
+    pub replay_tx_packets: Option<u64>,
+    pub replay_tx_dropped: Option<u64>,
+    pub sensor_rx_packets: Option<u64>,
+    pub sensor_rx_dropped: Option<u64>,
     /// Counter deltas over the probe window. None when no probe was run.
     pub tx_delta: Option<u64>,
     pub rx_delta: Option<u64>,
@@ -289,12 +297,17 @@ mod tests {
             replay_exists: true,
             replay_up: true,
             replay_master: Some("tlbr0".into()),
+            replay_mtu: Some(1500),
             bridge_exists: true,
             bridge_physical_member: None,
             sensor_exists: true,
             sensor_up: true,
             sensor_promisc: true,
             mirror_present: true,
+            replay_tx_packets: Some(5000),
+            replay_tx_dropped: Some(0),
+            sensor_rx_packets: Some(5000),
+            sensor_rx_dropped: Some(0),
             tx_delta: Some(1200),
             rx_delta: Some(1200),
         }
