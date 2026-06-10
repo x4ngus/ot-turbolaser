@@ -51,6 +51,11 @@ up:
 pewpew:
     turbolaser pewpew
 
+# Qualify the live datapath: confirm frames egress the replay port and reach the
+# sensor port through the SPAN mirror. First stop for "the sensor sees nothing".
+net-show:
+    turbolaser net-show
+
 # Take the appliance offline (stop + disable; the unit tears down the mirror).
 # `just down` is an alias.
 halt:

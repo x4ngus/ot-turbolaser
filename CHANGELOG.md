@@ -3,6 +3,69 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0-beta.1] - 2026-06-10
+
+First beta of the 0.4.0 line. The alpha shipped the target-scenario framework but
+the scenarios did not load on an installed appliance; this beta makes them load,
+adds the regression test that would have caught it, makes a broken pack fail safe
+instead of crash-looping, and adds a runtime datapath-triage command. No new
+scenarios or emit kinds (deferred to later 0.4.x betas); the four shipped packs
+keep `ioc_fidelity: real`.
+
+### Fixed
+- **Target scenarios now ship with the appliance (the headline bug).**
+  `install.sh` laid down the binary, config, and data DBs but never copied
+  `conf/targets/`, and the packs have no embedded fallback, so on a real install
+  `run --scenario`/`targets`/`check --scenario` all failed and
+  `ot-turbolaser@<name>` crash-looped. The installer now copies every pack
+  (`scenario.yaml`/`playbook.yaml`/`plant.yaml`/`profiles.toml`) into
+  `<prefix>/conf/targets/`, honouring the same `.example` no-clobber convention as
+  the config, and skipping `_`-prefixed dirs (the authoring `_template`). It also
+  ships `veth-replay-check.sh`. CI passed through the alpha because the tests load
+  the repo-relative `conf/`, never the installed tree.
+
+### Added
+- **`install-smoke.sh` + a CI step** that installs into a sandbox `PREFIX` and
+  asserts the four packs are present and load through the real binary
+  (`targets` lists 4, `check --scenario <name>` exits 0). This is the regression
+  guard the source-tree tests cannot provide. `install.sh` now honours an
+  overridable `PREFIX` and skips system integration (PATH symlink, systemd units,
+  `/var/lib`) for a non-default prefix, so the smoke test is hermetic and rootless.
+- **`turbolaser net-show`**: a read-only, single-call datapath triage. It
+  qualifies that frames actually egress the replay port and reach the sensor port
+  through the SPAN mirror (live tx/rx delta probe), checks the bridge, mirror, and
+  promiscuity, cross-checks the heartbeat, and exits non-zero naming the specific
+  defect with a remedy. Closes the gap that `pewpew` (daemon-reported counters
+  only) cannot see, after a live-demo failure where the sensor had no ingest and
+  there was no fast way to localise the fault between appliance, bridge, and sensor.
+- **Pre-flight validation of the whole pack.** `check --scenario` and
+  `plan --scenario` now load the plant, playbook, and profiles, so a broken pack is
+  rejected at pre-flight instead of at the daemon's first start.
+
+### Changed
+- **A broken scenario no longer self-destructs.** `ot-turbolaser@.service` gains
+  `StartLimitIntervalSec`/`StartLimitBurst` so a genuinely broken pack lands in
+  `failed` instead of crash-looping every `RestartSec`, plus an `ExecStartPre`
+  that fails early with a clear message if the named pack is not installed.
+- **A corrupt `session.json` is recoverable again.** The daemon warns and rebuilds
+  a fresh plant rather than refusing to start; only the deliberate
+  scenario-mismatch guard (a ledger that parsed cleanly but belongs to a different
+  scenario) stays fatal.
+- **Proxmox docs** gain a `net-show`-first triage path and a host-by-host tcpdump
+  runbook (turbolaser CT, Proxmox host, sensor VM) with a fault-localisation
+  decision tree.
+- Stabilisation hardening: a strict `payload_hex` decoder (rejects odd-length or
+  malformed hex instead of silently shifting bytes), plant-integrity checks
+  (duplicate-IP rejection, hostname re-qualification), a loud warning when a pack's
+  `profiles.toml` is malformed, `fire --scenario`, and clearer `targets` output
+  when the targets dir is missing versus empty.
+- Content fidelity: the four packs' CVEs, firmware, hardware order numbers, and
+  indicators were re-verified against their cited advisories and found accurate or
+  appropriately representative; no pack data changed. (The Stuxnet S7-417 order
+  number `6ES7417-4XT07-0AB0` is a genuine SIMATIC S7-400 CPU 417-4 MLFB, and the
+  Ukraine breaker-open is correctly mapped to ATT&CK T0855 Unauthorized Command
+  Message.)
+
 ## [0.4.0-alpha.2] - 2026-06-08
 
 Second alpha of the 0.4.0 line: hardening from a full code review of the scenario

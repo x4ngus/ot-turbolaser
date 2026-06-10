@@ -241,6 +241,63 @@ tshark -i net1 -c 20
 Within a short while the sensor should inventory the same zones and devices you
 saw in step 6, including the CVE-bearing devices.
 
+## Triage: the sensor sees nothing (start here)
+
+If the sensor shows no ingest, the question is which of three links is broken:
+turbolaser is not emitting, the bridge/mirror is not delivering, or the sensor is
+not ingesting. Find out in one call from inside the container:
+
+```
+turbolaser net-show
+```
+
+`net-show` reads the kernel's own counters (not the daemon's self-report) and, by
+default, samples the replay-port TX and sensor-port RX over two seconds. It reports
+the replay port, the isolated bridge and its members, the sensor port (up and
+promiscuous), whether the SPAN mirror is present, and crucially whether frames are
+flowing to the sensor *right now*. The exit code is `0` healthy, `1` degraded, `2`
+broken, and each finding carries a remedy. The two outcomes that matter most:
+
+- **`+N` replay TX but `+0` sensor RX**: turbolaser is emitting and the mirror or
+  bridge is not delivering. This is the most common deploy fault and the most
+  confusing one (the appliance looks fine). The fix is the learning-vs-flood or
+  OVS-mirror change in the next section.
+- **`+0` replay TX**: turbolaser is not sending. Check `turbolaser pewpew` (is it
+  replaying or idle in a gap?) and `journalctl -u ot-turbolaser`.
+
+If `net-show` reports the datapath healthy and frames flowing but the sensor still
+shows nothing, the fault is on the sensor: its monitor interface is not in
+promiscuous/monitor mode, it is bound to the wrong NIC, or its ingest software is
+not running. That was the cause of a live-demo failure, so confirm the sensor leg
+explicitly before touching turbolaser.
+
+### Which host, which tcpdump
+
+The mirror spans three namespaces, so the same frame is visible at three points.
+Walk them in order; the first one that is silent localises the fault.
+
+| Run on | Command | What it proves |
+|---|---|---|
+| turbolaser CT (`pct enter 910`) | `tcpdump -ni eth1 -c 20 -e` | turbolaser is emitting fabricated OT frames on the replay port |
+| Proxmox host | `tcpdump -ni veth910i1 -c 20 -e` | the container's frames reach the host veth (the mirror source) |
+| Proxmox host | `tcpdump -ni tap200i1 -c 20 -e` | the mirror is copying frames to the sensor port |
+| sensor VM | `tcpdump -ni net1 -c 20 -e` | the sensor's monitor NIC is actually receiving |
+
+Substitute your own interface names (`ip -br link` on the host with both guests up;
+they change with CTID/VMID). The `-e` shows source MACs, which must all be
+fabricated, never original-capture or foreign-vendor addresses.
+
+Decision tree:
+
+- Nothing on CT `eth1`: turbolaser is not emitting. Check `pewpew`, the logs, and
+  that captures are in the pool.
+- Frames on `eth1` but nothing on host `tap200i1`: the mirror or bridge is not
+  delivering. Apply the learning-vs-flood fix (or the OVS mirror) in the next
+  section.
+- Frames on `tap200i1` but nothing in the sensor VM: the fault is sensor-side
+  (monitor interface not promiscuous, wrong NIC, or the ingest software is down),
+  not turbolaser.
+
 ## If the sensor sees broadcast but not unicast (split assets, missing CVEs)
 
 This is the most common and most confusing deployment failure: assets appear but
@@ -464,9 +521,11 @@ ovs-vsctl -- --id=@p get Port veth910i1 \
 - **Isolation.** `vmbr9` must keep `bridge-ports none`. Never add a physical NIC
   to it, and never bridge it to a production network. Keep the NIC3 production
   SPAN on its own bridge.
-- **The sensor sees nothing.** Check the mirror counter. If it is zero, you
-  likely mirrored the wrong port; re-check names with `ip -br link` after both
-  guests are up (they change with CTID and VMID), and confirm the ingress
+- **The sensor sees nothing.** Run `turbolaser net-show` first (see "Triage: the
+  sensor sees nothing" above): it says in one call whether turbolaser is emitting
+  and whether the mirror is delivering to the sensor. If the mirror counter is
+  zero, you likely mirrored the wrong port; re-check names with `ip -br link` after
+  both guests are up (they change with CTID and VMID), and confirm the ingress
   direction on the container veth.
 - **The plant looks different from the plan.** Make sure `session.seed` is set
   and that you ran `plan --commit` (not just `plan`). Re-run `turbolaser zones`

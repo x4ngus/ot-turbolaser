@@ -903,9 +903,18 @@ pub fn load_with_scenario(base: &Path, scenario: Option<&str>) -> Result<Config,
     match cfg.target.as_mut() {
         Some(t) => {
             // Canonicalise so the recorded dir is absolute regardless of how the
-            // base config path was given; fall back to the joined path if the
-            // filesystem cannot resolve it.
-            t.pack_dir = std::fs::canonicalize(&pack_dir).unwrap_or(pack_dir);
+            // base config path was given. The scenario.yaml was just read from
+            // this dir, so it exists; a canonicalize failure is an unusual deploy
+            // (permissions, a symlink loop), so surface it rather than silently
+            // falling back to a CWD-relative path the plant/playbook loaders would
+            // then resolve against an unexpected directory.
+            t.pack_dir = std::fs::canonicalize(&pack_dir).unwrap_or_else(|e| {
+                log::warn!(
+                    "could not canonicalize pack dir {}: {e}; using it as given (relative to the working dir)",
+                    pack_dir.display()
+                );
+                pack_dir
+            });
         }
         None => {
             return Err(format!(

@@ -261,6 +261,9 @@ fn build_scenario_plan(
     if vuln.is_empty() {
         return Err("no vulnerable-device profiles available".into());
     }
+    // Validate the playbook too, so `plan` rejects a broken timeline at pre-flight
+    // exactly as the daemon would; `pin_from_pack` only covers the plant.
+    crate::scenario::engine::ScenarioEngine::load(target, seed)?;
     plant::pin_from_pack(
         target,
         &vuln,

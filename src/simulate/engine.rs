@@ -113,7 +113,22 @@ impl SimulatorEngine {
         };
         let oui = OuiDb::load(&cfg.oui_db.path);
         let active = cfg.target.as_ref().map(|t| t.name.as_str());
-        let session = match Session::load(&cfg.session.path)? {
+        // A parse-corrupt ledger is recoverable: warn and rebuild from a fresh
+        // plant (the pre-v0.4 behaviour), rather than refusing to start. Only the
+        // deliberate scenario-mismatch guard below -- on a ledger that parsed
+        // cleanly -- is fatal, because replaying the wrong plant is a safety issue
+        // a silent fresh start would paper over.
+        let loaded = match Session::load(&cfg.session.path) {
+            Ok(opt) => opt,
+            Err(e) => {
+                log::warn!(
+                    "session ledger at {} is unreadable ({e}); starting from a fresh plant",
+                    cfg.session.path.display()
+                );
+                None
+            }
+        };
+        let session = match loaded {
             Some(s) => {
                 // Never replay a scenario ledger generically, or a generic ledger
                 // under a scenario.

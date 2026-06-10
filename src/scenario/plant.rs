@@ -228,6 +228,23 @@ pub fn build_sealed_session(
         if let Some(h) = &d.hostname {
             explicit_names.push((ip.to_string(), h.clone()));
         }
+        // A pinned device must not silently collide with another device's IP.
+        // Auto-assign already skips used IPs; this catches an explicit duplicate
+        // or an explicit IP that lands on an already-pinned one (add_device would
+        // otherwise just drop it, leaving the plant short a device).
+        if s.used_ips().contains(&ip) {
+            return Err(format!(
+                "device IP {ip} collides with another device in the plant"
+            ));
+        }
+        // Warn if a pinned device sits on the gateway slot enrich reserves for the
+        // zone firewall/DNS resolver (network+1); the firewall would then fail to
+        // be added to that zone.
+        if spec.enrich && ip == crate::simulate::roles::firewall_addr(&d.zone) {
+            log::warn!(
+                "scenario plant: device at {ip} occupies the zone gateway slot (network+1) that enrich reserves for the firewall/DNS resolver; move it or set enrich: false"
+            );
+        }
         if !s.add_device(rec) {
             return Err(format!("could not pin device at {ip} (device cap)"));
         }
@@ -242,10 +259,22 @@ pub fn build_sealed_session(
     if spec.enrich {
         devices::enrich_plant(&mut s, vuln, oui_db, seed);
     }
-    // Re-assert spec-given hostnames, which enrich may have overwritten.
+    // Re-assert spec-given hostnames, which enrich may have overwritten, and seal
+    // each as an FQDN under its zone domain so an explicit name reads the same way
+    // the generic fabricator's names do (a bare name already containing a dot is
+    // left as-is).
     for (ip, name) in explicit_names {
+        let domain = s.devices.iter().find(|d| d.ip == ip).and_then(|d| {
+            s.subnets
+                .iter()
+                .find(|sn| sn.cidr == d.subnet_cidr)
+                .and_then(|sn| sn.domain.clone())
+        });
         if let Some(dev) = s.devices.iter_mut().find(|d| d.ip == ip) {
-            dev.hostname = Some(name);
+            dev.hostname = Some(match domain {
+                Some(dom) if !name.contains('.') => format!("{name}.{dom}"),
+                _ => name,
+            });
         }
     }
 
@@ -322,8 +351,8 @@ enrich: true
         );
         assert_eq!(
             cpu.hostname.as_deref(),
-            Some("A87-CPU"),
-            "explicit hostname kept"
+            Some("A87-CPU.plant.example"),
+            "explicit hostname kept and sealed as an FQDN under the zone domain"
         );
         // The identity-only SIS is pinned with no CVE.
         let sis = s
@@ -393,5 +422,17 @@ enrich: true
             cpu.ip, "10.20.10.1",
             "auto-assign skipped the firewall slot"
         );
+    }
+
+    #[test]
+    fn duplicate_explicit_ip_is_rejected() {
+        // Two devices pinned to the same explicit IP must error, not silently drop
+        // one and leave the plant short.
+        let yaml = "zones:\n  - { cidr: 10.20.10.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.20.10.0/24, asset_type: RTU, ip: 10.20.10.50 }\n  - { zone: 10.20.10.0/24, asset_type: HMI, ip: 10.20.10.50 }\nenrich: false\n";
+        let spec = PlantSpec::parse(yaml).unwrap();
+        let vuln = VulnDb::embedded().unwrap();
+        let err = build_sealed_session(&spec, &vuln, &OuiDb::embedded(), 1, 0, "x", &[])
+            .expect_err("duplicate IP must be rejected");
+        assert!(err.contains("collides"), "clear duplicate-IP error: {err}");
     }
 }

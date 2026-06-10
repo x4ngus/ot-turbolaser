@@ -248,3 +248,111 @@ fn all_shipped_packs_are_internally_consistent() {
         );
     }
 }
+
+/// `registry::discover` finds the four installed packs, sorted, each complete.
+#[test]
+fn discover_lists_the_four_shipped_packs() {
+    let dir = ot_turbolaser::scenario::registry::targets_dir_for(Path::new("conf/replay.yaml"));
+    let found = ot_turbolaser::scenario::registry::discover(&dir);
+    let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["oldsmar", "stuxnet", "triton", "ukraine2015"],
+        "all four shipped packs, sorted"
+    );
+    for s in &found {
+        assert!(
+            s.has_playbook && s.has_plant && s.has_profiles,
+            "{} ships a complete pack",
+            s.name
+        );
+    }
+}
+
+/// Each shipped pack builds through the real daemon path (`SimulatorEngine::red`):
+/// it pins and persists a sealed, scenario-tagged plant and renders a burst.
+/// Complements the internal-consistency test by exercising session persistence
+/// and the engine load, with all writable paths redirected into a tempdir.
+#[test]
+fn all_shipped_packs_build_through_the_daemon() {
+    let base = Path::new("conf/replay.yaml");
+    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut cfg =
+            config::load_with_scenario(base, Some(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // Never touch /var/lib or /dev/shm from a test.
+        cfg.session.path = root.join("session.json");
+        cfg.paths.shm_dir = root.join("shm");
+        cfg.paths.status_file = root.join("status.json");
+
+        let mut eng =
+            SimulatorEngine::red(&cfg, 1_000).unwrap_or_else(|e| panic!("{name} red: {e}"));
+        assert_eq!(eng.scenario_name(), Some(name));
+        assert_eq!(eng.ledger().scenario.as_deref(), Some(name));
+        assert!(
+            eng.ledger().is_sealed() && eng.ledger().device_count() > 0,
+            "{name} pins a sealed, non-empty plant"
+        );
+        assert!(
+            cfg.session.path.is_file(),
+            "{name} persisted its plant for the daemon to replay"
+        );
+        let burst = eng.red_tick(0, 1_000).expect("a burst is produced");
+        assert!(
+            pcapio::read(&burst)
+                .map(|c| !c.packets.is_empty())
+                .unwrap_or(false),
+            "{name} emitted a non-empty identity+attack burst"
+        );
+    }
+}
+
+/// A pack with a broken playbook is rejected at pre-flight (`scenario::preflight`,
+/// the path `check`/`plan`/`fire` run), not only when the daemon first starts.
+#[test]
+fn broken_playbook_is_rejected_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(
+        &conf,
+        &format!(
+            "iface: tl0
+mode: red_laser
+paths:
+  pool: {root}/pool
+  variants: {root}/variants
+  shm_dir: {root}/shm
+  status_file: {root}/status.json
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 1.0
+session:
+  path: {root}/session.json
+",
+            root = root.display()
+        ),
+    );
+    let pack = root.join("conf").join("targets").join("bad");
+    write(&pack.join("scenario.yaml"), "target:\n  name: bad\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP', ip: 10.0.0.11 }\n",
+    );
+    // An unknown emit kind makes the playbook fail to parse.
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: x\n    events:\n      - { emit: not_a_real_emit }\n",
+    );
+    write(&pack.join("profiles.toml"), "");
+
+    let cfg = config::load_with_scenario(&conf, Some("bad")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg).expect_err("broken playbook is rejected");
+    assert!(
+        err.contains("playbook"),
+        "pre-flight names the playbook: {err}"
+    );
+}

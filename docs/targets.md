@@ -28,20 +28,36 @@ Without `--scenario`, every command is the generic red laser it always was.
 
 ### Running a scenario as the daemon
 
-`fire`/`halt` and the stock `ot-turbolaser.service` run **generic** red laser and
-do not take `--scenario`. To run a scenario as the persistent service, use the
-templated unit, which threads the scenario name through to `run`:
+`fire --scenario <name>` runs a scenario as the persistent service (it starts the
+templated unit `ot-turbolaser@<name>` and pre-flights the pack first, so a missing
+or broken pack fails clearly instead of crash-looping):
 
 ```
-systemctl start ot-turbolaser@stuxnet     # run the stuxnet scenario as the daemon
+turbolaser fire --scenario stuxnet        # start the stuxnet scenario daemon
+turbolaser halt --scenario stuxnet        # stop it
+```
+
+Equivalently, drive the templated unit directly:
+
+```
+systemctl start ot-turbolaser@stuxnet
 systemctl stop  ot-turbolaser@stuxnet
 ```
 
-Do not `plan --scenario <name> --commit` and then `fire`: the stock unit launches
-a generic `run`, which refuses the scenario-tagged ledger and (with
-`Restart=always`) crash-loops. Either launch via `ot-turbolaser@<name>` (or a
-manual `turbolaser run --scenario <name>`), or run `turbolaser reset` to return
-the plant to generic before `fire`.
+A plain `fire` (no `--scenario`) runs **generic** red laser. If a scenario plant
+is committed, a plain `fire` refuses to start (the generic `run` would reject the
+scenario-tagged ledger and, with `Restart=always`, crash-loop) and points you at
+`fire --scenario <name>`; or run `turbolaser reset` to return the plant to generic
+first. The templated unit also rate-limits restarts (`StartLimitBurst`), so a
+genuinely broken pack lands in `failed` rather than looping forever.
+
+### Upgrading from v0.3.x
+
+A v0.3.x appliance has a committed **generic** session ledger. v0.4.0 adds the
+scenario tag, so before running a scenario for the first time, clear the generic
+plant for that scenario: `turbolaser reset --scenario <name>` (or run a generic
+`reset`). The daemon also rebuilds a fresh plant automatically if the ledger is
+unreadable, so a stale `session.json` no longer blocks startup.
 
 ## Containment (read this)
 
@@ -77,6 +93,23 @@ targets/<name>/
 ```
 
 Adding a scenario is pure data: drop in a new directory, no code change.
+
+### Authoring a new pack
+
+Start from the annotated template, then validate as you go:
+
+```
+cp -r conf/targets/_template conf/targets/<name>     # a bare slug, no dots
+# edit scenario.yaml (set name: <name>), plant.yaml, playbook.yaml, profiles.toml
+turbolaser check --config conf/replay.yaml --scenario <name>   # merge + pre-flight the whole pack
+turbolaser plan  --config conf/replay.yaml --scenario <name>   # preview the pinned plant (no traffic)
+```
+
+`check` and `plan` load the plant, playbook, and profiles, so a typo (an unknown
+`emit`, a malformed `payload_hex`, a duplicate device IP, a device in an undeclared
+zone) is reported here, not at the daemon's first start. The `_template` directory
+is `_`-prefixed, so the installer and `turbolaser targets` skip it: it is the
+starting point, never a runnable scenario.
 
 ### scenario.yaml
 
@@ -174,3 +207,9 @@ config, status, and CLI need no change to gain a new scenario.
 - Verify each scenario's CVEs, firmware, and indicators against the primary
   advisory (e.g. ICSA-16-348-05, SEVD-2017-347-01, CISA AA21-042A, CISA
   IR-ALERT-H-16-056-01) before relying on a pack.
+- The status heartbeat (`/run/ot-turbolaser/status.json`) is `schema: 4` under a
+  scenario, adding `scenario`, `phase`, and `technique_ids` (additive over the
+  generic `schema: 3` fields). `pewpew` is field-tolerant; an external consumer
+  keyed on `schema == 3` must accept 4.
+- Use `turbolaser net-show` to confirm the scenario's frames actually reach the
+  sensor through the mirror (it reads the kernel's own counters, beyond `pewpew`).

@@ -1,0 +1,16 @@
+# Scenario-specific CVE profiles, overlaid on the embedded set: a profile here is
+# added, or replaces an embedded profile with the same model. Leave this empty
+# (or delete it) if every CVE-bearing device in plant.yaml resolves to a model
+# already embedded. Verify each pairing against the primary advisory before use.
+#
+# Example: add a controller the embedded set does not carry.
+#
+# [[profile]]
+# vendor = "Example Vendor"
+# model = "Example Controller 9000"
+# firmware = "1.2.3"
+# protocol = "s7"            # enip | modbus | s7 | switch_snmp
+# purdue_level = 1
+# oui = "00:1B:1B"           # the vendor's real OUI (MAC prefix)
+# cves = ["CVE-2024-00000"]
+# s7_order_number = "6ES7 000-0AA00-0AA0"   # optional, S7 only

@@ -42,6 +42,15 @@ impl ScenarioEngine {
     /// the session seed, so the attacker-station MACs match the plant's.
     pub fn load(target: &TargetCfg, seed: u64) -> Result<Self, String> {
         let playbook = Playbook::load(&target.pack_dir.join(&target.playbook))?;
+        // Reject a malformed payload_hex now (pre-flight) rather than silently
+        // substituting the default at render time, so `check`/`plan` catch it.
+        for ph in &playbook.phases {
+            for ev in &ph.events {
+                if let Some(h) = ev.payload_hex.as_deref() {
+                    decode_hex_strict(h).map_err(|e| format!("playbook phase {:?}: {e}", ph.id))?;
+                }
+            }
+        }
         Ok(Self {
             name: target.name.clone(),
             playbook,
@@ -391,24 +400,45 @@ fn first_host(cidr: &str) -> Option<Ipv4Addr> {
     cidr.parse::<Ipv4Net>().ok().and_then(|n| n.hosts().nth(9))
 }
 
-/// Decode a hex string to bytes, falling back to `default` when absent or empty.
-fn payload_bytes(hex: Option<&str>, default: &[u8]) -> Vec<u8> {
-    let Some(h) = hex else {
-        return default.to_vec();
-    };
-    let digits: Vec<u8> = h
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .map(|c| c.to_digit(16).unwrap() as u8)
-        .collect();
-    if digits.len() < 2 {
-        return default.to_vec();
+/// Decode a hex payload string to bytes. Permitted separators (ASCII whitespace,
+/// `:`, `-`, `_`) are stripped first; the remainder must be an even number of hex
+/// digits. Any other character, or an odd digit count, is an error -- so a
+/// mis-authored `payload_hex` is rejected at pack load rather than silently
+/// shifting the bytes on the wire (the old lenient decoder turned `"7g70"` into
+/// `0x77`, a different frame the sensor would still dissect).
+fn decode_hex_strict(s: &str) -> Result<Vec<u8>, String> {
+    let mut nibbles: Vec<u8> = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' | '\t' | '\n' | '\r' | ':' | '-' | '_' => continue,
+            _ => match c.to_digit(16) {
+                Some(d) => nibbles.push(d as u8),
+                None => return Err(format!("payload_hex: invalid character {c:?}")),
+            },
+        }
     }
-    digits
-        .chunks(2)
-        .filter(|c| c.len() == 2)
-        .map(|c| c[0] << 4 | c[1])
-        .collect()
+    if !nibbles.len().is_multiple_of(2) {
+        return Err(format!(
+            "payload_hex: {} hex digit(s) is odd; a byte needs two",
+            nibbles.len()
+        ));
+    }
+    Ok(nibbles.chunks(2).map(|c| (c[0] << 4) | c[1]).collect())
+}
+
+/// Decode an optional `payload_hex` to bytes, falling back to `default` when
+/// absent or empty. A present value is validated at pack load
+/// ([`ScenarioEngine::load`]), so a decode miss here can only be a value that
+/// bypassed validation; fall back to the safe default rather than emit a degenerate
+/// frame.
+fn payload_bytes(hex: Option<&str>, default: &[u8]) -> Vec<u8> {
+    match hex {
+        Some(h) => match decode_hex_strict(h) {
+            Ok(b) if !b.is_empty() => b,
+            _ => default.to_vec(),
+        },
+        None => default.to_vec(),
+    }
 }
 
 #[cfg(test)]
@@ -565,5 +595,63 @@ mod tests {
             f[l.payload..l.end].windows(9).any(|w| w == b"futbol.co")
         });
         assert!(!leaked, "standin fidelity suppresses the real domain");
+    }
+
+    #[test]
+    fn decode_hex_strict_pairs_bytes_and_allows_separators() {
+        assert_eq!(
+            decode_hex_strict("7070010203").unwrap(),
+            vec![0x70, 0x70, 0x01, 0x02, 0x03]
+        );
+        assert_eq!(
+            decode_hex_strict("de:ad-be ef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(decode_hex_strict("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn decode_hex_strict_rejects_odd_length_and_garbage() {
+        // An interior non-hex char used to be silently stripped, shifting the
+        // remaining nibbles into a different byte; it is now an error.
+        assert!(decode_hex_strict("7g70").is_err(), "garbage char rejected");
+        assert!(
+            decode_hex_strict("707").is_err(),
+            "odd digit count rejected"
+        );
+        assert!(decode_hex_strict("zz").is_err(), "non-hex rejected");
+    }
+
+    #[test]
+    fn payload_bytes_falls_back_on_absent_or_empty() {
+        let def = b"\xaa\xbb";
+        assert_eq!(payload_bytes(None, def), def.to_vec(), "absent -> default");
+        assert_eq!(
+            payload_bytes(Some(""), def),
+            def.to_vec(),
+            "empty -> default"
+        );
+        assert_eq!(
+            payload_bytes(Some("0102"), def),
+            vec![0x01, 0x02],
+            "decoded"
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_malformed_payload_hex() {
+        // A bad payload_hex is caught at pack load (pre-flight), not silently
+        // defaulted at render time. Build a playbook directly and validate as load
+        // does, since load() needs a pack dir.
+        let pb = Playbook::parse(
+            "phases:\n  - id: implant\n    events:\n      - { emit: s7_program_download, target: { ip: 10.20.10.11 }, payload_hex: \"70g0\" }\n",
+        )
+        .unwrap();
+        let bad = pb.phases.iter().flat_map(|p| &p.events).find_map(|ev| {
+            ev.payload_hex
+                .as_deref()
+                .and_then(|h| decode_hex_strict(h).err())
+        });
+        assert!(bad.is_some(), "a malformed payload_hex is detected at load");
     }
 }

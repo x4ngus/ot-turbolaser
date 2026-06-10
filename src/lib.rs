@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod control;
 pub mod ledger;
+pub mod netinfo;
 pub mod oui;
 pub mod pcapio;
 pub mod proto;
@@ -48,6 +49,7 @@ pub fn dispatch(cli: Cli) -> i32 {
         Command::Status(a) => control::pewpew(&a),
         Command::NetSetup(a) => control::net_setup(&a),
         Command::NetTeardown(a) => control::net_teardown(&a),
+        Command::NetShow(a) => control::net_show(&a),
         Command::Verify(a) => validate::cmd_verify(&a),
         Command::Targets(a) => scenario::cmd_targets(&a),
     }
@@ -56,6 +58,13 @@ pub fn dispatch(cli: Cli) -> i32 {
 fn check(a: &cli::CheckArgs) -> i32 {
     match config::load_with_scenario(&a.config, a.scenario.as_deref()) {
         Ok(cfg) => {
+            // Pre-flight the whole pack (plant + playbook + profiles), not just
+            // the merged config, so a broken pack is caught here rather than at
+            // the daemon's first start.
+            if let Err(e) = scenario::preflight(&cfg) {
+                eprintln!("config error: {e}");
+                return 1;
+            }
             let scenario = cfg
                 .target
                 .as_ref()

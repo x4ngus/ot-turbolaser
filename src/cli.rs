@@ -33,11 +33,11 @@ pub enum Command {
     /// Bring the appliance online: enable and start the service, which sets up
     /// the mirror. Alias: fire.
     #[command(visible_alias = "fire")]
-    Up(NetArgs),
+    Up(FireArgs),
     /// Take the appliance offline: stop and disable the service, which tears down
-    /// the mirror. Alias: halt.
+    /// the mirror. With --scenario, stops the templated unit. Alias: halt.
     #[command(visible_alias = "halt")]
-    Down(NetArgs),
+    Down(FireArgs),
     /// Print the live fire-control readout from the heartbeat file (pew pew).
     Pewpew(StatusArgs),
     /// Deprecated alias for `pewpew`, kept for one release.
@@ -55,6 +55,9 @@ pub enum Command {
     NetSetup(NetArgs),
     /// Tear down the bridge and mirror from config. Used by the systemd unit.
     NetTeardown(NetArgs),
+    /// Qualify the live datapath: confirm frames egress the replay port and reach
+    /// the sensor port through the SPAN mirror. Triage for "the sensor sees nothing".
+    NetShow(NetShowArgs),
     /// Validate the MAC<->IP union: profile the emitted ARP burst against the
     /// reference OT bands and/or score a passive-sensor asset export against the plan.
     Verify(VerifyArgs),
@@ -108,6 +111,30 @@ pub struct ReloadArgs {
 pub struct NetArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct NetShowArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// Sample the replay-tx and sensor-rx counters over this many seconds to show
+    /// frames are flowing right now. 0 skips the live probe (static checks only).
+    #[arg(long, default_value_t = 2)]
+    pub probe_secs: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct FireArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Run a target scenario as the daemon via the templated unit
+    /// (`ot-turbolaser@<name>`) instead of the generic service. Omit for generic
+    /// red laser.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]

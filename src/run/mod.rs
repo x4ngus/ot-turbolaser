@@ -283,7 +283,7 @@ fn init_logger() {
 
 fn write(cfg: &Config, s: &mut Status, rates: &mut PpsState) {
     s.updated_unix = crate::now_unix();
-    s.total_tx_packets = read_tx_packets(&cfg.iface);
+    s.total_tx_packets = crate::netinfo::sysfs_stat(&cfg.iface, "tx_packets");
     s.pps = rates.pps;
     s.mbps = rates.mbps;
     if let Err(e) = status::write_atomic(&cfg.paths.status_file, s) {
@@ -451,11 +451,6 @@ pub(crate) fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
     out.sort();
     out.dedup();
     out
-}
-
-fn read_tx_packets(iface: &str) -> Option<u64> {
-    let path = format!("/sys/class/net/{iface}/statistics/tx_packets");
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// True if any frame in the capture carries a routable address (public IPv4

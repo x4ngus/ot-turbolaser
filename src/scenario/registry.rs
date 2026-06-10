@@ -54,6 +54,12 @@ pub fn discover(targets_dir: &Path) -> Vec<ScenarioInfo> {
         let Some(name) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else {
             continue;
         };
+        // A `_`-prefixed dir (e.g. the authoring `_template`) is documentation, not
+        // a runnable pack. The installer skips it; discovery does too, so it never
+        // appears in `turbolaser targets` or as a selectable `--scenario`.
+        if name.starts_with('_') {
+            continue;
+        }
         let (declared_name, description) = shallow_meta(&scenario_yaml);
         out.push(ScenarioInfo {
             name,
@@ -110,10 +116,18 @@ mod tests {
         }
         // A directory without scenario.yaml is not a pack.
         std::fs::create_dir_all(targets.join("notapack")).unwrap();
+        // A `_`-prefixed dir (the authoring template) is documentation, not a pack.
+        let tmpl = targets.join("_template");
+        std::fs::create_dir_all(&tmpl).unwrap();
+        std::fs::write(tmpl.join("scenario.yaml"), "target:\n  name: _template\n").unwrap();
 
         let found = discover(&targets);
         let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "zebra"], "sorted; junk dir skipped");
+        assert_eq!(
+            names,
+            vec!["alpha", "zebra"],
+            "sorted; junk and _-prefixed dirs skipped"
+        );
         assert_eq!(found[0].declared_name.as_deref(), Some("alpha"));
         assert_eq!(found[0].description.as_deref(), Some("first"));
         assert!(found[0].has_profiles);

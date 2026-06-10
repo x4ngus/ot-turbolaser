@@ -166,6 +166,7 @@ red-laser commands (`run`, `plan`, `check`, `zones`, `reset`) also take
 | `turbolaser check` | Validate a config file without replaying. |
 | `turbolaser run` | The replay daemon loop itself. The systemd unit runs this; operators use `fire`/`halt`. `--once` does a single iteration (for testing). |
 | `turbolaser net-setup` / `net-teardown` | Low-level bridge and mirror setup/teardown from config. The unit calls these, and `fire`/`halt` wrap them. |
+| `turbolaser net-show` | Datapath triage: confirms frames egress the replay port and reach the sensor port through the SPAN mirror (live tx/rx probe), beyond `pewpew`'s daemon counters. First stop for "the sensor sees nothing". `--probe-secs N`, `--json`. |
 
 ## Sourcing captures
 
