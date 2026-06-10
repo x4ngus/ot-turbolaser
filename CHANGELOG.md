@@ -3,6 +3,21 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0-beta.2] - 2026-06-10
+
+A content-fidelity fix on top of beta.1.
+
+### Fixed
+- **Stuxnet S7-417 order number corrected to a real Siemens MLFB.** The pinned
+  `s7_order_number` was `6ES7 417-4XT07-0AB0`, whose `4XT07` middle group is not a
+  valid Siemens 417 hardware-revision code, so a passive sensor fingerprinting the
+  SZL module-identification order number against a Siemens catalog would not match
+  a real part. Replaced with the genuine S7-400H CPU 417-4H MLFB
+  `6ES7 417-4HT14-0AB0`, and the firmware corrected from `V5.2.0` to `V4.5.4` (the
+  real V4.5.x track for that MLFB; the prior value did not match the part). The
+  417 (cascade protection) is the system the Stuxnet "417 code" warhead targeted.
+  Read via `s7_szl::exchange`; no code change.
+
 ## [0.4.0-beta.1] - 2026-06-10
 
 First beta of the 0.4.0 line. The alpha shipped the target-scenario framework but
@@ -59,12 +74,11 @@ keep `ioc_fidelity: real`.
   (duplicate-IP rejection, hostname re-qualification), a loud warning when a pack's
   `profiles.toml` is malformed, `fire --scenario`, and clearer `targets` output
   when the targets dir is missing versus empty.
-- Content fidelity: the four packs' CVEs, firmware, hardware order numbers, and
-  indicators were re-verified against their cited advisories and found accurate or
-  appropriately representative; no pack data changed. (The Stuxnet S7-417 order
-  number `6ES7417-4XT07-0AB0` is a genuine SIMATIC S7-400 CPU 417-4 MLFB, and the
-  Ukraine breaker-open is correctly mapped to ATT&CK T0855 Unauthorized Command
-  Message.)
+- Content fidelity: the four packs' CVEs, firmware, order numbers, and indicators
+  were re-verified against their cited advisories (the Ukraine breaker-open is
+  correctly mapped to ATT&CK T0855 Unauthorized Command Message). The Stuxnet
+  S7-417 order number needed a follow-up correction to a real Siemens MLFB; see
+  the beta.2 entry above.
 
 ## [0.4.0-alpha.2] - 2026-06-08
 
