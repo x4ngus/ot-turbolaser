@@ -40,6 +40,12 @@ reload pool="/opt/replay/pcaps/pool" variants="/opt/replay/pcaps/variants" n="8"
     done
     [[ $found -eq 1 ]] || echo "no captures in {{pool}}"
 
+# Create the isolated replay+sensor veth pair on a self-contained host, so
+# net-setup and `fire` find the ports they need. One-time, before the first fire.
+# Not used on Proxmox (the hypervisor provides the ports). Needs root.
+provision:
+    turbolaser net-provision
+
 # Bring the appliance online (enable + start; the unit sets up the mirror).
 # `just up` is an alias.
 fire:

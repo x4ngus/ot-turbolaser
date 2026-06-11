@@ -51,6 +51,11 @@ pub enum Command {
     Reset(ResetArgs),
     /// Preview the fabricated zone and device map without sending traffic.
     Plan(PlanArgs),
+    /// Create the isolated replay+sensor veth pair on a self-contained host (a
+    /// minimal VM or bare metal), so net-setup and `fire` find the ports they
+    /// need. Names come from the config (iface / net.sensor_port). Not used on
+    /// Proxmox, where the hypervisor provides the ports (see docs/proxmox.md).
+    NetProvision(NetArgs),
     /// Set up the bridge and mirror from config. Used by the systemd unit.
     NetSetup(NetArgs),
     /// Tear down the bridge and mirror from config. Used by the systemd unit.

@@ -33,6 +33,14 @@ pub fn up(args: &FireArgs) -> i32 {
                 eprintln!("scenario {name}: {e}");
                 return 2;
             }
+            // The unit's net-setup ExecStartPre needs the replay and sensor ports
+            // to already exist (net-setup.sh exits 4 otherwise); catch a missing
+            // one here so `fire` names it instead of leaving the operator with
+            // systemctl's opaque "control process exited with error code".
+            if let Err(e) = preflight_datapath(&cfg) {
+                eprintln!("{e}");
+                return 2;
+            }
             let unit = format!("ot-turbolaser@{name}");
             println!("enabling and starting {unit}");
             run_systemctl(&["enable", "--now", &unit])
@@ -55,10 +63,80 @@ pub fn up(args: &FireArgs) -> i32 {
                     return 2;
                 }
             }
+            // Same datapath pre-flight as the scenario path: the generic unit's
+            // net-setup ExecStartPre fails the same way on a missing port.
+            if let Err(e) = preflight_datapath(&cfg) {
+                eprintln!("{e}");
+                return 2;
+            }
             println!("enabling and starting ot-turbolaser");
             run_systemctl(&["enable", "--now", "ot-turbolaser"])
         }
     }
+}
+
+/// Confirm the configured replay and sensor ports exist before `fire` enables
+/// the unit. The unit's `net-setup` ExecStartPre (a *control* process) exits 4 on
+/// a missing interface (scripts/net-setup.sh), which systemctl surfaces only as
+/// the opaque "the control process exited with error code"; catching it here names
+/// the interface and the remedy instead.
+///
+/// Gated on `/sys/class/net`: [`netinfo::iface_exists`] reads sysfs, so off a Linux
+/// host (a dev mac) every interface reads absent. Skipping there keeps `fire`
+/// falling through to `run_systemctl`'s "no systemd" dev hint rather than a false
+/// abort; on the appliance sysfs is present and the check runs. The list/message
+/// logic lives in pure helpers so it is unit-tested without real interfaces.
+fn preflight_datapath(cfg: &config::Config) -> Result<(), String> {
+    if !Path::new("/sys/class/net").is_dir() {
+        return Ok(());
+    }
+    let missing = missing_datapath_ifaces(&cfg.iface, &cfg.net.sensor_port, netinfo::iface_exists);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(datapath_missing_msg(&missing))
+    }
+}
+
+/// The configured ports the `exists` predicate reports absent, as (role, name)
+/// pairs in (replay, sensor) order. Split from the live sysfs probe so the message
+/// is unit-tested with a fake predicate.
+fn missing_datapath_ifaces<'a>(
+    replay: &'a str,
+    sensor: &'a str,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'a str)> {
+    let mut missing = Vec::new();
+    if !exists(replay) {
+        missing.push(("replay port (iface)", replay));
+    }
+    if !exists(sensor) {
+        missing.push(("sensor port (net.sensor_port)", sensor));
+    }
+    missing
+}
+
+/// The fail-fast message for missing datapath ports. Mirrors net-setup.sh's
+/// guidance: the ports must be provisioned first and are not created by net-setup,
+/// and (per the hard isolation invariant) the replay port must be a virtual link,
+/// never a physical uplink.
+fn datapath_missing_msg(missing: &[(&str, &str)]) -> String {
+    use std::fmt::Write;
+    let listed = missing
+        .iter()
+        .map(|(role, name)| format!("{role} '{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut m = String::new();
+    let _ = write!(m, "datapath interface(s) not found: {listed}");
+    m.push_str(
+        "\n  net-setup does not create these. On a self-contained host run\
+         \n  `turbolaser net-provision` to create the isolated veth pair, or point iface\
+         \n  and net.sensor_port at interfaces this host already has (a veth or tap pair,\
+         \n  never a physical uplink; on Proxmox the hypervisor provides them, see\
+         \n  docs/proxmox.md). Then re-run `turbolaser fire`.",
+    );
+    m
 }
 
 pub fn down(args: &FireArgs) -> i32 {
@@ -89,6 +167,30 @@ fn run_systemctl(args: &[&str]) -> i32 {
             1
         }
     }
+}
+
+/// `turbolaser net-provision`: create the isolated replay+sensor veth pair a
+/// self-contained host needs before net-setup/`fire` can run. The port names come
+/// from the config so they always match what the daemon and net-setup use. The
+/// script refuses to touch a physical NIC, keeping the isolation invariant. On
+/// Proxmox the hypervisor provides these ports, so this is not used there.
+pub fn net_provision(args: &NetArgs) -> i32 {
+    let cfg = match config::load(&args.config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config: {e}");
+            return 2;
+        }
+    };
+    run_helper(
+        "net-provision.sh",
+        &[
+            "--replay-port",
+            &cfg.iface,
+            "--sensor-port",
+            &cfg.net.sensor_port,
+        ],
+    )
 }
 
 pub fn net_setup(args: &NetArgs) -> i32 {
@@ -127,6 +229,30 @@ fn run_net_script(name: &str, config: &Path) -> i32 {
         .arg(&cfg.net.sensor_port)
         .status();
     match status {
+        Ok(s) if s.success() => 0,
+        Ok(s) => {
+            eprintln!("{name} exited with {s}");
+            s.code().unwrap_or(1)
+        }
+        Err(e) => {
+            eprintln!("could not run {name}: {e}");
+            1
+        }
+    }
+}
+
+/// Resolve and run a helper script with explicit args, mapping its exit to ours.
+/// Unlike [`run_net_script`] this passes the caller's args verbatim (net-provision
+/// takes only the two port names, not the bridge/mirror flags net-setup needs).
+fn run_helper(name: &str, args: &[&str]) -> i32 {
+    let script = match resolve_script(name) {
+        Some(p) => p,
+        None => {
+            eprintln!("could not find {name} in /opt/replay/scripts or ./scripts");
+            return 2;
+        }
+    };
+    match Command::new("bash").arg(&script).args(args).status() {
         Ok(s) if s.success() => 0,
         Ok(s) => {
             eprintln!("{name} exited with {s}");
@@ -653,4 +779,66 @@ fn opt_u(v: &serde_json::Value, k: &str) -> String {
         .and_then(|x| x.as_u64())
         .map(|n| n.to_string())
         .unwrap_or_else(|| "null".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{datapath_missing_msg, missing_datapath_ifaces};
+
+    #[test]
+    fn both_ports_present_yields_nothing_missing() {
+        let missing = missing_datapath_ifaces("tl0", "sens0", |_| true);
+        assert!(missing.is_empty(), "both present => fire proceeds");
+    }
+
+    #[test]
+    fn absent_replay_port_is_reported() {
+        // Only the replay port is missing; the sensor exists.
+        let missing = missing_datapath_ifaces("tl0", "sens0", |i| i == "sens0");
+        assert_eq!(missing, vec![("replay port (iface)", "tl0")]);
+    }
+
+    #[test]
+    fn absent_sensor_port_is_reported() {
+        let missing = missing_datapath_ifaces("tl0", "sens0", |i| i == "tl0");
+        assert_eq!(missing, vec![("sensor port (net.sensor_port)", "sens0")]);
+    }
+
+    #[test]
+    fn both_absent_reported_replay_first() {
+        // The appliance regime that triggered the bug: neither port provisioned.
+        let missing = missing_datapath_ifaces("tl0", "sens0", |_| false);
+        assert_eq!(
+            missing,
+            vec![
+                ("replay port (iface)", "tl0"),
+                ("sensor port (net.sensor_port)", "sens0"),
+            ],
+            "both listed, replay before sensor"
+        );
+    }
+
+    #[test]
+    fn message_names_the_ifaces_and_the_remedy() {
+        let missing = missing_datapath_ifaces("tl0", "sens0", |_| false);
+        let msg = datapath_missing_msg(&missing);
+        // Names both offending interfaces and their config keys.
+        assert!(msg.contains("tl0") && msg.contains("sens0"), "names ifaces");
+        assert!(msg.contains("iface") && msg.contains("net.sensor_port"));
+        // Mirrors net-setup.sh's guidance and the isolation invariant.
+        assert!(
+            msg.contains("net-setup does not create these"),
+            "states they are not auto-created: {msg}"
+        );
+        assert!(
+            msg.contains("veth or tap") && msg.contains("never a physical uplink"),
+            "points at provisioning a virtual, isolated pair: {msg}"
+        );
+        // Names the helper that fixes it and the retry command.
+        assert!(
+            msg.contains("turbolaser net-provision"),
+            "names the provisioning command: {msg}"
+        );
+        assert!(msg.contains("turbolaser fire"), "names the retry command");
+    }
 }

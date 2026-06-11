@@ -47,6 +47,7 @@ pub fn dispatch(cli: Cli) -> i32 {
         Command::Down(a) => control::down(&a),
         Command::Pewpew(a) => control::pewpew(&a),
         Command::Status(a) => control::pewpew(&a),
+        Command::NetProvision(a) => control::net_provision(&a),
         Command::NetSetup(a) => control::net_setup(&a),
         Command::NetTeardown(a) => control::net_teardown(&a),
         Command::NetShow(a) => control::net_show(&a),

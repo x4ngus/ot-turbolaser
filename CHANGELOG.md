@@ -3,6 +3,32 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0-beta.4] - 2026-06-11
+
+Operator ergonomics for the datapath interfaces, after a fresh-appliance
+`fire --scenario triton` failed with only systemd's opaque "the control process
+exited with error code". The cause was the unit's `net-setup` ExecStartPre exiting
+because the replay and sensor ports did not exist, and nothing created them.
+
+### Added
+- **`turbolaser net-provision`** (and `scripts/net-provision.sh`): create the
+  isolated replay+sensor veth pair a self-contained host needs before `net-setup`
+  and `fire` can run. Names come from the config (`iface` / `net.sensor_port`) so
+  they always match the daemon. Idempotent, refuses to touch a physical NIC (the
+  isolation invariant holds), and `--undo` removes the pair. Not used on Proxmox,
+  where the hypervisor provides the ports. `install.sh` ships the script and names
+  the step in its next-steps output; `just provision` and the README "Deployment
+  topology" section (with the raw `ip link` equivalent) document it.
+
+### Changed
+- **`fire` pre-flights the datapath ports.** Both `fire` and `fire --scenario`
+  now confirm the configured replay (`iface`) and sensor (`net.sensor_port`) ports
+  exist before enabling the unit, and fail fast (exit 2) naming the missing
+  interface and the remedy (`turbolaser net-provision`), instead of letting
+  `net-setup`'s ExecStartPre fail under systemd with no actionable hint. The check
+  is gated on `/sys/class/net`, so a non-Linux dev host still falls through to the
+  existing "no systemd" guidance rather than a false abort.
+
 ## [0.4.0-beta.3] - 2026-06-10
 
 Internal cleanups from a quality pass over the beta work. No behaviour change.

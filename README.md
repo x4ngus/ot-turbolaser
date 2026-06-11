@@ -165,6 +165,7 @@ red-laser commands (`run`, `plan`, `check`, `zones`, `reset`) also take
 | `turbolaser reset` | Clear the red-laser session ledger for a fresh plant. |
 | `turbolaser check` | Validate a config file without replaying. |
 | `turbolaser run` | The replay daemon loop itself. The systemd unit runs this; operators use `fire`/`halt`. `--once` does a single iteration (for testing). |
+| `turbolaser net-provision` | Create the isolated replay+sensor veth pair (named from `iface`/`net.sensor_port`) on a self-contained host, so net-setup and `fire` find the ports they need. Refuses a physical NIC. One-time, before the first `fire`. Not used on Proxmox (the hypervisor provides the ports). |
 | `turbolaser net-setup` / `net-teardown` | Low-level bridge and mirror setup/teardown from config. The unit calls these, and `fire`/`halt` wrap them. |
 | `turbolaser net-show` | Datapath triage: confirms frames egress the replay port and reach the sensor port through the SPAN mirror (live tx/rx probe), beyond `pewpew`'s daemon counters. First stop for "the sensor sees nothing". `--probe-secs N`, `--json`. |
 
@@ -197,14 +198,42 @@ and mirrors its egress to the sensor port (tc clsact/mirred by default, or Open
 vSwitch). It refuses to put a physical NIC on the bridge, so the isolated segment
 can never reach a production or uplinked network.
 
-Two common layouts:
+Those two interfaces must exist before `fire`: net-setup does not create them, it
+only bridges and mirrors them, and exits non-zero (so `fire` aborts) if either is
+missing. How they come to exist depends on the layout:
 
-1. Self-contained container or VM with two virtual interfaces (veth or tap) for
-   the replay and sensor ports, with the sensor cabled or bridged to the
-   appliance's sensor port. net-setup runs inside the appliance.
+1. Self-contained container or VM with two virtual interfaces for the replay and
+   sensor ports. Create them once with the helper, which reads the names from the
+   config so they always match the daemon and net-setup:
+
+   ```
+   turbolaser net-provision        # creates the isolated veth pair iface <-> net.sensor_port
+   turbolaser fire                 # net-setup then bridges + mirrors them
+   ```
+
+   The helper refuses to touch a physical NIC (the replay port must be virtual).
+   The raw equivalent, if you prefer to provision by hand (substitute your
+   configured names; the pair names MUST match `iface` and `net.sensor_port`):
+
+   ```
+   ip link add tl0 type veth peer name sens0   # tl0 = iface, sens0 = net.sensor_port
+   ip link set tl0 up
+   ip link set sens0 up promisc on
+   ```
+
+   Undo with `turbolaser net-provision --undo` (or `ip link del tl0`).
+
+   On a single host the pair already links the replay port to the sensor port, so
+   the bridge and mirror `fire` adds are what give the replay port its isolated,
+   no-uplink segment. If the sensor sees frames twice, enable port isolation as in
+   the Proxmox guide's "Duplicate broadcast frames" note.
+
 2. Host-side mirror, where the replay port is the container's veth and the sensor
-   port is a dedicated NIC cabled to the sensor. net-setup runs on the host
-   against those ports.
+   port is a dedicated NIC cabled to the sensor. The hypervisor (or the host)
+   provides both ports and the mirror runs on the host, so net-provision and the
+   unit's net-setup are not used inside the appliance. If your sensor port is a
+   physical NIC, do not run net-provision (it only creates virtual interfaces and
+   refuses a real one); provision only the replay port as a veth, as in layout 1.
 
 ## Running in a Proxmox LXC
 

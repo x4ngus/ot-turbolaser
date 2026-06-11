@@ -28,7 +28,7 @@ done
 install -d "$PREFIX/bin" "$PREFIX/conf" "$PREFIX/conf/targets" "$PREFIX/scripts" \
     "$PREFIX/data" "$PREFIX/pcaps/pool" "$PREFIX/pcaps/variants"
 install -m 0755 "$BIN_SRC" "$PREFIX/bin/turbolaser"
-install -m 0755 scripts/net-setup.sh scripts/net-teardown.sh "$PREFIX/scripts/"
+install -m 0755 scripts/net-setup.sh scripts/net-teardown.sh scripts/net-provision.sh "$PREFIX/scripts/"
 # veth-replay-check.sh validates scenario emission on a real wire; ship it so the
 # operator can run the on-wire dissector check from the installed tree.
 [[ -f scripts/veth-replay-check.sh ]] && \
@@ -126,7 +126,9 @@ next:
   1. edit $PREFIX/conf/replay.yaml (iface, net.sensor_port, mode)
   2. drop captures into $PREFIX/pcaps/pool
      and forge variants:  turbolaser reload --in <pcap> --out-dir $PREFIX/pcaps/variants --count 16
-  3. bring it up:  turbolaser fire   (or: systemctl enable --now ot-turbolaser)
+  3. on a self-contained host, create the replay/sensor ports:  turbolaser net-provision
+     (skip on Proxmox/with a physical sensor NIC; see README "Deployment topology")
+  4. bring it up:  turbolaser fire   (or: systemctl enable --now ot-turbolaser)
   scenarios:  turbolaser targets   then   systemctl start ot-turbolaser@<name>
 EOF
 fi
