@@ -100,8 +100,12 @@ from the toolchain you just set up with `cargo install just` (it lands in
 `~/.cargo/bin`, already on PATH). The recipes are optional sugar; every one maps
 to a plain command, so you can skip `just` entirely and run those directly.
 `install.sh` puts the binary at `/opt/replay/bin/turbolaser` (the path the
-systemd unit runs), links it onto PATH, installs the systemd unit, and creates
-the pcap folders.
+systemd unit runs), links it onto PATH (`/usr/local/bin/turbolaser`), installs
+the systemd unit, and creates the pcap folders. The systemd units call the
+absolute `/opt/replay/bin/turbolaser`, so they are unaffected by PATH. For manual
+runs from the host via `pct exec` (a non-login shell that may not include
+`/usr/local/bin`), use the absolute path, e.g.
+`pct exec 910 -- /opt/replay/bin/turbolaser pewpew`.
 
 To upgrade later, pull and run `cargo build --release && ./scripts/install.sh`
 (or `just deploy`; both run as root in the container, so no `sudo` is needed, and
@@ -134,20 +138,17 @@ defaults (see the comments in the shipped config). Two worth knowing:
 - `l3.remap_mac` (default true) rewrites each host's MAC alongside its IP, so
   every asset has one coherent MAC and IP the sensor fuses into a single entry.
 
-The mirror is set up on the host, not the container, so tell the unit to skip
-its own network setup:
+The mirror is set up on the host, not the container. The unit's `net-setup`
+ExecStartPre detects this automatically: when the configured `sensor_port` is
+absent in the container (the sensor tap lives on the host), net-setup no-ops
+cleanly and the daemon starts. No `systemctl edit` drop-in is needed — the
+default `sensor_port` (`sens0`) is already absent in the container, so a stock
+config just works here. `conf/replay.proxmox.yaml.example` is a ready-made
+profile for this layout (it names the host-side `vmbr9`/`tap200i1` for reference).
 
-```
-systemctl edit ot-turbolaser
-```
-
-Add these lines, save, and exit:
-
-```
-[Service]
-ExecStartPre=
-ExecStopPost=
-```
+(If you are on an older build that still hard-fails net-setup on Proxmox, blank
+the hooks with `systemctl edit ot-turbolaser` →
+`[Service]`/`ExecStartPre=`/`ExecStopPost=`. The current build does not need it.)
 
 Check the config is valid:
 
@@ -241,6 +242,63 @@ tshark -i net1 -c 20
 Within a short while the sensor should inventory the same zones and devices you
 saw in step 6, including the CVE-bearing devices.
 
+## Triage: the sensor sees nothing (start here)
+
+If the sensor shows no ingest, the question is which of three links is broken:
+turbolaser is not emitting, the bridge/mirror is not delivering, or the sensor is
+not ingesting. Find out in one call from inside the container:
+
+```
+turbolaser net-show
+```
+
+`net-show` reads the kernel's own counters (not the daemon's self-report) and, by
+default, samples the replay-port TX and sensor-port RX over two seconds. It reports
+the replay port, the isolated bridge and its members, the sensor port (up and
+promiscuous), whether the SPAN mirror is present, and crucially whether frames are
+flowing to the sensor *right now*. The exit code is `0` healthy, `1` degraded, `2`
+broken, and each finding carries a remedy. The two outcomes that matter most:
+
+- **`+N` replay TX but `+0` sensor RX**: turbolaser is emitting and the mirror or
+  bridge is not delivering. This is the most common deploy fault and the most
+  confusing one (the appliance looks fine). The fix is the learning-vs-flood or
+  OVS-mirror change in the next section.
+- **`+0` replay TX**: turbolaser is not sending. Check `turbolaser pewpew` (is it
+  replaying or idle in a gap?) and `journalctl -u ot-turbolaser`.
+
+If `net-show` reports the datapath healthy and frames flowing but the sensor still
+shows nothing, the fault is on the sensor: its monitor interface is not in
+promiscuous/monitor mode, it is bound to the wrong NIC, or its ingest software is
+not running. That was the cause of a live-demo failure, so confirm the sensor leg
+explicitly before touching turbolaser.
+
+### Which host, which tcpdump
+
+The mirror spans three namespaces, so the same frame is visible at three points.
+Walk them in order; the first one that is silent localises the fault.
+
+| Run on | Command | What it proves |
+|---|---|---|
+| turbolaser CT (`pct enter 910`) | `tcpdump -ni eth1 -c 20 -e` | turbolaser is emitting fabricated OT frames on the replay port |
+| Proxmox host | `tcpdump -ni veth910i1 -c 20 -e` | the container's frames reach the host veth (the mirror source) |
+| Proxmox host | `tcpdump -ni tap200i1 -c 20 -e` | the mirror is copying frames to the sensor port |
+| sensor VM | `tcpdump -ni net1 -c 20 -e` | the sensor's monitor NIC is actually receiving |
+
+Substitute your own interface names (`ip -br link` on the host with both guests up;
+they change with CTID/VMID). The `-e` shows source MACs, which must all be
+fabricated, never original-capture or foreign-vendor addresses.
+
+Decision tree:
+
+- Nothing on CT `eth1`: turbolaser is not emitting. Check `pewpew`, the logs, and
+  that captures are in the pool.
+- Frames on `eth1` but nothing on host `tap200i1`: the mirror or bridge is not
+  delivering. Apply the learning-vs-flood fix (or the OVS mirror) in the next
+  section.
+- Frames on `tap200i1` but nothing in the sensor VM: the fault is sensor-side
+  (monitor interface not promiscuous, wrong NIC, or the ingest software is down),
+  not turbolaser.
+
 ## If the sensor sees broadcast but not unicast (split assets, missing CVEs)
 
 This is the most common and most confusing deployment failure: assets appear but
@@ -275,13 +333,16 @@ bridge link set dev veth910i1 learning off flood on   # replay port
 bridge link set dev tap200i1  learning off flood on   # sensor port
 ```
 
-The step-7 `tc`-mirred mirror is an alternative, but it is fragile here:
-tcpreplay can transmit with `PACKET_QDISC_BYPASS`, which skips the egress qdisc
-and the mirror with it. Disabling learning works regardless, because it is plain
-L2 forwarding below the qdisc. Add these two `bridge link set` lines to the
-`ot-mirror.sh` script below so flood mode survives a reboot (guest restart
-recreates the ports with learning back on). After applying it, the `is-at`
-replies appear on the sensor and assets union within a minute or two.
+The step-7 `tc`-mirred mirror alone is fragile here: tcpreplay can transmit with
+`PACKET_QDISC_BYPASS`, which skips the egress qdisc and the mirror with it.
+Disabling learning works regardless, because it is plain L2 forwarding below the
+qdisc. **`scripts/net-setup.sh` now does both** — it installs the `tc` mirror and
+then sets `learning off flood on` on every port that is a member of the bridge —
+so running it (see "Persistent host mirror" below) applies this fix for you; the
+two manual `bridge link set` lines above are the by-hand equivalent. Either way,
+re-apply on reboot (a guest restart recreates the ports with learning back on);
+the host unit below makes it persistent. After applying it, the `is-at` replies
+appear on the sensor and assets union within a minute or two.
 
 ## Post-deploy union check (v0.3.0)
 
@@ -401,7 +462,9 @@ systemctl daemon-reload
 systemctl enable --now ot-turbolaser-mirror.service
 ```
 
-The repo's `scripts/net-setup.sh` does the same and adds both directions:
+The repo's `scripts/net-setup.sh` does the same and adds both directions, and
+also disables learning + floods both bridge members (the robust L2 fix above),
+so it is the one-command way to set the host mirror up correctly:
 
 ```
 ./net-setup.sh --mode tc --bridge vmbr9 --replay-port veth910i1 --sensor-port tap200i1
@@ -464,9 +527,11 @@ ovs-vsctl -- --id=@p get Port veth910i1 \
 - **Isolation.** `vmbr9` must keep `bridge-ports none`. Never add a physical NIC
   to it, and never bridge it to a production network. Keep the NIC3 production
   SPAN on its own bridge.
-- **The sensor sees nothing.** Check the mirror counter. If it is zero, you
-  likely mirrored the wrong port; re-check names with `ip -br link` after both
-  guests are up (they change with CTID and VMID), and confirm the ingress
+- **The sensor sees nothing.** Run `turbolaser net-show` first (see "Triage: the
+  sensor sees nothing" above): it says in one call whether turbolaser is emitting
+  and whether the mirror is delivering to the sensor. If the mirror counter is
+  zero, you likely mirrored the wrong port; re-check names with `ip -br link` after
+  both guests are up (they change with CTID and VMID), and confirm the ingress
   direction on the container veth.
 - **The plant looks different from the plan.** Make sure `session.seed` is set
   and that you ran `plan --commit` (not just `plan`). Re-run `turbolaser zones`

@@ -1,0 +1,21 @@
+# The pinned plant: the exact zones and devices the sensor should inventory.
+#
+# A device whose `model` matches a CVE profile (embedded, or in this pack's
+# profiles.toml) becomes CVE-bearing and asserts its identity on the wire. Any
+# other device is identity-only: it binds via ARP/DNS and is driven by the
+# playbook (a SIS, an RTU, an HMI, a serial converter), carrying no read-identity.
+# `enrich: true` adds the generic supporting cast (zone firewall at .1, HMI, EWS,
+# historian) around the pinned kit.
+
+zones:
+  - { cidr: 10.10.20.0/24, name: "Operations (L2)", purdue_level: 2, vendor: "Example Vendor" }
+  - { cidr: 10.10.10.0/24, name: "Control (L1)", purdue_level: 1, vendor: "Example Vendor" }
+
+devices:
+  # CVE-bearing: this model resolves to an embedded profile and asserts S7 identity.
+  - { zone: 10.10.10.0/24, model: "SIMATIC S7-300 CPU 315-2 PN/DP", ip: 10.10.10.11, hostname: PLC-1 }
+  # Identity-only: no matching profile, so it binds via ARP/DNS and the playbook
+  # drives it. Give it a vendor/protocol/asset_type to describe it.
+  - { zone: 10.10.20.0/24, asset_type: HMI, vendor: "Example Vendor", protocol: none, ip: 10.10.20.20, hostname: HMI-1 }
+
+enrich: true

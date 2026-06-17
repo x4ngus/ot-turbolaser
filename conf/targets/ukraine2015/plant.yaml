@@ -1,0 +1,17 @@
+# A distribution oblenergo: the SCADA/DMS supervisory zone and the substation
+# zone with IEC-104 RTUs controlling breakers and a Moxa serial converter.
+
+zones:
+  - { cidr: 10.90.30.0/24, name: "Distribution SCADA / DMS", purdue_level: 2, vendor: "ABB" }
+  - { cidr: 10.90.10.0/24, name: "Substation RTUs (IEC-104)", purdue_level: 1, vendor: "ABB" }
+
+devices:
+  # The operator/DMS HMI that was hijacked to open breakers (identity-only).
+  - { zone: 10.90.30.0/24, asset_type: HMI, vendor: "ABB", model: "MicroSCADA Operator HMI", protocol: none, ip: 10.90.30.20, hostname: DMS-OPER-01 }
+  # IEC-104 RTUs controlling substation breakers (identity-only; the command targets).
+  - { zone: 10.90.10.0/24, asset_type: RTU, vendor: "ABB", model: "RTU560 (IEC 60870-5-104)", protocol: iec104, ip: 10.90.10.11, hostname: SUB-RTU-1 }
+  - { zone: 10.90.10.0/24, asset_type: RTU, vendor: "ABB", model: "RTU560 (IEC 60870-5-104)", protocol: iec104, ip: 10.90.10.12, hostname: SUB-RTU-2 }
+  # Moxa NPort serial-to-Ethernet converter (the firmware-brick target).
+  - { zone: 10.90.10.0/24, asset_type: Converter, vendor: "Moxa", model: "NPort 5450", protocol: none, ip: 10.90.10.30, hostname: SUB-NPORT-1 }
+
+enrich: true

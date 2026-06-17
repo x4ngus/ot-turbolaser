@@ -814,6 +814,15 @@ pub(crate) fn parse_mac(s: &str) -> [u8; 6] {
     m
 }
 
+/// Format six bytes as a lowercase colon-separated MAC string. The inverse of
+/// [`parse_mac`]; the canonical formatter shared by the ledger writers.
+pub(crate) fn fmt_mac(m: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        m[0], m[1], m[2], m[3], m[4], m[5]
+    )
+}
+
 /// Pick a random network of the given prefix within 10/8 that does not overlap
 /// any already assigned network.
 fn pick_new_net(prefix: u8, rng: &mut ChaCha8Rng, assigned: &[(u32, u8)]) -> u32 {

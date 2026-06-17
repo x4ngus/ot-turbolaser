@@ -1,0 +1,32 @@
+# Triton attack timeline, phased after the public ATT&CK-for-ICS Triton
+# procedure: pivot to the SIS engineering path, discover the controller, deliver
+# the implant over TriStation, and drive the safety system to a failed state.
+
+phases:
+  - id: pivot
+    name: "IT to OT pivot"
+    techniques: [T0883, T0822, T0859]   # internet accessible device, external remote services, valid accounts
+    dwell_runs: 2
+    events:
+      - { emit: remote_access, target: { ip: 10.50.30.20 }, port: 3389 }
+
+  - id: recon
+    name: "TriStation discovery"
+    techniques: [T0842, T0846, T0888]   # network sniffing, remote system discovery, OS/app info
+    dwell_runs: 2
+    events:
+      - { emit: tristation_status, target: { ip: 10.50.10.11 } }
+
+  - id: implant
+    name: "Tricon program download"
+    techniques: [T0843, T0873, T0871]   # program download, project file infection, execution through API
+    dwell_runs: 3
+    events:
+      - { emit: tristation_download, target: { ip: 10.50.10.11 }, chunk: 6 }
+
+  - id: impact
+    name: "Loss of safety / SIS trip"
+    techniques: [T0880, T0881, T0837]   # loss of safety, service stop, loss of productivity
+    dwell_runs: 2
+    events:
+      - { emit: tristation_status, target: { ip: 10.50.10.11 } }

@@ -1,0 +1,28 @@
+# Ukraine 2015 -- BlackEnergy / IEC-104 distribution-grid attack (23 Dec 2015,
+# CISA IR-ALERT-H-16-056-01). Spear-phish to BlackEnergy3, VPN into the SCADA
+# DMS, IEC-104 breaker-open commands against substation RTUs, then KillDisk and a
+# serial-converter firmware brick.
+
+target:
+  name: ukraine2015
+  description: BlackEnergy / IEC-104 grid attack (Ukraine, 2015)
+  campaign: oneshot
+  ioc_fidelity: real
+  actors:
+    # Spear-phish / VPN source (documentation range; the intrusion used stolen
+    # VPN credentials, not a fixed published source address).
+    external_cidrs: ["198.51.100.0/24"]
+    # BlackEnergy3 beaconed directly to its C2 IP over HTTP (no C2 domain); this
+    # representative name only stands in for the DNS leg of the beacon.
+    c2_domains: ["update.microsoft-kc.example"]
+    # The real, published BlackEnergy3 C2 address (ESET; first contact 2015-05-15,
+    # HTTP/80, POST /Microsoft/Update/KC074913.php). See CISA IR-ALERT-H-16-056-01.
+    c2_ips: ["5.149.254.114"]
+    artifacts:
+      - "BlackEnergy3"
+      - "FONTCACHE.DAT"   # the BE3 dropper (MD5 3fa9130c9ec44e36e52142f3688313ff)
+      - "KillDisk"
+
+dns:
+  enabled: true
+  domains: ["oblenergo.example"]

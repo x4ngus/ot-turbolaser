@@ -28,7 +28,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     let ledger = match Session::load(&cfg.session.path) {
@@ -42,7 +42,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> i32 {
         }
         Err(e) => {
             eprintln!("session: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
 

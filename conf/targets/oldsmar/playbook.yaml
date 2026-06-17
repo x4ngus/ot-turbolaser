@@ -1,0 +1,25 @@
+# Oldsmar attack timeline: remote access to the HMI, the NaOH setpoint driven to
+# a dangerous value, then the operator-observed revert.
+
+phases:
+  - id: access
+    name: "Remote access (TeamViewer)"
+    techniques: [T0822, T0886]          # external remote services, remote services
+    dwell_runs: 2
+    events:
+      - { emit: remote_access, target: { ip: 10.70.20.20 }, port: 5938 }
+
+  - id: manipulation
+    name: "NaOH setpoint excursion"
+    techniques: [T0836, T0831]          # modify parameter, manipulation of control
+    dwell_runs: 3
+    events:
+      # Sodium-hydroxide dose setpoint register driven from 100 ppm to 11,100 ppm.
+      - { emit: modbus_write, target: { ip: 10.70.10.11 }, register: 100, value: 11100 }
+
+  - id: response
+    name: "Operator reverts setpoint"
+    techniques: [T0833]                 # manipulation of view (the operator corrected it)
+    dwell_runs: 1
+    events:
+      - { emit: modbus_write, target: { ip: 10.70.10.11 }, register: 100, value: 100 }

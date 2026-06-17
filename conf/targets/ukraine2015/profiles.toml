@@ -1,0 +1,5 @@
+# Ukraine 2015 scenario CVE profiles, overlaid on the embedded set. The
+# substation RTUs speak IEC 60870-5-104 (TCP/2404) and the Moxa NPort serial
+# converter is targeted by a firmware write; neither is a passive read-identity
+# carrier, so both are pinned as identity-only devices in plant.yaml. No
+# additional profiles are required here.

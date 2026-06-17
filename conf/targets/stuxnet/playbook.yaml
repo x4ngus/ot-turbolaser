@@ -1,0 +1,42 @@
+# Stuxnet attack timeline, phased after the public MITRE ATT&CK-for-ICS Stuxnet
+# procedure. Each phase advances once its events are emitted and its dwell (in
+# announce bursts) elapses; the one-shot campaign holds the final impact.
+
+phases:
+  - id: infection
+    name: "Initial infection / C2"
+    techniques: [T0847, T0865]          # replication through removable media, spearphishing
+    dwell_runs: 2
+    events:
+      - { emit: c2_beacon, domain: "www.mypremierfutbol.com" }
+
+  - id: recon
+    name: "S7 PLC enumeration"
+    techniques: [T0842, T0888, T0846]   # network sniffing, OS/app info, remote system discovery
+    dwell_runs: 2
+    events:
+      - { emit: s7_read, target: { ip: 10.10.20.11 } }
+      - { emit: s7_read, target: { ip: 10.10.10.11 } }
+
+  - id: implant
+    name: "Step7 block injection"
+    techniques: [T0843, T0873]          # program download, project file infection
+    dwell_runs: 2
+    events:
+      - { emit: s7_program_download, target: { ip: 10.10.10.11 }, block_id: "_0860001P" }
+      - { emit: s7_program_download, target: { ip: 10.10.10.12 }, block_id: "_0860001P" }
+
+  - id: sabotage
+    name: "Rogue VFD frequency"
+    techniques: [T0836, T0855, T0831]   # modify parameter, unauthorized command, manipulation of control
+    dwell_runs: 4
+    events:
+      - { emit: s7_write, target: { ip: 10.10.10.11 }, db: 8, offset: 0, value: 1410 }   # over-speed 1410 Hz
+      - { emit: s7_write, target: { ip: 10.10.10.12 }, db: 8, offset: 0, value: 2 }       # under-speed 2 Hz
+
+  - id: impact
+    name: "Protection stop / centrifuge damage"
+    techniques: [T0837, T0880, T0813]   # loss of productivity, loss of safety, denial of control
+    dwell_runs: 2
+    events:
+      - { emit: s7_stop, target: { ip: 10.10.20.11 } }

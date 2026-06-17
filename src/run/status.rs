@@ -44,6 +44,11 @@ pub struct Status {
     pub cycle: u64,
     pub last_threat_unix: Option<u64>,
     pub zones: Vec<StatusZone>,
+    // v0.4 target-scenario exposure. None/empty on a generic red-laser or green
+    // run; under `--scenario` these report the active attack and its current phase.
+    pub scenario: Option<String>,
+    pub phase: Option<String>,
+    pub technique_ids: Vec<String>,
     pub updated_unix: u64,
     pub started_unix: u64,
 }

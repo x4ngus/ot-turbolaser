@@ -83,7 +83,11 @@ watchdog:
   poll_secs: 2
   flatline_secs: 10         # tx_packets flat this long during a send => abort and move on
 
-# Isolated bridge and mirror. The replay port is `iface` above.
+# Isolated bridge and mirror for a self-contained host. The replay port is `iface`
+# above. net-setup auto-detects the deployment from the sensor port: when
+# `sensor_port` is absent on this host (a hypervisor like Proxmox provides the
+# ports and runs the mirror on the host) net-setup no-ops cleanly. See
+# conf/replay.proxmox.yaml.example and docs/proxmox.md for that layout.
 net:
   mirror: tc                # tc | ovs
   bridge: tlbr0

@@ -1,0 +1,28 @@
+# Authoring template for a target scenario. Copy this directory to
+# conf/targets/<name>/ (a bare slug, no dots), edit the four files, then validate:
+#
+#   turbolaser check --config conf/replay.yaml --scenario <name>   # merges + pre-flights
+#   turbolaser plan  --config conf/replay.yaml --scenario <name>   # previews the plant
+#
+# A `_`-prefixed directory (like this one) is documentation: the installer and
+# `turbolaser targets` skip it, so it is never a runnable scenario.
+#
+# scenario.yaml deep-merges over conf/replay.yaml (maps merge; scalars and lists
+# replace). It must declare a `target:` block.
+
+target:
+  name: _template                 # must match the directory name (the --scenario arg)
+  description: One-line description shown by `turbolaser targets`
+  campaign: oneshot               # oneshot (hold the final phase) | loop (restart)
+  ioc_fidelity: real              # real (emit published indicators) | standin (RFC-5737)
+  max_frames_per_burst: 64        # cap on attack frames appended per identity burst
+  actors:                         # threat-actor network identity the playbook IOC events draw on
+    external_cidrs: ["198.51.100.0/24"]   # non-RFC1918 source ranges (documentation range)
+    c2_domains: ["c2.example"]            # C2 domains for c2_beacon
+    c2_ips: ["203.0.113.10"]              # C2 IPv4 for c2_beacon
+    artifacts: ["implant.dll"]            # host-level indicator strings (surfaced as IOCs)
+
+# Any base-config key may be overridden too, e.g. the shared DNS site identity:
+dns:
+  enabled: true
+  domains: ["plant.example"]

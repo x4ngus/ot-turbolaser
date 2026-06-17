@@ -21,6 +21,8 @@ use crate::oui::OuiDb;
 use crate::pcapio::{self, Capture};
 use crate::proto::frame::{parse_layout, L3Kind, L4Kind};
 use crate::proto::l3;
+use crate::scenario::engine::ScenarioEngine;
+use crate::scenario::{guard_ledger_scenario, plant};
 use crate::synth::{self, arp, cdp, dns, enip_identity, lldp, modbus_devid, s7_szl, snmp};
 use crate::threat::{self, ThreatScheduler};
 use crate::vuln::{DeviceProfile, ProfileProto, VulnDb};
@@ -88,26 +90,72 @@ pub struct SimulatorEngine {
     /// time.
     remap_cache_bytes: HashMap<PathBuf, u64>,
     dirty: bool,
+    /// The active target-scenario overlay, present only under `--scenario`. Its
+    /// playbook appends attack-action frames to each identity burst.
+    scenario: Option<ScenarioEngine>,
 }
 
 impl SimulatorEngine {
     /// Construct from config, loading or creating the session ledger. The
     /// scenario RNG is seeded from the session seed so a run is reproducible.
-    pub fn red(cfg: &Config, now_unix: u64) -> Self {
+    pub fn red(cfg: &Config, now_unix: u64) -> Result<Self, String> {
         // Purge the remap cache on startup. A cache hit is reused verbatim, so a
         // stale or poisoned entry an earlier binary wrote (for example one from a
         // build whose leak guard only blocked public addresses) must never
         // outlive the binary that produced it. The cache is a performance
         // optimisation, not correctness state, so dropping it is always safe.
         purge_remap_cache(&cfg.paths.shm_dir);
-        let vuln = VulnDb::load(&cfg.oui_db.vuln_path);
+        // A scenario overlays the embedded CVE DB with its pack profiles so the
+        // pinned plant's kit resolves; a generic run uses the configured DB.
+        let vuln = match &cfg.target {
+            Some(t) => VulnDb::load_overlay(&t.pack_dir.join(&t.profiles)),
+            None => VulnDb::load(&cfg.oui_db.vuln_path),
+        };
         let oui = OuiDb::load(&cfg.oui_db.path);
-        let session = Session::load(&cfg.session.path)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                Session::new(cfg.session.seed.unwrap_or_else(rand::random), now_unix)
-            });
+        let active = cfg.target.as_ref().map(|t| t.name.as_str());
+        // A parse-corrupt ledger is recoverable: warn and rebuild from a fresh
+        // plant (the pre-v0.4 behaviour), rather than refusing to start. Only the
+        // deliberate scenario-mismatch guard below -- on a ledger that parsed
+        // cleanly -- is fatal, because replaying the wrong plant is a safety issue
+        // a silent fresh start would paper over.
+        let loaded = match Session::load(&cfg.session.path) {
+            Ok(opt) => opt,
+            Err(e) => {
+                log::warn!(
+                    "session ledger at {} is unreadable ({e}); starting from a fresh plant",
+                    cfg.session.path.display()
+                );
+                None
+            }
+        };
+        let session = match loaded {
+            Some(s) => {
+                // Never replay a scenario ledger generically, or a generic ledger
+                // under a scenario.
+                guard_ledger_scenario(s.scenario.as_deref(), active)?;
+                s
+            }
+            None => match &cfg.target {
+                // A scenario daemon with no committed plan builds (and persists)
+                // the sealed plant from the pack, so `run --scenario X` works
+                // without a prior `plan --scenario --commit`.
+                Some(t) => {
+                    let seed = cfg.session.seed.unwrap_or_else(rand::random);
+                    let mut p =
+                        plant::pin_from_pack(t, &vuln, &oui, seed, now_unix, &cfg.dns.domains)?;
+                    p.max_assets = ledger::effective_asset_cap(cfg.synthesis.max_assets);
+                    if let Err(e) = p.save_atomic(&cfg.session.path) {
+                        log::warn!("could not persist scenario plant: {e}");
+                    }
+                    p
+                }
+                None => Session::new(cfg.session.seed.unwrap_or_else(rand::random), now_unix),
+            },
+        };
+        let scenario = match &cfg.target {
+            Some(t) => Some(ScenarioEngine::load(t, session.seed)?),
+            None => None,
+        };
         let sealed = session.sealed;
         let mut sim_rng = ChaCha8Rng::seed_from_u64(session.seed);
         let scheduler = ThreatScheduler::new(
@@ -117,7 +165,7 @@ impl SimulatorEngine {
             now_unix,
             &mut sim_rng,
         );
-        Self {
+        Ok(Self {
             ledger_path: cfg.session.path.clone(),
             shm_dir: cfg.paths.shm_dir.clone(),
             vuln,
@@ -146,8 +194,9 @@ impl SimulatorEngine {
             warned_models: HashSet::new(),
             remap_cache_bytes: HashMap::new(),
             dirty: false,
+            scenario,
             ledger: session,
-        }
+        })
     }
 
     pub fn ledger(&self) -> &Session {
@@ -157,6 +206,29 @@ impl SimulatorEngine {
     /// The persisted session seed, logged so an entropy-seeded run can be pinned.
     pub fn seed(&self) -> u64 {
         self.ledger.seed
+    }
+
+    /// The active scenario's name, if any (startup log and heartbeat).
+    pub fn scenario_name(&self) -> Option<&str> {
+        self.scenario.as_ref().map(|s| s.name())
+    }
+
+    /// The active scenario's current phase label, if any.
+    pub fn scenario_phase_label(&self) -> Option<String> {
+        self.scenario.as_ref().map(|s| s.phase_label())
+    }
+
+    /// The active scenario's current phase id, if any.
+    pub fn scenario_phase_id(&self) -> Option<String> {
+        self.scenario.as_ref().map(|s| s.phase_id().to_string())
+    }
+
+    /// The active scenario's current ATT&CK-for-ICS technique ids.
+    pub fn scenario_techniques(&self) -> Vec<String> {
+        self.scenario
+            .as_ref()
+            .map(|s| s.techniques())
+            .unwrap_or_default()
     }
 
     /// Remap a capture's hosts into the fabricated ledger zones and return the
@@ -267,7 +339,7 @@ impl SimulatorEngine {
                 let rec = CaptureHostRecord {
                     origin_ip: a.origin.to_string(),
                     ip: a.ip.to_string(),
-                    mac: fmt_mac(a.mac),
+                    mac: l3::fmt_mac(a.mac),
                     vendor: a.vendor,
                     protocol: a.protocol,
                     purdue_level: a.purdue_level,
@@ -484,7 +556,15 @@ impl SimulatorEngine {
             self.last_announce_unix = Some(now);
             let nonce = self.announce_count;
             self.announce_count = self.announce_count.wrapping_add(1);
-            self.build_assertions(run, nonce)
+            let mut frames = self.build_assertions(run, nonce);
+            // ARP is-at and the device identities come first (the MAC<->IP union
+            // gate); a scenario's attack-action frames are appended after, so they
+            // never perturb the associations the sensor forms this burst.
+            if let Some(scenario) = self.scenario.as_mut() {
+                let attack = scenario.phase_frames(&self.ledger, &self.vuln, nonce);
+                frames.extend(attack);
+            }
+            frames
         } else {
             Vec::new()
         };
@@ -498,7 +578,20 @@ impl SimulatorEngine {
             return None;
         }
         let out = self.shm_dir.join("synth-identity.pcap");
-        match pcapio::write(&out, &synth::to_capture(frames)) {
+        // The burst is our own construction, but a misauthored scenario
+        // payload_hex could build a frame over the link MTU, and one oversized
+        // frame aborts the whole tcpreplay run (EMSGSIZE). Guard the synth burst
+        // the same way the remap path guards replayed captures, rather than wedge
+        // the run on a bad pack value.
+        let mut cap = synth::to_capture(frames);
+        let oversize = l3::drop_oversize_frames(&mut cap, l3::STANDARD_FRAME_BYTES);
+        if oversize > 0 {
+            log::warn!(
+                "synth: dropped {oversize} scenario/identity frame(s) over {} bytes",
+                l3::STANDARD_FRAME_BYTES
+            );
+        }
+        match pcapio::write(&out, &cap) {
             Ok(()) => Some(out),
             Err(e) => {
                 log::warn!("could not write identity pcap: {e}");
@@ -756,7 +849,7 @@ fn assert_identity(
 
     match profile.protocol {
         ProfileProto::Enip => {
-            let (major, minor) = parse_version(&profile.firmware);
+            let (major, minor) = synth::parse_version(&profile.firmware);
             let product_name = profile
                 .enip_product_name
                 .as_deref()
@@ -809,7 +902,7 @@ fn assert_identity(
             ));
         }
         ProfileProto::S7 => {
-            let (major, minor) = parse_version(&profile.firmware);
+            let (major, minor) = synth::parse_version(&profile.firmware);
             let order = profile.s7_order_number.as_deref().unwrap_or(&profile.model);
             frames.extend(s7_szl::exchange(
                 client_mac,
@@ -939,22 +1032,6 @@ fn proto_from_str(s: &str) -> ProfileProto {
         "switch_snmp" => ProfileProto::SwitchSnmp,
         _ => ProfileProto::Enip,
     }
-}
-
-fn fmt_mac(m: [u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        m[0], m[1], m[2], m[3], m[4], m[5]
-    )
-}
-
-/// First two integer groups of a firmware string as a major/minor pair.
-fn parse_version(fw: &str) -> (u8, u8) {
-    let mut groups = fw
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<u32>().unwrap_or(0).min(255) as u8);
-    (groups.next().unwrap_or(0), groups.next().unwrap_or(0))
 }
 
 /// Remove the tmpfs remap-cache directory and its contents. Called on engine
@@ -1135,14 +1212,6 @@ mod tests {
             switch_beacons,
             nonce,
         )
-    }
-
-    #[test]
-    fn version_parsing() {
-        assert_eq!(parse_version("V4.2.1"), (4, 2));
-        assert_eq!(parse_version("20.011"), (20, 11));
-        assert_eq!(parse_version("07.0.02"), (7, 0));
-        assert_eq!(parse_version("none"), (0, 0));
     }
 
     #[test]

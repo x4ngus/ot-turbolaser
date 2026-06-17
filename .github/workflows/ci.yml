@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
 
 env:
@@ -27,4 +27,15 @@ jobs:
       - name: Build
         run: cargo build --release --verbose
       - name: Test
+        env:
+          # tshark is installed above; require it so a lost dissector fails the
+          # scenario gate loudly instead of skipping it.
+          OT_REQUIRE_TSHARK: "1"
         run: cargo test --all --verbose
+      # Prove the *installed* tree can load the scenarios. The unit/integration
+      # tests run against the repo-relative conf/, so they cannot catch a
+      # packaging gap (the alpha bug shipped because install.sh never laid down
+      # conf/targets/ yet CI stayed green). This installs the just-built binary
+      # into a sandbox PREFIX and asserts the four packs load through it.
+      - name: Install-layout smoke
+        run: scripts/install-smoke.sh

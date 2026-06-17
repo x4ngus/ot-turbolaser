@@ -136,6 +136,30 @@ impl VulnDb {
             .unwrap_or_default()
     }
 
+    /// The embedded curated set with an on-disk pack overlaid: a pack profile is
+    /// added, or replaces an embedded profile with the same model. Unlike
+    /// [`VulnDb::load`] (which replaces the whole DB) this keeps the embedded
+    /// infrastructure profiles -- the CVE-bearing firewalls/routers the bill of
+    /// materials needs -- while a scenario pack supplies its attack-specific kit.
+    /// A missing or malformed pack leaves the embedded set untouched.
+    pub fn load_overlay(path: &Path) -> Self {
+        let mut db = Self::embedded().unwrap_or_default();
+        if let Ok(text) = std::fs::read_to_string(path) {
+            match Self::parse(&text) {
+                Ok(pack) => {
+                    for p in pack.profiles {
+                        match db.profiles.iter_mut().find(|e| e.model == p.model) {
+                            Some(existing) => *existing = p,
+                            None => db.profiles.push(p),
+                        }
+                    }
+                }
+                Err(e) => log::warn!("scenario profiles {} ignored: {e}", path.display()),
+            }
+        }
+        db
+    }
+
     fn parse(text: &str) -> Result<Self, String> {
         let f: ProfileFile = toml::from_str(text).map_err(|e| e.to_string())?;
         Ok(Self {
@@ -256,5 +280,62 @@ mod tests {
         // Missing file falls back to embedded.
         let fb = VulnDb::load(Path::new("/nonexistent/vuln_profiles.toml"));
         assert_eq!(fb.len(), n);
+    }
+
+    #[test]
+    fn load_overlay_keeps_embedded_and_adds_or_replaces_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("profiles.toml");
+        // One brand-new model, and one that overrides an embedded model's firmware.
+        std::fs::write(
+            &pack,
+            r#"
+[[profile]]
+vendor = "Schneider Electric"
+model = "Triconex Tricon MP3008"
+firmware = "10.4"
+protocol = "modbus"
+purdue_level = 1
+oui = "00:A0:45"
+cves = ["CVE-2018-8872"]
+
+[[profile]]
+vendor = "Siemens AG"
+model = "SIMATIC S7-300 CPU 315-2 PN/DP"
+firmware = "V3.X.OVERRIDE"
+protocol = "s7"
+purdue_level = 1
+oui = "00:0E:8C"
+cves = ["CVE-2016-9159"]
+"#,
+        )
+        .unwrap();
+        let embedded = VulnDb::embedded().unwrap().len();
+        let db = VulnDb::load_overlay(&pack);
+        // The new model is present, the embedded infra profiles survive, and the
+        // overridden model now carries the pack firmware.
+        assert!(
+            db.by_model("Triconex Tricon MP3008").is_some(),
+            "pack model added"
+        );
+        assert!(
+            db.by_model("FortiGate 100E").is_some(),
+            "embedded infra kept"
+        );
+        assert_eq!(
+            db.by_model("SIMATIC S7-300 CPU 315-2 PN/DP")
+                .unwrap()
+                .firmware,
+            "V3.X.OVERRIDE",
+            "pack overrides the embedded model"
+        );
+        // Exactly one model was added (the override replaced in place).
+        assert_eq!(db.len(), embedded + 1);
+    }
+
+    #[test]
+    fn load_overlay_missing_pack_is_just_embedded() {
+        let db = VulnDb::load_overlay(Path::new("/nonexistent/profiles.toml"));
+        assert_eq!(db.len(), VulnDb::embedded().unwrap().len());
     }
 }

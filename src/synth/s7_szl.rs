@@ -13,83 +13,8 @@
 
 use std::net::Ipv4Addr;
 
+use super::s7_common::{cotp_cc, cotp_cr, s7_setup_request, s7_setup_response, tpkt_cotp, S7_PORT};
 use super::session::TcpSession;
-
-const S7_PORT: u16 = 102;
-
-/// COTP data header (DT, EOT).
-const COTP_DT: [u8; 3] = [0x02, 0xf0, 0x80];
-
-/// Prepend a TPKT (RFC 1006) header whose length field covers the whole record.
-fn tpkt(cotp: &[u8]) -> Vec<u8> {
-    let total = 4 + cotp.len();
-    let mut b = vec![0x03, 0x00, (total >> 8) as u8, (total & 0xff) as u8];
-    b.extend_from_slice(cotp);
-    b
-}
-
-/// Wrap an S7 message (header + parameter + data) in TPKT + COTP DT.
-fn tpkt_cotp(s7: &[u8]) -> Vec<u8> {
-    let mut cotp = COTP_DT.to_vec();
-    cotp.extend_from_slice(s7);
-    tpkt(&cotp)
-}
-
-/// COTP Connection Request: class 0, our source reference, a TPDU-size and
-/// src/dst TSAP (rack 0, slot 2). What opens an S7 connection after the TCP
-/// handshake.
-fn cotp_cr() -> Vec<u8> {
-    tpkt(&[
-        0x11, 0xe0, // LI=17, PDU type CR
-        0x00, 0x00, // destination reference (unknown)
-        0x00, 0x01, // source reference
-        0x00, // class 0
-        0xc0, 0x01, 0x0a, // parameter: TPDU size = 1024
-        0xc1, 0x02, 0x01, 0x00, // parameter: source TSAP
-        0xc2, 0x02, 0x01, 0x02, // parameter: destination TSAP (rack 0, slot 2)
-    ])
-}
-
-/// COTP Connection Confirm: the PLC's answer to the CR.
-fn cotp_cc() -> Vec<u8> {
-    tpkt(&[
-        0x11, 0xd0, // LI=17, PDU type CC
-        0x00, 0x01, // destination reference (our source ref)
-        0x00, 0x02, // source reference (the PLC's)
-        0x00, // class 0
-        0xc0, 0x01, 0x0a, // parameter: TPDU size = 1024
-        0xc1, 0x02, 0x01, 0x02, // parameter: source TSAP
-        0xc2, 0x02, 0x01, 0x00, // parameter: destination TSAP
-    ])
-}
-
-/// S7 SetupCommunication request (ROSCTR job, function 0xF0): negotiate AMQ and
-/// PDU length. Sent right after the COTP connection is confirmed.
-fn s7_setup_request() -> Vec<u8> {
-    tpkt_cotp(&[
-        0x32, 0x01, 0x00, 0x00, 0x00, 0x00, // job header, pdu ref 0
-        0x00, 0x08, // parameter length 8
-        0x00, 0x00, // data length 0
-        0xf0, 0x00, // function: setup communication
-        0x00, 0x01, // max AMQ calling
-        0x00, 0x01, // max AMQ called
-        0x01, 0xe0, // PDU length 480
-    ])
-}
-
-/// S7 SetupCommunication response (ROSCTR ack_data).
-fn s7_setup_response() -> Vec<u8> {
-    tpkt_cotp(&[
-        0x32, 0x03, 0x00, 0x00, 0x00, 0x00, // ack_data header, pdu ref 0
-        0x00, 0x08, // parameter length 8
-        0x00, 0x00, // data length 0
-        0x00, 0x00, // error class / error code
-        0xf0, 0x00, // function: setup communication
-        0x00, 0x01, // max AMQ calling
-        0x00, 0x01, // max AMQ called
-        0x00, 0xf0, // PDU length 240
-    ])
-}
 
 /// The Read SZL request for module identification (SZL-ID 0x0011, index 0). The
 /// byte layout is fixed: userdata, CPU function group, read-SZL subfunction.

@@ -101,6 +101,12 @@ pub struct Session {
     /// 0 on an unsealed or legacy ledger; resolved from config at runtime.
     #[serde(default)]
     pub max_assets: usize,
+    /// The target scenario this ledger belongs to, e.g. "stuxnet". `None` is a
+    /// generic red-laser plant. Additive optional (schema unchanged); the daemon
+    /// refuses to run a scenario ledger generically, or a generic ledger under a
+    /// scenario, so a stale `session.json` never bleeds one into the other.
+    #[serde(default)]
+    pub scenario: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +195,7 @@ impl Session {
             capture_hosts: Vec::new(),
             registry_generation: 0,
             max_assets: 0,
+            scenario: None,
         }
     }
 

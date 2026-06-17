@@ -34,11 +34,14 @@ use status::{Status, StatusZone};
 
 pub fn run(args: &RunArgs) -> i32 {
     init_logger();
-    let cfg = match config::load(&args.config) {
+    let cfg = match config::load_with_scenario(&args.config, args.scenario.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             error!("config: {e}");
-            return 1;
+            // Non-retryable: a bad config (or a scenario/ledger mismatch surfaced by
+            // load_with_scenario) will not fix itself on restart. Exit EX_CONFIG so
+            // the unit's RestartPreventExitStatus=78 stops the crash-loop.
+            return crate::EX_CONFIG;
         }
     };
 
@@ -59,7 +62,7 @@ pub fn run(args: &RunArgs) -> i32 {
         cfg.watchdog.flatline_secs,
         shutdown.clone(),
     );
-    let started = now_unix();
+    let started = crate::now_unix();
     let mut run_counter: u64 = 0;
     // Carried across iterations: the last completed run's packet count (so the
     // heartbeat is never null once a run finishes) and the tx-rate sampler (so
@@ -70,16 +73,27 @@ pub fn run(args: &RunArgs) -> i32 {
     // Red laser drives a persistent simulator (zones, devices, identity
     // assertions). Green laser only reads the OUI table to label derived zones.
     let mut engine = match cfg.mode {
-        Mode::RedLaser => {
-            let e = SimulatorEngine::red(&cfg, started);
-            info!(
-                "red laser session: seed={:#018x} devices={} zones={}",
-                e.seed(),
-                e.ledger().device_count(),
-                e.ledger().subnet_count()
-            );
-            Some(e)
-        }
+        Mode::RedLaser => match SimulatorEngine::red(&cfg, started) {
+            Ok(e) => {
+                let scn = e
+                    .scenario_name()
+                    .map(|n| format!(" scenario={n}"))
+                    .unwrap_or_default();
+                info!(
+                    "red laser session: seed={:#018x} devices={} zones={}{scn}",
+                    e.seed(),
+                    e.ledger().device_count(),
+                    e.ledger().subnet_count()
+                );
+                Some(e)
+            }
+            Err(err) => {
+                error!("red laser: {err}");
+                // Scenario/ledger mismatch and a broken pack are non-retryable; fail
+                // clean (EX_CONFIG) so the unit stops rather than looping the remedy.
+                return crate::EX_CONFIG;
+            }
+        },
         Mode::GreenLaser => None,
     };
     let oui = OuiDb::load(&cfg.oui_db.path);
@@ -146,7 +160,7 @@ pub fn run(args: &RunArgs) -> i32 {
         // genuine host in this capture, replacing the file to send when it fires.
         let mut promoted: Option<PathBuf> = None;
         if let Some(e) = engine.as_mut() {
-            promoted = e.maybe_promote(file_to_send, now_unix());
+            promoted = e.maybe_promote(file_to_send, crate::now_unix());
         }
         let file_to_send: &Path = promoted.as_deref().unwrap_or(file_to_send);
 
@@ -228,7 +242,7 @@ pub fn run(args: &RunArgs) -> i32 {
         // rather than the capture's line rate, so the ARP resolutions arrive
         // paced over the burst instead of as one microburst the sensor drops.
         if let Some(e) = engine.as_mut() {
-            if let Some(p) = e.red_tick(run_counter, now_unix()) {
+            if let Some(p) = e.red_tick(run_counter, crate::now_unix()) {
                 match replay::run_once(&cfg.iface, &p, &[], &watchdog) {
                     Ok(res) if res.success => {
                         info!("run={run_counter} identities sent: {}", res.detail)
@@ -273,8 +287,8 @@ fn init_logger() {
 }
 
 fn write(cfg: &Config, s: &mut Status, rates: &mut PpsState) {
-    s.updated_unix = now_unix();
-    s.total_tx_packets = read_tx_packets(&cfg.iface);
+    s.updated_unix = crate::now_unix();
+    s.total_tx_packets = crate::netinfo::sysfs_stat(&cfg.iface, "tx_packets");
     s.pps = rates.pps;
     s.mbps = rates.mbps;
     if let Err(e) = status::write_atomic(&cfg.paths.status_file, s) {
@@ -319,7 +333,7 @@ impl PpsState {
 
 fn base_status(cfg: &Config, started: u64, run: u64, last_packets: Option<u64>) -> Status {
     Status {
-        schema: 3,
+        schema: 4,
         pid: std::process::id(),
         state: String::new(),
         laser: cfg.mode.as_str().to_string(),
@@ -346,6 +360,9 @@ fn base_status(cfg: &Config, started: u64, run: u64, last_packets: Option<u64>) 
         cycle: 0,
         last_threat_unix: None,
         zones: Vec::new(),
+        scenario: None,
+        phase: None,
+        technique_ids: Vec::new(),
         updated_unix: 0,
         started_unix: started,
     }
@@ -388,6 +405,14 @@ fn apply_sim_status(
                     })
                     .collect();
                 s.zone_count = s.zones.len();
+                // Under a target scenario, surface the active attack and phase,
+                // and label the laser `target:<name>` so `pewpew` reads clearly.
+                s.scenario = e.scenario_name().map(String::from);
+                s.phase = e.scenario_phase_label();
+                s.technique_ids = e.scenario_techniques();
+                if let Some(name) = e.scenario_name() {
+                    s.laser = format!("target:{name}");
+                }
             }
         }
         Mode::GreenLaser => {
@@ -433,11 +458,6 @@ pub(crate) fn scan_pcaps(cfg: &Config) -> Vec<PathBuf> {
     out
 }
 
-fn read_tx_packets(iface: &str) -> Option<u64> {
-    let path = format!("/sys/class/net/{iface}/statistics/tx_packets");
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
 /// True if any frame in the capture carries a routable address (public IPv4
 /// unicast, a non-local IPv6 address, or a public ARP protocol address). The
 /// leak backstop used when the remap is disabled. Fails closed (returns true) on
@@ -455,13 +475,6 @@ fn has_public_source(path: &Path, max_bytes: u64) -> bool {
     cap.packets
         .iter()
         .any(|p| l3::carries_public_address(&p.data))
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -517,7 +530,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("\"mode\""), "deprecated mode field is gone");
         assert!(json.contains("\"laser\""));
-        assert!(json.contains("\"schema\":3"));
+        assert!(json.contains("\"schema\":4"));
         for key in [
             "pps",
             "mbps",
@@ -526,6 +539,9 @@ mod tests {
             "max_assets",
             "target_devices",
             "sealed",
+            "scenario",
+            "phase",
+            "technique_ids",
         ] {
             assert!(json.contains(&format!("\"{key}\"")), "field {key} present");
         }

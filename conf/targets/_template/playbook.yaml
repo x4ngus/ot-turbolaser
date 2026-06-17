@@ -1,0 +1,31 @@
+# The phased attack timeline. An ordered list of phases; each advances once its
+# events are emitted and its `dwell_runs` (in announce bursts) elapses. A oneshot
+# campaign holds the final phase; a loop restarts from the first.
+#
+# An event's `target` selects a plant device by `ip`, `model`, or `asset_type`
+# (first match wins). The `emit` kind selects the synth builder; see the table in
+# docs/targets.md for every kind and its parameters. Where an emit takes
+# `payload_hex`, it is a bare hex string (separators ` :-_` allowed); an odd
+# length or a non-hex character is rejected at pre-flight.
+
+phases:
+  - id: recon
+    name: "PLC enumeration"
+    techniques: [T0842, T0888]          # ATT&CK-for-ICS technique ids (network sniffing, OS/app info)
+    dwell_runs: 2
+    events:
+      - { emit: s7_read, target: { ip: 10.10.10.11 } }
+
+  - id: manipulation
+    name: "Rogue setpoint"
+    techniques: [T0836, T0831]          # modify parameter, manipulation of control
+    dwell_runs: 3
+    events:
+      - { emit: s7_write, target: { ip: 10.10.10.11 }, db: 1, offset: 0, value: 1 }
+
+  - id: impact
+    name: "PLC stop"
+    techniques: [T0813, T0881]          # denial of control, service stop
+    dwell_runs: 2
+    events:
+      - { emit: s7_stop, target: { ip: 10.10.10.11 } }

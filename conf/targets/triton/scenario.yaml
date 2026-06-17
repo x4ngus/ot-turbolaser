@@ -1,0 +1,22 @@
+# Triton / TRISIS / HatMan -- Schneider Triconex SIS attack (petrochemical, 2017).
+#
+# Overlays red laser. The Triconex safety controller is reached over TriStation
+# (UDP/1502); the basic process control is a Modicon M340 (embedded CVE profile).
+
+target:
+  name: triton
+  description: Schneider Triconex SIS attack (TRITON/TRISIS, 2017)
+  campaign: oneshot
+  ioc_fidelity: real
+  actors:
+    # The IT->OT pivot source (documentation range).
+    external_cidrs: ["198.51.100.0/24"]
+    artifacts:
+      - "trilog.exe"     # the TriStation framework dropper
+      - "library.zip"
+      - "imain.bin"      # the Tricon implant
+      - "inject.bin"     # the privilege-escalation payload
+
+dns:
+  enabled: true
+  domains: ["refinery.corp.example"]

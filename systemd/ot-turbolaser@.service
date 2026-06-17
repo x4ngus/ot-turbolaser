@@ -1,0 +1,55 @@
+[Unit]
+Description=ot-turbolaser ICS/OT pcap replay appliance (scenario %i)
+Documentation=https://github.com/x4ngus/ot-turbolaser
+After=network-online.target
+Wants=network-online.target
+# A genuinely broken pack (missing/typo'd scenario, malformed playbook) makes
+# `run` exit fast; with Restart=always that would crash-loop every RestartSec
+# forever. Cap it: after 5 failed starts in 60s systemd gives up and leaves the
+# unit `failed` (visible in `systemctl status`) instead of looping silently.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Templated unit for running a target scenario as the daemon: %i is the scenario
+# name, e.g. `systemctl start ot-turbolaser@stuxnet`. The plain ot-turbolaser
+# unit runs generic red laser; this one threads --scenario through to `run` so
+# the persistent service drives the pinned attack. Network setup/teardown is the
+# same isolated-bridge config and refuses to attach to a physical uplink.
+# Fail early and clearly if the named pack is not installed, before bringing up
+# the bridge for a doomed run. (`turbolaser targets` lists what is installed.)
+ExecStartPre=/bin/sh -c 'test -f /opt/replay/conf/targets/%i/scenario.yaml || { echo "ot-turbolaser: scenario pack %i not installed at /opt/replay/conf/targets/%i (run: turbolaser targets)" >&2; exit 1; }'
+ExecStartPre=/opt/replay/bin/turbolaser net-setup --config /opt/replay/conf/replay.yaml
+ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml --scenario %i
+ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
+Restart=always
+RestartSec=3
+# A non-retryable config/state error exits 78 (EX_CONFIG): bad/missing pack, a
+# scenario/ledger mismatch, or a missing replay port. Stop on the first hit rather
+# than burning the StartLimit budget; transient faults keep the in-loop retries.
+RestartPreventExitStatus=78
+
+# Creates /run/ot-turbolaser (0755) for the status heartbeat, cleaned on stop.
+RuntimeDirectory=ot-turbolaser
+RuntimeDirectoryMode=0755
+
+# Creates /var/lib/ot-turbolaser (0750) for the persistent red-laser session
+# ledger, preserved across restarts. Cleared with `turbolaser reset`.
+StateDirectory=ot-turbolaser
+StateDirectoryMode=0750
+
+# Raw AF_PACKET TX for tcpreplay, plus tc/ip for the network setup.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# Hardening that works inside an LXC container, the primary target. These do not
+# need a mount namespace. The optional systemd/hardening.conf drop-in applies the
+# namespace-based hardening on a bare-metal host or VM; install it under
+# /etc/systemd/system/ot-turbolaser@.service.d/ to cover this unit too.
+NoNewPrivileges=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

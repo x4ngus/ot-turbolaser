@@ -112,7 +112,7 @@ synthesis:
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).expect("config loads");
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     let pcap = engine
         .red_tick(0, 0)
         .expect("first tick should fabricate and emit identities");
@@ -167,7 +167,7 @@ fn unsealed_saturated_session_cycles_zone_names() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricates up to the cap; nothing to cycle yet
     assert_eq!(engine.ledger().cycle, 0, "no cycle while still fabricating");
     let before: Vec<String> = engine
@@ -214,7 +214,7 @@ fn sealed_session_never_cycles() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     let before = engine.ledger().subnets[0].zone_name.clone();
     engine.red_tick(1, 60);
     engine.red_tick(2, 120);
@@ -236,7 +236,7 @@ fn remap_into_session_caches_and_reuses() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate zones so the remap uses the into-zones path
 
     // A tiny capture with one remappable conversation.
@@ -293,7 +293,7 @@ fn startup_purges_stale_remap_cache() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let _engine = SimulatorEngine::red(&cfg, 0);
+    let _engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     assert!(
         !stale.exists(),
         "a stale remap-cache file is purged on engine startup"
@@ -345,7 +345,7 @@ fn reconcile_caps_assets_and_never_leaves_original_addresses() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate the small fleet and its zones
 
     let pool = dir.path().join("pool");
@@ -395,7 +395,7 @@ fn reconcile_registers_same_origins_regardless_of_capture_order() {
         let cfg_path = dir.path().join("replay.yaml");
         std::fs::write(&cfg_path, yaml).unwrap();
         let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
-        let mut engine = SimulatorEngine::red(&cfg, 0);
+        let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
         engine.red_tick(0, 0);
         let pool = dir.path().join("pool");
         std::fs::create_dir_all(&pool).unwrap();
@@ -444,7 +444,7 @@ fn remap_drops_payload_embedded_original_addresses() {
     let cfg_path = dir.path().join("replay.yaml");
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate the plant so the into-zones remap runs
 
     let owned = |data: Vec<u8>| OwnedPacket {
@@ -517,7 +517,7 @@ fn wire_carries_only_planned_coherent_frames() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate the plant so the into-zones remap runs
 
     let foreign = [0x00, 0x1c, 0x06]; // a real vendor OUI (not locally administered)
@@ -657,7 +657,7 @@ fn synth_burst_binds_every_asset_via_is_at_replies() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate the fleet and zones
 
     let pool = dir.path().join("pool");
@@ -763,7 +763,7 @@ fn every_capture_host_binds_in_a_single_burst() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate the fleet and zones
 
     let pool = dir.path().join("pool");
@@ -814,7 +814,7 @@ fn the_zone_station_binds_via_its_is_at_reply() {
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     engine.red_tick(0, 0); // fabricate the fleet and zones
     let pool = dir.path().join("pool");
     std::fs::create_dir_all(&pool).unwrap();
@@ -942,7 +942,7 @@ north_south:
     std::fs::write(&cfg_path, yaml).unwrap();
     let cfg = ot_turbolaser::config::load(&cfg_path).unwrap();
 
-    let mut engine = SimulatorEngine::red(&cfg, 0);
+    let mut engine = SimulatorEngine::red(&cfg, 0).expect("red laser builds");
     let pcap = engine.red_tick(0, 0).expect("identity burst");
     let cap = pcapio::read(&pcap).unwrap();
     assert!(!cap.packets.is_empty());

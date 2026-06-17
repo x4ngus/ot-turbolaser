@@ -33,11 +33,11 @@ pub enum Command {
     /// Bring the appliance online: enable and start the service, which sets up
     /// the mirror. Alias: fire.
     #[command(visible_alias = "fire")]
-    Up(NetArgs),
+    Up(FireArgs),
     /// Take the appliance offline: stop and disable the service, which tears down
-    /// the mirror. Alias: halt.
+    /// the mirror. With --scenario, stops the templated unit. Alias: halt.
     #[command(visible_alias = "halt")]
-    Down(NetArgs),
+    Down(FireArgs),
     /// Print the live fire-control readout from the heartbeat file (pew pew).
     Pewpew(StatusArgs),
     /// Deprecated alias for `pewpew`, kept for one release.
@@ -51,13 +51,23 @@ pub enum Command {
     Reset(ResetArgs),
     /// Preview the fabricated zone and device map without sending traffic.
     Plan(PlanArgs),
+    /// Create the isolated replay+sensor veth pair on a self-contained host (a
+    /// minimal VM or bare metal), so net-setup and `fire` find the ports they
+    /// need. Names come from the config (iface / net.sensor_port). Not used on
+    /// Proxmox, where the hypervisor provides the ports (see docs/proxmox.md).
+    NetProvision(NetArgs),
     /// Set up the bridge and mirror from config. Used by the systemd unit.
     NetSetup(NetArgs),
     /// Tear down the bridge and mirror from config. Used by the systemd unit.
     NetTeardown(NetArgs),
+    /// Qualify the live datapath: confirm frames egress the replay port and reach
+    /// the sensor port through the SPAN mirror. Triage for "the sensor sees nothing".
+    NetShow(NetShowArgs),
     /// Validate the MAC<->IP union: profile the emitted ARP burst against the
     /// reference OT bands and/or score a passive-sensor asset export against the plan.
     Verify(VerifyArgs),
+    /// List the installed target scenarios (the red-laser attack packs).
+    Targets(TargetsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -68,6 +78,10 @@ pub struct RunArgs {
     /// Run a single replay iteration then exit. For testing.
     #[arg(long)]
     pub once: bool,
+    /// Load a target scenario (a pack under the config's `targets/` dir),
+    /// overlaying its attack on red laser. Omit for the generic plant.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -105,6 +119,30 @@ pub struct NetArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct NetShowArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// Sample the replay-tx and sensor-rx counters over this many seconds to show
+    /// frames are flowing right now. 0 skips the live probe (static checks only).
+    #[arg(long, default_value_t = 2)]
+    pub probe_secs: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct FireArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Run a target scenario as the daemon via the templated unit
+    /// (`ot-turbolaser@<name>`) instead of the generic service. Omit for generic
+    /// red laser.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct StatusArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
@@ -117,10 +155,26 @@ pub struct StatusArgs {
 pub struct CheckArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+    /// Validate the config with a target scenario overlaid.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct ZonesArgs {
+    #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
+    pub config: PathBuf,
+    /// Emit raw JSON instead of a human summary.
+    #[arg(long)]
+    pub json: bool,
+    /// Show the map for a target scenario's plant.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TargetsArgs {
+    /// Path to the replay config; its sibling `targets/` dir is scanned.
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
     /// Emit raw JSON instead of a human summary.
@@ -132,6 +186,9 @@ pub struct ZonesArgs {
 pub struct ResetArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+    /// Resolve the session path with a target scenario overlaid.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -141,6 +198,10 @@ pub struct PlanArgs {
     /// Emit raw JSON instead of a human summary.
     #[arg(long)]
     pub json: bool,
+    /// Preview (or commit) a target scenario's pinned plant instead of the
+    /// generic fabricated one.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
     /// Intended fleet size to fabricate. Defaults to synthesis.target_devices.
     #[arg(long)]
     pub devices: Option<usize>,

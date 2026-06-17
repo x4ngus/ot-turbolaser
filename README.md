@@ -39,16 +39,16 @@ and warns loudly. Read the warning. Do not override it on a live network.
 
 Two modes are available:
 
-- **red_laser** — adversarial. Fabricates a believable ICS plant for the sensor.
-- **green_laser** — accurate. It replays a captured baseline and derives zones
+- **red_laser**: adversarial. Fabricates a believable ICS plant for the sensor.
+- **green_laser**: accurate. It replays a captured baseline and derives zones
   from the capture's real addresses and OUIs, with no fabrication.
 
 The red-laser schematics:
 
 - **Zones** grouped by subnet on the Purdue/IEC-62443 model, named by dominant
   vendor (e.g. "Siemens SIMATIC Basic Control Area 1"). Each control zone carries
-  a bill of materials — controllers, a managed switch, an HMI, an engineering
-  workstation, a zone-edge firewall at `.1` and L3 operations (DCS) zones add
+  a bill of materials: controllers, a managed switch, an HMI, an engineering
+  workstation, and a zone-edge firewall at `.1`. L3 operations (DCS) zones add
   historians, OPC/domain/application servers, and operator stations.
 - **Full identity per asset (MAC ↔ IP ↔ DNS)** each device binds MAC & IP from 
   authoritative ARP `is-at` replies, carries a real vendor OUI, and resolves a
@@ -62,6 +62,30 @@ The red-laser schematics:
 - **Rare external-threat injections**: a real host is promoted to an external
   address, at most once a day. This is part of a suite of threat hunt scenarios
   being continuously built into the application.
+
+### Target scenarios
+
+A **target scenario** aims red laser at one documented real-world attack. Loading
+one pins that attack's plant (its actual controllers, firmware, and CVEs) and
+fires the documented attack downrange as a phased, ATT&CK-for-ICS timeline, so the
+sensor watches the incident unfold. Four scenarios ship:
+
+- `stuxnet`: Siemens S7 centrifuge sabotage (S7 program download, rogue drive frequency, PLC stop).
+- `triton`: Schneider Triconex SIS attack over TriStation.
+- `oldsmar`: water-treatment setpoint excursion (a Modbus dose change from 100 to 11,100 ppm).
+- `ukraine2015`: BlackEnergy / IEC-104 grid attack (breaker-open commands, then KillDisk).
+
+Scenarios are drop-in data packs under `targets/`; adding one is data, not code.
+
+```
+turbolaser targets                       # list installed scenarios
+turbolaser plan --scenario stuxnet       # preview the pinned plant (no traffic)
+turbolaser run  --scenario stuxnet       # fire the attack timeline downrange
+```
+
+No `--scenario` is the generic red laser above. Scenario traffic carries real
+published indicators, so it stays on the isolated bridge. See
+[docs/targets.md](docs/targets.md) for containment and authoring a pack.
 
 ### Plan it, then fire
 
@@ -122,7 +146,10 @@ For a Proxmox deployment, see the [Proxmox guide](docs/proxmox.md).
 ## Commands
 
 Every subcommand takes `--config <path>` (default `/opt/replay/conf/replay.yaml`).
-`fire`/`halt` are the operator commands; `up`/`down` remain as aliases.
+`fire`/`halt` are the operator commands; `up`/`down` remain as aliases. The
+red-laser commands (`run`, `plan`, `check`, `zones`, `reset`) also take
+`--scenario <name>` to load a target scenario; see
+[docs/targets.md](docs/targets.md).
 
 | Command | What it does |
 | --- | --- |
@@ -132,12 +159,15 @@ Every subcommand takes `--config <path>` (default `/opt/replay/conf/replay.yaml`
 | `turbolaser plan --commit` | Fabricate the plant from `session.seed` and seal it as the ledger the daemon replays verbatim. `--write` is an alias, `--force` overwrites an existing ledger, `--dry-run` previews only. |
 | `turbolaser pewpew` (alias `status`) | Live fire-control readout: wire footprint vs plan, the zone list, throughput (pps and Mbps), and the last threat injection. `--json` emits raw. |
 | `turbolaser zones` | Show the current zone map: red reads the sealed ledger, green derives it from the captures. `--json` emits raw. |
+| `turbolaser targets` | List the installed target scenarios (the red-laser attack packs). `--json` emits raw. |
 | `turbolaser verify` | Post-deploy check. Profiles the synth burst against the reference OT ARP bands (no scan, runts, or LAA; every planned asset emits an `is-at`); `--csv <export>` scores a passive-sensor asset export for MAC<->IP union-rate and hostname coverage vs the plan, listing stragglers. `--pcap <file>` profiles a capture; `--json` emits raw. |
 | `turbolaser reload --in <pcap> --out-dir <dir>` | Forge variant pcaps (the rounds) with payload-identity mutations. `--count N` rounds, `--proto`, `--seed-base`, `--remap-l3`, `--validate` (tshark-check each round). |
 | `turbolaser reset` | Clear the red-laser session ledger for a fresh plant. |
 | `turbolaser check` | Validate a config file without replaying. |
 | `turbolaser run` | The replay daemon loop itself. The systemd unit runs this; operators use `fire`/`halt`. `--once` does a single iteration (for testing). |
+| `turbolaser net-provision` | Create the isolated replay+sensor veth pair (named from `iface`/`net.sensor_port`) on a self-contained host, so net-setup and `fire` find the ports they need. Refuses a physical NIC. One-time, before the first `fire`. Not used on Proxmox (the hypervisor provides the ports). |
 | `turbolaser net-setup` / `net-teardown` | Low-level bridge and mirror setup/teardown from config. The unit calls these, and `fire`/`halt` wrap them. |
+| `turbolaser net-show` | Datapath triage: confirms frames egress the replay port and reach the sensor port through the SPAN mirror (live tx/rx probe), beyond `pewpew`'s daemon counters. First stop for "the sensor sees nothing". `--probe-secs N`, `--json`. |
 
 ## Sourcing captures
 
@@ -168,14 +198,42 @@ and mirrors its egress to the sensor port (tc clsact/mirred by default, or Open
 vSwitch). It refuses to put a physical NIC on the bridge, so the isolated segment
 can never reach a production or uplinked network.
 
-Two common layouts:
+Those two interfaces must exist before `fire`: net-setup does not create them, it
+only bridges and mirrors them, and exits non-zero (so `fire` aborts) if either is
+missing. How they come to exist depends on the layout:
 
-1. Self-contained container or VM with two virtual interfaces (veth or tap) for
-   the replay and sensor ports, with the sensor cabled or bridged to the
-   appliance's sensor port. net-setup runs inside the appliance.
+1. Self-contained container or VM with two virtual interfaces for the replay and
+   sensor ports. Create them once with the helper, which reads the names from the
+   config so they always match the daemon and net-setup:
+
+   ```
+   turbolaser net-provision        # creates the isolated veth pair iface <-> net.sensor_port
+   turbolaser fire                 # net-setup then bridges + mirrors them
+   ```
+
+   The helper refuses to touch a physical NIC (the replay port must be virtual).
+   The raw equivalent, if you prefer to provision by hand (substitute your
+   configured names; the pair names MUST match `iface` and `net.sensor_port`):
+
+   ```
+   ip link add tl0 type veth peer name sens0   # tl0 = iface, sens0 = net.sensor_port
+   ip link set tl0 up
+   ip link set sens0 up promisc on
+   ```
+
+   Undo with `turbolaser net-provision --undo` (or `ip link del tl0`).
+
+   On a single host the pair already links the replay port to the sensor port, so
+   the bridge and mirror `fire` adds are what give the replay port its isolated,
+   no-uplink segment. If the sensor sees frames twice, enable port isolation as in
+   the Proxmox guide's "Duplicate broadcast frames" note.
+
 2. Host-side mirror, where the replay port is the container's veth and the sensor
-   port is a dedicated NIC cabled to the sensor. net-setup runs on the host
-   against those ports.
+   port is a dedicated NIC cabled to the sensor. The hypervisor (or the host)
+   provides both ports and the mirror runs on the host, so net-provision and the
+   unit's net-setup are not used inside the appliance. If your sensor port is a
+   physical NIC, do not run net-provision (it only creates virtual interfaces and
+   refuses a real one); provision only the replay port as a veth, as in layout 1.
 
 ## Running in a Proxmox LXC
 

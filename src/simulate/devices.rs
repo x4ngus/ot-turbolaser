@@ -63,7 +63,7 @@ pub fn fabricate(
         let mac = make_mac(profile, rng);
         let rec = DeviceRecord {
             ip: ip.to_string(),
-            mac: fmt_mac(mac),
+            mac: l3::fmt_mac(mac),
             vendor: profile.vendor.clone(),
             model: profile.model.clone(),
             firmware: profile.firmware.clone(),
@@ -84,8 +84,10 @@ pub fn fabricate(
 
 /// The next host in `net` not already in `used`, skipping network+1 which is
 /// reserved for the zone-edge firewall gateway (added by `enrich_plant`). Pure
-/// helper so fabrication keeps one growing set instead of rebuilding it.
-fn next_free_in(net: Ipv4Net, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
+/// helper so fabrication keeps one growing set instead of rebuilding it. Shared
+/// with the sealed scenario plant so its auto-assigned devices skip the gateway
+/// slot too.
+pub(crate) fn next_free_in(net: Ipv4Net, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
     let gateway = Ipv4Addr::from(u32::from(net.network()).saturating_add(1));
     net.hosts().find(|ip| *ip != gateway && !used.contains(ip))
 }
@@ -265,13 +267,6 @@ fn make_mac(profile: &DeviceProfile, rng: &mut ChaCha8Rng) -> [u8; 6] {
             [b0, rng.gen(), rng.gen(), rng.gen(), rng.gen(), rng.gen()]
         }
     }
-}
-
-fn fmt_mac(m: [u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        m[0], m[1], m[2], m[3], m[4], m[5]
-    )
 }
 
 /// The asset-class label for a fabricated, CVE-bearing device: switches speak
@@ -481,7 +476,7 @@ pub fn enrich_plant(session: &mut Session, vuln: &VulnDb, oui: &OuiDb, seed: u64
                 let mac = bom_mac(oui, &vendor, seed, u32::from(ip));
                 let rec = DeviceRecord {
                     ip: ip.to_string(),
-                    mac: fmt_mac(mac),
+                    mac: l3::fmt_mac(mac),
                     vendor: vendor.clone(),
                     model,
                     firmware,
