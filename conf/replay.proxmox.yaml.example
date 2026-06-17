@@ -1,0 +1,74 @@
+# ot-turbolaser replay config — Proxmox LXC profile.
+#
+# Use this on a Proxmox (or other hypervisor) deployment where the host provides
+# the container's ports and the SPAN mirror runs on the host bridge (vmbr9), not
+# inside the container. It differs from the self-contained conf/replay.yaml only in
+# the datapath: `iface` is the container's replay NIC on the isolated bridge, and
+# net-setup auto-no-ops here because the sensor port is host-side (absent in the
+# container). The host mirror is set up separately — see docs/proxmox.md. Copy to
+# /opt/replay/conf/replay.yaml and adjust.
+
+# Replay NIC: the container's port on the isolated bridge (vmbr9), e.g. eth1. The
+# daemon transmits here; the host mirrors this port's traffic to the sensor.
+iface: eth1
+
+mode: red_laser
+
+# Green-laser only; ignored in red laser. Pin session.seed below instead.
+# seed: 1337
+
+paths:
+  pool: /opt/replay/pcaps/pool
+  variants: /opt/replay/pcaps/variants
+  shm_dir: /dev/shm/ot-turbolaser
+  status_file: /run/ot-turbolaser/status.json
+
+l3:
+  remap: true
+  remap_mac: true
+  subnets: []
+  zone_affinity: both
+  max_remap_bytes: 2147483648
+  on_oversize: remap_to_disk
+  guard_public_sources: true
+  max_frame_bytes: 1514
+  replay_capture_arp: false
+
+rate:
+  model: mbps
+  mbps_min: 9.0
+  mbps_max: 11.0
+
+gap:
+  dist: exp_poisson
+  mean_secs: 0.5
+  min_secs: 0.1
+  max_secs: 3.0
+
+weights:
+  default: 1.0
+
+watchdog:
+  poll_secs: 2
+  flatline_secs: 10
+
+# On Proxmox the host owns the mirror, so the container has no bridge to build and
+# no sensor tap. net-setup detects that `sensor_port` is absent here and no-ops
+# cleanly (no manual systemd drop-in needed). `bridge`/`sensor_port` name the
+# host-side datapath for reference and for `net-show`; they are intentionally not
+# present inside the container. Set up the host mirror per docs/proxmox.md, e.g.
+#   scripts/net-setup.sh --mode tc --bridge vmbr9 \
+#       --replay-port veth910i1 --sensor-port tap200i1
+net:
+  mirror: tc                # tc | ovs
+  bridge: vmbr9             # the host's isolated bridge (host-side)
+  sensor_port: tap200i1     # the host's sensor tap (host-side; absent in-container)
+
+no_pcaps_retry_secs: 30
+
+# Optional v0.2 red-laser content layer — see conf/replay.yaml for the full set of
+# tunables (zones, synthesis, dns, north_south, threats). Defaults are sensible.
+
+session:
+  path: /var/lib/ot-turbolaser/session.json
+  seed: 1337

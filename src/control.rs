@@ -26,12 +26,12 @@ pub fn up(args: &FireArgs) -> i32 {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("scenario {name}: {e}");
-                    return 2;
+                    return crate::EX_CONFIG;
                 }
             };
             if let Err(e) = crate::scenario::preflight(&cfg) {
                 eprintln!("scenario {name}: {e}");
-                return 2;
+                return crate::EX_CONFIG;
             }
             // The unit's net-setup ExecStartPre needs the replay and sensor ports
             // to already exist (net-setup.sh exits 4 otherwise); catch a missing
@@ -39,7 +39,7 @@ pub fn up(args: &FireArgs) -> i32 {
             // systemctl's opaque "control process exited with error code".
             if let Err(e) = preflight_datapath(&cfg) {
                 eprintln!("{e}");
-                return 2;
+                return crate::EX_CONFIG;
             }
             let unit = format!("ot-turbolaser@{name}");
             println!("enabling and starting {unit}");
@@ -50,7 +50,7 @@ pub fn up(args: &FireArgs) -> i32 {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("config: {e}");
-                    return 2;
+                    return crate::EX_CONFIG;
                 }
             };
             // Refuse to fire the generic unit over a committed scenario plant: the
@@ -60,14 +60,14 @@ pub fn up(args: &FireArgs) -> i32 {
                 if let Err(e) = guard_ledger_scenario(s.scenario.as_deref(), None) {
                     eprintln!("refusing to fire generic red laser: {e}");
                     eprintln!("  to run that scenario:  turbolaser fire --scenario <name>");
-                    return 2;
+                    return crate::EX_CONFIG;
                 }
             }
             // Same datapath pre-flight as the scenario path: the generic unit's
             // net-setup ExecStartPre fails the same way on a missing port.
             if let Err(e) = preflight_datapath(&cfg) {
                 eprintln!("{e}");
-                return 2;
+                return crate::EX_CONFIG;
             }
             println!("enabling and starting ot-turbolaser");
             run_systemctl(&["enable", "--now", "ot-turbolaser"])
@@ -75,26 +75,36 @@ pub fn up(args: &FireArgs) -> i32 {
     }
 }
 
-/// Confirm the configured replay and sensor ports exist before `fire` enables
-/// the unit. The unit's `net-setup` ExecStartPre (a *control* process) exits 4 on
-/// a missing interface (scripts/net-setup.sh), which systemctl surfaces only as
-/// the opaque "the control process exited with error code"; catching it here names
-/// the interface and the remedy instead.
+/// Confirm `fire` can bring the unit up over this host's datapath. The replay
+/// port (the daemon's TX) must exist; a missing one is named here rather than left
+/// as systemctl's opaque "the control process exited with error code" when
+/// net-setup's ExecStartPre fails. A missing *sensor* port is not an error: on a
+/// hypervisor (Proxmox) the sensor tap lives on the host, so it is absent in this
+/// container, net-setup no-ops, and the host owns the mirror (see
+/// [`run_net_script`] and docs/proxmox.md).
 ///
 /// Gated on `/sys/class/net`: [`netinfo::iface_exists`] reads sysfs, so off a Linux
 /// host (a dev mac) every interface reads absent. Skipping there keeps `fire`
 /// falling through to `run_systemctl`'s "no systemd" dev hint rather than a false
-/// abort; on the appliance sysfs is present and the check runs. The list/message
-/// logic lives in pure helpers so it is unit-tested without real interfaces.
+/// abort; on the appliance sysfs is present and the check runs. The classification
+/// and message logic live in pure helpers so they are unit-tested without real
+/// interfaces.
 fn preflight_datapath(cfg: &config::Config) -> Result<(), String> {
     if !Path::new("/sys/class/net").is_dir() {
         return Ok(());
     }
-    let missing = missing_datapath_ifaces(&cfg.iface, &cfg.net.sensor_port, netinfo::iface_exists);
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(datapath_missing_msg(&missing))
+    match datapath_kind(&cfg.iface, &cfg.net.sensor_port, netinfo::iface_exists) {
+        // Both ports present (self-contained), or only the host-side sensor absent
+        // (hypervisor-provided): fire proceeds. net-setup builds the local mirror in
+        // the first case and no-ops in the second.
+        DatapathKind::SelfContained | DatapathKind::HypervisorProvided => Ok(()),
+        // The replay port is missing: the daemon cannot transmit. Name it and the
+        // remedy instead of letting the unit fail opaquely.
+        DatapathKind::Unprovisioned => Err(datapath_missing_msg(&missing_datapath_ifaces(
+            &cfg.iface,
+            &cfg.net.sensor_port,
+            netinfo::iface_exists,
+        ))),
     }
 }
 
@@ -114,6 +124,36 @@ fn missing_datapath_ifaces<'a>(
         missing.push(("sensor port (net.sensor_port)", sensor));
     }
     missing
+}
+
+/// Which deployment regime the configured datapath implies, decided from which
+/// ports exist on this host. The sensor port is the signal: on a self-contained
+/// host `turbolaser net-provision` creates both the replay and sensor ports, so
+/// both exist; on a hypervisor (Proxmox) the sensor tap lives on the host, so it is
+/// absent in this container and net-setup must no-op rather than try (and fail with
+/// exit 4) to build a local mirror. "Ports already exist" alone cannot tell the two
+/// apart, since net-provision makes them exist in the self-contained case too.
+#[derive(Debug, PartialEq, Eq)]
+enum DatapathKind {
+    /// Replay and sensor ports both present: build the isolated bridge + mirror here.
+    SelfContained,
+    /// Replay present, sensor absent: the hypervisor/host provides the datapath and
+    /// owns the mirror (Proxmox). net-setup is a no-op in this container.
+    HypervisorProvided,
+    /// Replay port absent: the daemon cannot transmit. A non-retryable error.
+    Unprovisioned,
+}
+
+/// Classify the datapath from the two configured port names. Split from the live
+/// sysfs probe so it is unit-tested with a fake predicate.
+fn datapath_kind(replay: &str, sensor: &str, exists: impl Fn(&str) -> bool) -> DatapathKind {
+    if !exists(replay) {
+        DatapathKind::Unprovisioned
+    } else if !exists(sensor) {
+        DatapathKind::HypervisorProvided
+    } else {
+        DatapathKind::SelfContained
+    }
 }
 
 /// The fail-fast message for missing datapath ports. Mirrors net-setup.sh's
@@ -179,7 +219,7 @@ pub fn net_provision(args: &NetArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     run_helper(
@@ -206,14 +246,52 @@ fn run_net_script(name: &str, config: &Path) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
+    let is_setup = name == "net-setup.sh";
+    // Auto-detect the deployment so the unit's net-setup/net-teardown is a clean
+    // no-op on a hypervisor (Proxmox), where the host owns the mirror and the sensor
+    // port is outside this container. Only meaningful where sysfs is present; off a
+    // Linux host (a dev mac) fall through and let the script run/refuse as before.
+    if Path::new("/sys/class/net").is_dir() {
+        match datapath_kind(&cfg.iface, &cfg.net.sensor_port, netinfo::iface_exists) {
+            DatapathKind::HypervisorProvided => {
+                println!(
+                    "sensor port '{}' absent on this host: the hypervisor/host provides the \
+                     datapath and owns the mirror, skipping {} (see docs/proxmox.md)",
+                    cfg.net.sensor_port,
+                    if is_setup {
+                        "net-setup"
+                    } else {
+                        "net-teardown"
+                    }
+                );
+                return 0;
+            }
+            DatapathKind::Unprovisioned if is_setup => {
+                // Replay port missing: the daemon cannot transmit. Non-retryable so
+                // the unit fails clean instead of crash-looping on a doomed start.
+                eprintln!(
+                    "{}",
+                    datapath_missing_msg(&missing_datapath_ifaces(
+                        &cfg.iface,
+                        &cfg.net.sensor_port,
+                        netinfo::iface_exists,
+                    ))
+                );
+                return crate::EX_CONFIG;
+            }
+            // Teardown with nothing provisioned: there is nothing to undo.
+            DatapathKind::Unprovisioned => return 0,
+            DatapathKind::SelfContained => {}
+        }
+    }
     let script = match resolve_script(name) {
         Some(p) => p,
         None => {
             eprintln!("could not find {name} in /opt/replay/scripts or ./scripts");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     let mode = cfg.net.mirror.as_str();
@@ -232,7 +310,13 @@ fn run_net_script(name: &str, config: &Path) -> i32 {
         Ok(s) if s.success() => 0,
         Ok(s) => {
             eprintln!("{name} exited with {s}");
-            s.code().unwrap_or(1)
+            // net-setup.sh exit 4 is "interface not found": a non-retryable config
+            // error, not a transient fault. Remap it so the unit fails clean.
+            match s.code() {
+                Some(4) if is_setup => crate::EX_CONFIG,
+                Some(c) => c,
+                None => 1,
+            }
         }
         Err(e) => {
             eprintln!("could not run {name}: {e}");
@@ -291,7 +375,7 @@ pub fn net_show(args: &NetShowArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     let replay = cfg.iface.clone();
@@ -619,7 +703,7 @@ pub fn pewpew(args: &StatusArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     let path = &cfg.paths.status_file;
@@ -783,7 +867,39 @@ fn opt_u(v: &serde_json::Value, k: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{datapath_missing_msg, missing_datapath_ifaces};
+    use super::{datapath_kind, datapath_missing_msg, missing_datapath_ifaces, DatapathKind};
+
+    #[test]
+    fn both_ports_present_is_self_contained() {
+        // net-provision made both ends of the veth pair: build the local mirror.
+        assert_eq!(
+            datapath_kind("tl0", "sens0", |_| true),
+            DatapathKind::SelfContained
+        );
+    }
+
+    #[test]
+    fn replay_present_sensor_absent_is_hypervisor() {
+        // Proxmox: eth1 is in the container, the sensor tap is on the host. net-setup
+        // must no-op here rather than exit 4 looking for sens0.
+        assert_eq!(
+            datapath_kind("eth1", "sens0", |i| i == "eth1"),
+            DatapathKind::HypervisorProvided
+        );
+    }
+
+    #[test]
+    fn replay_absent_is_unprovisioned() {
+        // No replay port: the daemon cannot transmit, regardless of the sensor.
+        assert_eq!(
+            datapath_kind("tl0", "sens0", |i| i == "sens0"),
+            DatapathKind::Unprovisioned
+        );
+        assert_eq!(
+            datapath_kind("tl0", "sens0", |_| false),
+            DatapathKind::Unprovisioned
+        );
+    }
 
     #[test]
     fn both_ports_present_yields_nothing_missing() {

@@ -31,7 +31,7 @@ pub fn cmd_zones(args: &ZonesArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     match cfg.mode {
@@ -54,7 +54,7 @@ pub fn cmd_zones(args: &ZonesArgs) -> i32 {
                 let active = cfg.target.as_ref().map(|t| t.name.as_str());
                 if let Err(e) = guard_ledger_scenario(s.scenario.as_deref(), active) {
                     eprintln!("session: {e}");
-                    return 2;
+                    return crate::EX_CONFIG;
                 }
                 render_session(&s, args.json);
                 0
@@ -74,7 +74,7 @@ pub fn cmd_zones(args: &ZonesArgs) -> i32 {
             }
             Err(e) => {
                 eprintln!("session: {e}");
-                2
+                crate::EX_CONFIG
             }
         },
     }
@@ -86,7 +86,7 @@ pub fn cmd_reset(args: &ResetArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     let existed = matches!(Session::load(&cfg.session.path), Ok(Some(_)));
@@ -117,7 +117,7 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
-            return 2;
+            return crate::EX_CONFIG;
         }
     };
     let seed = cfg.session.seed.unwrap_or_else(rand::random);
@@ -191,7 +191,7 @@ pub fn cmd_plan(args: &PlanArgs) -> i32 {
             }
             Err(e) => {
                 eprintln!("session: {e}");
-                return 2;
+                return crate::EX_CONFIG;
             }
             _ => {}
         }

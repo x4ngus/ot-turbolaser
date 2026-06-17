@@ -110,6 +110,23 @@ setup_tc() {
         action mirred egress mirror dev "$SENSOR"
     tc filter add dev "$REPLAY" ingress matchall \
         action mirred egress mirror dev "$SENSOR"
+
+    # Robust L2 delivery on top of the mirror: disable MAC learning and flood on
+    # every port that is a member of the bridge. This is a monitoring span, not a
+    # production switch, so flooding is correct and on an isolated segment cannot
+    # storm. It survives tcpreplay transmitting with PACKET_QDISC_BYPASS (which
+    # skips the egress qdisc and the tc-mirred mirror with it), because flooding is
+    # plain L2 below the qdisc. It also fixes the learning-switch failure where the
+    # bridge learns each fabricated MAC on the replay port and forwards unicast back
+    # there instead of to the sensor (the "broadcast but not unicast" symptom). Only
+    # applies to ports actually enslaved to $BRIDGE: in the self-contained model only
+    # the replay port is a member (the sensor receives via the mirror), while on a
+    # Proxmox host both the replay veth and the sensor tap are members of vmbr9.
+    for port in "$REPLAY" "$SENSOR"; do
+        if [[ -d "/sys/class/net/${BRIDGE}/brif/${port}" ]]; then
+            bridge link set dev "$port" learning off flood on || true
+        fi
+    done
 }
 
 setup_ovs() {

@@ -38,7 +38,10 @@ pub fn run(args: &RunArgs) -> i32 {
         Ok(c) => c,
         Err(e) => {
             error!("config: {e}");
-            return 1;
+            // Non-retryable: a bad config (or a scenario/ledger mismatch surfaced by
+            // load_with_scenario) will not fix itself on restart. Exit EX_CONFIG so
+            // the unit's RestartPreventExitStatus=78 stops the crash-loop.
+            return crate::EX_CONFIG;
         }
     };
 
@@ -86,7 +89,9 @@ pub fn run(args: &RunArgs) -> i32 {
             }
             Err(err) => {
                 error!("red laser: {err}");
-                return 1;
+                // Scenario/ledger mismatch and a broken pack are non-retryable; fail
+                // clean (EX_CONFIG) so the unit stops rather than looping the remedy.
+                return crate::EX_CONFIG;
             }
         },
         Mode::GreenLaser => None,

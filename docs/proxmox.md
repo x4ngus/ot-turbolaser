@@ -100,8 +100,12 @@ from the toolchain you just set up with `cargo install just` (it lands in
 `~/.cargo/bin`, already on PATH). The recipes are optional sugar; every one maps
 to a plain command, so you can skip `just` entirely and run those directly.
 `install.sh` puts the binary at `/opt/replay/bin/turbolaser` (the path the
-systemd unit runs), links it onto PATH, installs the systemd unit, and creates
-the pcap folders.
+systemd unit runs), links it onto PATH (`/usr/local/bin/turbolaser`), installs
+the systemd unit, and creates the pcap folders. The systemd units call the
+absolute `/opt/replay/bin/turbolaser`, so they are unaffected by PATH. For manual
+runs from the host via `pct exec` (a non-login shell that may not include
+`/usr/local/bin`), use the absolute path, e.g.
+`pct exec 910 -- /opt/replay/bin/turbolaser pewpew`.
 
 To upgrade later, pull and run `cargo build --release && ./scripts/install.sh`
 (or `just deploy`; both run as root in the container, so no `sudo` is needed, and
@@ -134,20 +138,17 @@ defaults (see the comments in the shipped config). Two worth knowing:
 - `l3.remap_mac` (default true) rewrites each host's MAC alongside its IP, so
   every asset has one coherent MAC and IP the sensor fuses into a single entry.
 
-The mirror is set up on the host, not the container, so tell the unit to skip
-its own network setup:
+The mirror is set up on the host, not the container. The unit's `net-setup`
+ExecStartPre detects this automatically: when the configured `sensor_port` is
+absent in the container (the sensor tap lives on the host), net-setup no-ops
+cleanly and the daemon starts. No `systemctl edit` drop-in is needed — the
+default `sensor_port` (`sens0`) is already absent in the container, so a stock
+config just works here. `conf/replay.proxmox.yaml.example` is a ready-made
+profile for this layout (it names the host-side `vmbr9`/`tap200i1` for reference).
 
-```
-systemctl edit ot-turbolaser
-```
-
-Add these lines, save, and exit:
-
-```
-[Service]
-ExecStartPre=
-ExecStopPost=
-```
+(If you are on an older build that still hard-fails net-setup on Proxmox, blank
+the hooks with `systemctl edit ot-turbolaser` →
+`[Service]`/`ExecStartPre=`/`ExecStopPost=`. The current build does not need it.)
 
 Check the config is valid:
 
@@ -332,13 +333,16 @@ bridge link set dev veth910i1 learning off flood on   # replay port
 bridge link set dev tap200i1  learning off flood on   # sensor port
 ```
 
-The step-7 `tc`-mirred mirror is an alternative, but it is fragile here:
-tcpreplay can transmit with `PACKET_QDISC_BYPASS`, which skips the egress qdisc
-and the mirror with it. Disabling learning works regardless, because it is plain
-L2 forwarding below the qdisc. Add these two `bridge link set` lines to the
-`ot-mirror.sh` script below so flood mode survives a reboot (guest restart
-recreates the ports with learning back on). After applying it, the `is-at`
-replies appear on the sensor and assets union within a minute or two.
+The step-7 `tc`-mirred mirror alone is fragile here: tcpreplay can transmit with
+`PACKET_QDISC_BYPASS`, which skips the egress qdisc and the mirror with it.
+Disabling learning works regardless, because it is plain L2 forwarding below the
+qdisc. **`scripts/net-setup.sh` now does both** — it installs the `tc` mirror and
+then sets `learning off flood on` on every port that is a member of the bridge —
+so running it (see "Persistent host mirror" below) applies this fix for you; the
+two manual `bridge link set` lines above are the by-hand equivalent. Either way,
+re-apply on reboot (a guest restart recreates the ports with learning back on);
+the host unit below makes it persistent. After applying it, the `is-at` replies
+appear on the sensor and assets union within a minute or two.
 
 ## Post-deploy union check (v0.3.0)
 
@@ -458,7 +462,9 @@ systemctl daemon-reload
 systemctl enable --now ot-turbolaser-mirror.service
 ```
 
-The repo's `scripts/net-setup.sh` does the same and adds both directions:
+The repo's `scripts/net-setup.sh` does the same and adds both directions, and
+also disables learning + floods both bridge members (the robust L2 fix above),
+so it is the one-command way to set the host mirror up correctly:
 
 ```
 ./net-setup.sh --mode tc --bridge vmbr9 --replay-port veth910i1 --sensor-port tap200i1

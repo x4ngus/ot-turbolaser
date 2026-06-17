@@ -3,6 +3,49 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0-beta.5] - 2026-06-17
+
+Make the Proxmox deployment work out of the box and stop non-retryable errors from
+crash-looping under systemd. A fresh appliance whose unit ran `net-setup` in the
+container hit `scripts/net-setup.sh` exit 4 ("interface 'sens0' not found") because
+on Proxmox the host provides the ports and owns the mirror; with `Restart=always`
+and no `StartLimit`/`RestartPreventExitStatus`, the unit looped the same error
+forever. The only workaround was a manual `systemctl edit` drop-in.
+
+### Added
+- **`conf/replay.proxmox.yaml.example`**: a ready-made profile for the hypervisor
+  layout (`iface: eth1`, host-side `bridge`/`sensor_port`), so the in-container
+  `net-setup` auto-no-ops and the host runs the mirror (see `docs/proxmox.md`).
+
+### Changed
+- **`net-setup`/`net-teardown` auto-detect the deployment.** When the configured
+  `sensor_port` is absent on this host — the hypervisor (Proxmox) provides the ports
+  and runs the mirror on the host — net-setup no-ops cleanly (exit 0) instead of
+  exiting 4. No `systemctl edit` drop-in is needed; a stock config just works on
+  Proxmox. `fire`'s datapath pre-flight is hypervisor-aware to match (a missing
+  sensor port is no longer an error; only a missing replay port is). The signal is
+  the sensor port because a self-contained host's `net-provision` makes both ports
+  exist, so "ports exist" alone cannot tell the regimes apart.
+- **`scripts/net-setup.sh` applies the robust L2 fix by default.** Its `tc` mode now
+  sets `learning off flood on` on every bridge-member port, so a monitoring span
+  delivers unicast to the sensor even when tcpreplay transmits with
+  `PACKET_QDISC_BYPASS` (which skips the egress qdisc and the tc-mirred mirror). This
+  is the in-script equivalent of the manual `bridge link set` step the Proxmox guide
+  documented for the "broadcast but not unicast / split assets" symptom.
+- **Non-retryable config/state errors exit `78` (`EX_CONFIG`), uniformly.** A bad
+  config, a missing replay port, a scenario/ledger mismatch, or a corrupt ledger now
+  exit 78 across every subcommand (`run`, `check`, `fire`, `net-setup`, `zones`,
+  `reset`, `plan`, `verify`, …) instead of the previous mix of 1/2. Transient faults
+  (missing captures, a failed send) keep the daemon's in-loop sleep-and-retry.
+- **systemd units fail clean instead of crash-looping.** Both units set
+  `RestartPreventExitStatus=78`, and the plain `ot-turbolaser.service` gains
+  `StartLimitIntervalSec=60`/`StartLimitBurst=5` (matching the templated unit). A
+  config/scenario error now leaves the unit `failed` with its one-line remedy in the
+  journal rather than scrolling forever.
+- **`docs/proxmox.md`**: the manual `ExecStartPre=` drop-in step is gone (net-setup
+  auto-no-ops); notes that `net-setup.sh` now applies flood-on; adds a `pct exec`
+  PATH note (use the absolute `/opt/replay/bin/turbolaser` for non-login shells).
+
 ## [0.4.0-beta.4] - 2026-06-11
 
 Operator ergonomics for the datapath interfaces, after a fresh-appliance
