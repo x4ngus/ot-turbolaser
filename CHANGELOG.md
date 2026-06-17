@@ -3,6 +3,29 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0] - 2026-06-17
+
+First stable 0.4.0 release. Promotes the 0.4.0-beta ladder (beta.1–beta.5),
+validated on a live Proxmox appliance feeding a Dragos sensor, to stable with no
+code changes over beta.5 — only the version string and this entry. The per-beta
+sections below carry the detailed history; the headline additions over 0.3.2:
+
+- **Target scenario framework.** Drop-in attack packs under `conf/targets/<name>/`
+  pin a specific real-world OT attack on top of red laser: a YAML overlay, a CVE
+  profile overlay, a sealed plant, and a phased playbook. `turbolaser targets`
+  lists them; `--scenario <name>` (and `ot-turbolaser@<name>.service`) runs one,
+  guarded so a generic daemon never replays a scenario ledger and vice versa.
+- **Datapath provisioning and triage.** `turbolaser net-provision` creates the
+  isolated replay+sensor veth pair a self-contained host needs; `net-setup`
+  auto-detects self-contained vs hypervisor and no-ops where the host owns the
+  mirror (Proxmox works out of the box, no systemd drop-in); `turbolaser net-show`
+  qualifies the live datapath for "the sensor sees nothing" faults.
+- **Robust SPAN delivery.** `scripts/net-setup.sh` floods bridge members so unicast
+  reaches the sensor even past `PACKET_QDISC_BYPASS` (the split-assets fix).
+- **Fail clean, not crash-loop.** Non-retryable config/state errors exit 78
+  (`EX_CONFIG`) uniformly; both systemd units stop on it (`RestartPreventExitStatus`)
+  with `StartLimit` as the backstop, leaving a bad config `failed` with its remedy.
+
 ## [0.4.0-beta.5] - 2026-06-17
 
 Make the Proxmox deployment work out of the box and stop non-retryable errors from
