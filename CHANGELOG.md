@@ -3,7 +3,46 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
-## [0.4.0] - 2026-06-17
+## [0.4.0] - 2026-07-02
+
+First stable 0.4.0, then hardened for prime time. The headline 0.4.0 additions
+(target scenarios, datapath provisioning/triage, Proxmox out-of-the-box) are in
+the Baseline note below; this revision folds in a structured audit pass: one
+correctness fix, defensive hardening, config fail-fast, dead-code removal, and a
+custom-PREFIX install fix.
+
+### Fixed
+- **Unique MACs across the fabricated fleet.** Red-laser device fabrication now
+  derives each MAC deterministically from its (already unique) IP via the shared
+  `stable_mac` helper and enforces uniqueness with a used-MAC set, so no two
+  fabricated assets can share a MAC (which would emit conflicting ARP `is-at`
+  replies the sensor must never see). Because MAC generation no longer draws from
+  the fabrication RNG, a given `session.seed` now produces a different but stable
+  plant layout; committed/sealed ledgers replay verbatim and are unaffected.
+- **Saturating arithmetic in cycle zone-naming** (`simulate::engine`) so a very
+  long-lived unsealed feed can never overflow the area number and repeat names.
+
+### Added
+- **`turbolaser check` rejects zero timing/rate knobs** at config load instead of
+  letting them fail (or spin) at runtime: `watchdog.poll_secs`,
+  `watchdog.flatline_secs`, `no_pcaps_retry_secs`, `synthesis.announce_interval_secs`
+  (when synthesis is enabled), and `rate.pps_multi`.
+
+### Changed
+- **`install.sh` templates the systemd units and the optional hardening drop-in to
+  the install `PREFIX`.** A deploy under a non-default `PREFIX` now gets working
+  `ExecStart`/`ExecStartPre` paths and a matching `$PREFIX/systemd/hardening.conf`;
+  the default `/opt/replay` install is byte-for-byte unchanged.
+- Documentation corrections: the L1/L2 zone-cap comment (10 zones are a subset of
+  the 16-zone hard cap), the `synthesis.max_assets` default (512), the `AGENTS.md`
+  hard-cap note (16 subnet zones), and the README quickstart config path.
+
+### Removed
+- **Deprecated `l3.fallback` config key and its `L3Fallback` enum**, unused since
+  v0.2.1. A config that still sets `l3.fallback:` is now rejected by the strict
+  schema (`deny_unknown_fields`); delete the line (no shipped config used it).
+
+### Baseline (0.4.0, 2026-06-17)
 
 First stable 0.4.0 release. Promotes the 0.4.0-beta ladder (beta.1–beta.5),
 validated on a live Proxmox appliance feeding a Dragos sensor, to stable with no
