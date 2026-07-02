@@ -3,6 +3,23 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1] - 2026-07-02
+
+Stable release. Identical to `0.4.1-rc.1`; promotes the release candidate to the stable
+line on `main`. The 0.4.1 sprint hardened the target-scenario framework against silent
+misfire and extended its authoring, verification, and content story. See the pre-release
+entries below for the full item-by-item detail (SP-1 through SP-13, CAP-1/CAP-2/CAP-3).
+
+Highlights:
+- Pre-flight now rejects a pack that would emit the wrong traffic or none (orphaned
+  targets, malformed profiles, reserved-slot collisions, path-field escapes).
+- A non-default `PREFIX` install works end to end and is validated in CI.
+- Every shipped pack has a per-event target-resolution test and a tshark wire-signature
+  assertion; a fifth pack (INCONTROLLER/PIPEDREAM) and four new protocol emitters
+  (DNP3, ENIP/CIP, OPC-UA, IEC-101) ship alongside the original four.
+- `turbolaser check --scenario` prints a pre-flight fidelity report and
+  `turbolaser targets --validate` lints a pack before it fires.
+
 ## [0.4.1-rc.1] - 2026-07-02
 
 Promotes the 0.4.1 beta ladder to a release candidate. The full sprint backlog from
