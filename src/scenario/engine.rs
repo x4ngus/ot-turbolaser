@@ -35,6 +35,15 @@ pub struct ScenarioEngine {
     phase_idx: usize,
     event_cursor: usize,
     bursts_in_phase: u64,
+    /// Frames already emitted from the event at `event_cursor` when it is spilling
+    /// across bursts. `0` means the event has not started, or drained exactly on a
+    /// burst boundary; `> 0` means it is mid-spill and must re-render identically.
+    event_frame_offset: usize,
+    /// The nonce the currently-spilling event was first rendered with. `render_event`
+    /// is deterministic in its nonce, so re-rendering with this pinned value
+    /// reproduces the exact frame vector being sliced, and the carried slice is an
+    /// exact continuation. `None` when no event is spilling.
+    spill_nonce: Option<u64>,
 }
 
 impl ScenarioEngine {
@@ -64,6 +73,8 @@ impl ScenarioEngine {
             phase_idx: 0,
             event_cursor: 0,
             bursts_in_phase: 0,
+            event_frame_offset: 0,
+            spill_nonce: None,
         })
     }
 
@@ -127,25 +138,50 @@ impl ScenarioEngine {
     pub fn phase_frames(&mut self, ledger: &Session, vuln: &VulnDb, nonce: u64) -> Vec<Vec<u8>> {
         let events_len = self.current_phase().events.len();
         let dwell = self.current_phase().dwell_runs.max(1);
+        let cap = self.max_frames_per_burst; // already .max(1) at load
         let mut frames: Vec<Vec<u8>> = Vec::new();
-        // Emit from the cursor, bounded by the per-burst frame cap so a long
-        // sequence spreads across successive bursts instead of one microburst.
+        // Emit from the cursor, bounded by the per-burst frame cap. A single event
+        // that alone renders more than the cap now spills across successive bursts
+        // (its frames are sliced by `event_frame_offset`) instead of overshooting
+        // the cap in one microburst. The pinned `spill_nonce` keeps each re-render
+        // byte-identical, so the carried slice is an exact continuation of what the
+        // prior burst already sent.
         while self.event_cursor < events_len {
+            let room = cap.saturating_sub(frames.len());
+            if room == 0 {
+                break; // cap filled by earlier events this burst; resume next burst
+            }
+            let ev_nonce = self
+                .spill_nonce
+                .unwrap_or_else(|| nonce.wrapping_add(self.event_cursor as u64));
             let ev = &self.playbook.phases[self.phase_idx].events[self.event_cursor];
-            let ev_frames = self.render_event(
-                ev,
-                ledger,
-                vuln,
-                nonce.wrapping_add(self.event_cursor as u64),
+            let ev_frames = self.render_event(ev, ledger, vuln, ev_nonce);
+            let remaining = ev_frames.len().saturating_sub(self.event_frame_offset);
+            let take = remaining.min(room);
+            frames.extend_from_slice(
+                &ev_frames[self.event_frame_offset..self.event_frame_offset + take],
             );
-            if !frames.is_empty() && frames.len() + ev_frames.len() > self.max_frames_per_burst {
+            if take == remaining {
+                // Event fully drained: clear the spill state and advance the cursor.
+                self.event_frame_offset = 0;
+                self.spill_nonce = None;
+                self.event_cursor += 1;
+            } else {
+                // Event still has frames: carry the offset and pin the nonce so the
+                // next burst re-renders identically and continues the slice.
+                self.event_frame_offset += take;
+                self.spill_nonce = Some(ev_nonce);
                 break;
             }
-            frames.extend(ev_frames);
-            self.event_cursor += 1;
         }
         self.bursts_in_phase += 1;
-        if self.event_cursor >= events_len && self.bursts_in_phase >= dwell {
+        // Advance only when the cursor is past the last event AND no event is
+        // mid-spill, so an oversized impact action fully lands before the timeline
+        // moves.
+        if self.event_cursor >= events_len
+            && self.event_frame_offset == 0
+            && self.bursts_in_phase >= dwell
+        {
             self.advance();
         }
         frames
@@ -154,6 +190,8 @@ impl ScenarioEngine {
     fn advance(&mut self) {
         self.event_cursor = 0;
         self.bursts_in_phase = 0;
+        self.event_frame_offset = 0;
+        self.spill_nonce = None;
         let last = self.playbook.phases.len() - 1;
         if self.phase_idx < last {
             self.phase_idx += 1;
@@ -525,6 +563,8 @@ mod tests {
             phase_idx: 0,
             event_cursor: 0,
             bursts_in_phase: 0,
+            event_frame_offset: 0,
+            spill_nonce: None,
         }
     }
 
@@ -581,21 +621,87 @@ mod tests {
     }
 
     #[test]
-    fn long_event_sequence_splits_across_bursts_under_the_cap() {
+    fn multi_event_phase_spreads_one_event_per_burst() {
         let led = ledger_with_s7();
         let vuln = VulnDb::embedded().unwrap();
-        // Three reads in one phase with a per-burst cap of 1: each event yields
-        // several frames, so only one event is consumed per burst and the rest
-        // spread across following bursts instead of one microburst.
-        let mut e = engine(
-            "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n",
-        );
-        e.max_frames_per_burst = 1;
+        // Three reads in one phase, with the cap sized to exactly one event's
+        // frames: each burst consumes one whole event and the three spread across
+        // three bursts, so a long sequence never lands as one microburst.
+        let ev = "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n";
+        let mut e = engine(ev);
+        let one = e
+            .render_event(&e.playbook.phases[0].events[0].clone(), &led, &vuln, 0)
+            .len();
+        e.max_frames_per_burst = one;
         let b0 = e.phase_frames(&led, &vuln, 0);
-        assert!(!b0.is_empty(), "the first event still emits");
-        assert_eq!(e.event_cursor, 1, "only one event consumed under the cap");
+        assert_eq!(b0.len(), one, "the burst emits exactly one whole event");
+        assert_eq!(e.event_cursor, 1, "one event consumed under the cap");
+        assert_eq!(
+            e.event_frame_offset, 0,
+            "the event drained on the boundary, no spill"
+        );
         e.phase_frames(&led, &vuln, 1);
         assert_eq!(e.event_cursor, 2, "the next event lands on the next burst");
+    }
+
+    #[test]
+    fn oversized_event_never_exceeds_the_cap_and_reassembles() {
+        // A single s7_read renders a multi-frame S7 exchange. With a cap of 2 it
+        // must spill across bursts: no burst exceeds the cap, no frame is dropped,
+        // and the concatenation equals the single-shot render (SP-6). Before the
+        // fix the whole event emitted in one over-cap microburst.
+        let led = ledger_with_s7();
+        let vuln = VulnDb::embedded().unwrap();
+        let ev = "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n";
+        let mut e = engine(ev);
+        // The full render at the nonce the engine pins (burst 0 nonce + cursor 0).
+        let first_ev = e.playbook.phases[0].events[0].clone();
+        let full = e.render_event(&first_ev, &led, &vuln, 0);
+        assert!(full.len() > 2, "the read is larger than the cap");
+
+        e.max_frames_per_burst = 2;
+        // Collect until the first full emission is drained. (This is a one-shot
+        // single-phase campaign, so once the event drains the phase holds and
+        // re-emits it with a fresh nonce; stop at the first complete render.)
+        let mut drained: Vec<Vec<u8>> = Vec::new();
+        for n in 0..50u64 {
+            let b = e.phase_frames(&led, &vuln, n);
+            assert!(b.len() <= 2, "burst {n} stays within the cap");
+            drained.extend(b);
+            if drained.len() >= full.len() {
+                break;
+            }
+        }
+        assert_eq!(
+            &drained[..full.len()],
+            &full[..],
+            "spilled frames reassemble the whole event, in order"
+        );
+    }
+
+    #[test]
+    fn phase_holds_until_a_spilling_event_drains() {
+        // dwell_runs: 1 with a single over-cap event: the phase must not advance
+        // until the event is fully emitted, so an oversized impact action always
+        // lands on the wire before the timeline moves (SP-6).
+        let led = ledger_with_s7();
+        let vuln = VulnDb::embedded().unwrap();
+        let ev = "phases:\n  - id: impact\n    dwell_runs: 1\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n  - id: after\n    events:\n      - { emit: s7_stop, target: { ip: 10.20.10.11 } }\n";
+        let mut e = engine(ev);
+        let first_ev = e.playbook.phases[0].events[0].clone();
+        let full_len = e.render_event(&first_ev, &led, &vuln, 0).len();
+        assert!(full_len > 1, "the impact event is multi-frame");
+        e.max_frames_per_burst = 1;
+        for _ in 0..(full_len - 1) {
+            e.phase_frames(&led, &vuln, 0);
+            assert_eq!(e.phase_id(), "impact", "phase holds while the event spills");
+        }
+        e.phase_frames(&led, &vuln, 0);
+        assert_eq!(
+            e.phase_id(),
+            "after",
+            "phase advances once the event fully drains"
+        );
     }
 
     #[test]

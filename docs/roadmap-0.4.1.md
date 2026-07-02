@@ -116,54 +116,76 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
 
 ### P3 - hardening, safety, and coverage
 
-- **SP-6 [low] One oversized event bypasses `max_frames_per_burst`.**
+- **SP-6 [low] [DONE 0.4.1-beta.4] One oversized event bypasses `max_frames_per_burst`.**
   `src/scenario/engine.rs:112`. The per-burst cap is checked only between events, so the
   first event of a burst is emitted whole. `payload_hex` has no length bound, so a large
   `tristation_download` with `chunk: 1` builds an unbounded single microburst.
   *Fix:* bound `payload_hex` at load, or clamp `ev_frames` to the remaining burst budget.
+  *Landed 0.4.1-beta.4 (graceful):* a single over-cap event spills across bursts via an
+  `event_frame_offset` cursor and a pinned `spill_nonce` (byte-identical re-render); the
+  phase does not advance until the event fully drains. No event is ever dropped.
 
-- **SP-7 [low] Pack path fields escape the pack dir.** `src/config.rs:643`.
+- **SP-7 [low] [DONE 0.4.1-beta.4] Pack path fields escape the pack dir.** `src/config.rs:643`.
   `TargetCfg.plant`/`.playbook`/`.profiles` are `PathBuf`s joined onto `pack_dir`; an
   absolute or `../` value escapes the sandbox (file reads only; third-party packs only).
   *Fix:* reject `is_absolute()` or any `ParentDir` component in `validate()`, mirroring the
   scenario-name guard.
+  *Landed 0.4.1-beta.4:* `validate()` rejects an absolute or `ParentDir`-bearing
+  plant/playbook/profiles path, naming the offending field; unit-tested.
 
-- **SP-8 [low] Scenario overlay can redefine `iface`/`net.*`.** `src/config.rs:845`.
+- **SP-8 [low] [DONE 0.4.1-beta.4] Scenario overlay can redefine `iface`/`net.*`.** `src/config.rs:845`.
   `net-setup` runs on the base config while the daemon runs the overlaid config; a pack
   that overlays `iface`/`net.*` desyncs the mirror from the tx port. Shipped packs do not.
   *Fix:* reject `iface`/`net.*` overrides in a target overlay, or have `net-setup` honor
   the same `--scenario` overlay.
+  *Landed 0.4.1-beta.4 (graceful):* `net-setup`/`net-teardown`/`net-provision` gained
+  `--scenario` and load the overlaid config; the systemd unit passes `--scenario %i`; a
+  datapath-overlaying scenario is flagged with one warning at load.
 
-- **SP-9 [low] Missing-pack `ExecStartPre` exits 1, not 78.** `systemd/ot-turbolaser@.service:22`.
+- **SP-9 [low] [DONE 0.4.1-beta.4] Missing-pack `ExecStartPre` exits 1, not 78.** `systemd/ot-turbolaser@.service:22`.
   So a missing pack crash-loops to the StartLimit instead of failing clean on the first hit
   like the rest of the `EX_CONFIG`=78 lifecycle.
   *Fix:* exit 78 from the guard.
+  *Landed 0.4.1-beta.4:* the missing-pack guard exits 78, matching `RestartPreventExitStatus`.
 
-- **SP-10 [low] Unparseable pack `profiles.toml` degrades a CVE device silently.**
+- **SP-10 [low] [DONE 0.4.1-beta.4] Unparseable pack `profiles.toml` degrades a CVE device silently.**
   `src/vuln/mod.rs:145`. `load_overlay` warns and falls back to the embedded set; a plant
   model defined only in the pack overlay (e.g. stuxnet's `SIMATIC S7-417 CPU`) then pins
   identity-only, protocol-none, CVE-less, and the SZL carries the literal model string
   instead of the real MLFB. `preflight` warns but does not fail.
   *Fix:* treat a declared-but-unparseable `profiles.toml` as fatal in pre-flight; flag a
   plant `model` that fails to resolve to a profile yet is not clearly identity-only.
+  *Landed 0.4.1-beta.4:* `preflight` returns `Err` on a declared, non-empty, unparseable
+  `profiles.toml`, and flags a device that names a `model` (with no protocol/vendor/firmware,
+  so it expects a profile) that resolves to none. A protocol/vendor-bearing identity-only
+  device is exempt, so the four shipped packs pass unchanged.
 
-- **SP-11 [low] MAC-uniqueness is enforced only inside `fabricate()`.**
+- **SP-11 [low] [DONE 0.4.1-beta.4] MAC-uniqueness is enforced only inside `fabricate()`.**
   `src/simulate/devices.rs:78`. BOM (`bom_mac`) and capture-host MACs are unchecked, so the
   "no two assets ever share a MAC" claim in the commit/doc is statistical, not enforced
   (birthday-bounded, not reached at supported scale).
   *Fix:* thread the `used_macs` set through `enrich_plant` and capture-host registration,
   or soften the claim to "unique across the fabricated core fleet."
+  *Landed 0.4.1-beta.4 (real fix):* `enrich_plant` seeds a used-MAC set from the ledger and
+  perturbs a colliding BOM MAC; `reconcile_capture_into_zones` takes a `reserved_macs` set
+  and perturbs a colliding capture-host MAC, carrying the resolved MAC into the frame rewrite
+  so ARP and L3 still agree. Uniqueness now holds across the whole plant.
 
-- **SP-12 [low] No full-plant MAC-uniqueness test.** `src/simulate/devices.rs:554`.
+- **SP-12 [low] [DONE 0.4.1-beta.4] No full-plant MAC-uniqueness test.** `src/simulate/devices.rs:554`.
   The new test exercises only `fabricate()`. A BOM-MAC regression would pass CI.
   *Fix:* assert a MAC `HashSet` equals device count after `enrich_plant`, mirroring the
   existing IP-uniqueness assertion.
+  *Landed 0.4.1-beta.4:* `enrich_plant_keeps_macs_unique_across_the_full_plant` asserts a
+  MAC set equals device count after `fabricate` + `create_l3_zones` + `enrich_plant`, and
+  that it reproduces from the seed.
 
-- **SP-13 [low] stuxnet C2 domain never asserted on the wire.** `tests/scenario_tshark.rs:126`.
+- **SP-13 [low] [DONE 0.4.1-beta.4] stuxnet C2 domain never asserted on the wire.** `tests/scenario_tshark.rs:126`.
   ukraine2015's real C2 IP is asserted; stuxnet ships `ioc_fidelity: real` with a
   domain-only IOC that no scenario-level test checks reaches the frames.
   *Fix:* assert the beacon domain (or its DNS query) in stuxnet frames, paralleling the
   ukraine2015 `ip.addr` check.
+  *Landed 0.4.1-beta.4:* `scenario_tshark` asserts `dns.qry.name == "www.mypremierfutbol.com"`
+  in the stuxnet pcap.
 
 ### Capability track (finish 0.4.1 features)
 

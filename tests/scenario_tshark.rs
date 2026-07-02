@@ -134,6 +134,13 @@ fn scenario_attack_frames_dissect_in_tshark() {
         dissects(&p, "cotp.type==0x0e"),
         "S7 COTP connection request present"
     );
+    // Stuxnet ships ioc_fidelity: real with a domain-only C2 IOC; its infection
+    // phase beacons to the published Stuxnet C2 domain, so assert the domain reaches
+    // the wire as a DNS query, paralleling the ukraine2015 C2-IP check (SP-13).
+    assert!(
+        dissects(&p, "dns.qry.name == \"www.mypremierfutbol.com\""),
+        "the real published Stuxnet C2 domain is queried on the wire"
+    );
 
     // Oldsmar: Modbus write of the NaOH dose setpoint (function code 6).
     let p = dir.path().join("oldsmar.pcap");

@@ -3,6 +3,52 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-beta.4] - 2026-07-02
+
+P3 hardening: the scenario framework's remaining silent-degradation and safety gaps. The
+four shipped packs are unaffected (guarded by the consistency and tshark tests).
+
+### Fixed
+- **An oversized event no longer bypasses `max_frames_per_burst` (SP-6).** The per-burst
+  cap was checked only between events, so the first event of a burst emitted whole even if
+  it alone exceeded the cap (an unbounded `tristation_download` with `chunk: 1` built one
+  microburst). A single over-cap event now spills across successive bursts, each within the
+  cap, via an intra-event frame cursor; a pinned per-event nonce keeps each re-render
+  byte-identical so the spilled slices reassemble exactly, and the phase does not advance
+  until the event fully drains.
+- **Pack path fields can no longer escape the pack dir (SP-7).** `validate()` rejects a
+  `plant`/`playbook`/`profiles` path that `is_absolute()` or contains a `..` component,
+  mirroring the scenario-name guard at component granularity.
+- **`net-setup`/`net-teardown`/`net-provision` honor the `--scenario` overlay (SP-8).** A
+  pack that overlays `iface`/`net.*` now builds the bridge and mirror on the same ports the
+  daemon transmits on, instead of the base config's ports, so the mirror stays in sync. A
+  datapath-overlaying scenario is flagged with one warning at load. The systemd unit passes
+  `--scenario %i` to the datapath commands.
+- **A missing pack fails clean instead of crash-looping (SP-9).** The systemd unit's
+  missing-pack `ExecStartPre` exits 78 (`EX_CONFIG`) to match `RestartPreventExitStatus`,
+  so it fails on the first hit rather than burning the StartLimit budget.
+- **An unparseable pack `profiles.toml` is now fatal at pre-flight (SP-10).** A declared,
+  non-empty `profiles.toml` that does not parse stops `check`/`plan`/`fire` rather than
+  silently falling back to the embedded set (which would degrade a CVE-bearing plant device
+  to identity-only). Pre-flight also flags a plant device that names a `model` expecting a
+  profile (no identity-only fields set) which resolves to none.
+- **MAC uniqueness is now enforced across the whole plant (SP-11).** `enrich_plant` (the
+  bill of materials) and capture-host reconciliation thread the used-MAC set that
+  `fabricate` already kept, perturbing a colliding MAC off the fabricated fleet and each
+  other, so the "no two assets share a MAC" property holds beyond the fabricated core. A
+  perturbed capture-host MAC is carried into the frame rewrite so its ARP and L3 traffic
+  still agree.
+
+### Tests
+- SP-6: a single over-cap event spills across bursts, each within the cap, and reassembles
+  to the single-shot render; a phase holds until a spilling event drains.
+- SP-7: absolute and `..` plant/playbook/profiles paths are rejected. SP-8: a scenario
+  overlaying `iface`/`net.sensor_port` yields the overlaid datapath on the net-setup path.
+  SP-10: a malformed `profiles.toml` and an unresolved CVE-expecting model are both rejected
+  at pre-flight. SP-12: a full-plant MAC-uniqueness assertion after `enrich_plant`. SP-13:
+  the stuxnet C2 domain is asserted on the wire as a DNS query, paralleling ukraine2015's
+  C2-IP check. Full suite green (227 unit, 13 e2e); tshark and install-smoke pass.
+
 ## [0.4.1-beta.3] - 2026-07-02
 
 P2 correctness: two latent engineering-station slot collisions and a test gap that let a
