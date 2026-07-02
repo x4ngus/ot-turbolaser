@@ -249,6 +249,26 @@ fn all_shipped_packs_are_internally_consistent() {
     }
 }
 
+/// Per-pack, per-event: every playbook event target resolves against the pinned
+/// plant, checked with the same ip -> model -> asset_type logic the engine uses,
+/// not just explicit-ip targets. `build_validated_plant` loads and validates the
+/// playbook, pins the plant, then runs `validate_targets`, so a pack with any
+/// orphaned target - a stray model or asset_type as well as an ip - fails here
+/// rather than shipping green and emitting nothing for that event (SP-5). Pairs
+/// with the negative `orphaned_playbook_target_is_rejected_at_preflight` below.
+#[test]
+fn every_shipped_pack_event_target_resolves() {
+    let base = Path::new("conf/replay.yaml");
+    for name in ["oldsmar", "stuxnet", "triton", "ukraine2015"] {
+        let cfg = config::load_with_scenario(base, Some(name))
+            .unwrap_or_else(|e| panic!("{name} config: {e}"));
+        let t = cfg.target.as_ref().expect("target present");
+        let oui = OuiDb::embedded();
+        ot_turbolaser::scenario::build_validated_plant(&cfg, t, &oui, 1337, 0)
+            .unwrap_or_else(|e| panic!("{name}: every event target must resolve: {e}"));
+    }
+}
+
 /// `registry::discover` finds the four installed packs, sorted, each complete.
 #[test]
 fn discover_lists_the_four_shipped_packs() {

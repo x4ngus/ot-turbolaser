@@ -84,27 +84,35 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
 
 ### P2 - correctness (latent / author footguns)
 
-- **SP-3 [medium] Pinned `.250` device collides with the engineering-station slot.**
+- **SP-3 [medium] [DONE 0.4.1-beta.3] Pinned `.250` device collides with the engineering-station slot.**
   `src/scenario/plant.rs:243`. `build_sealed_session` guards only the firewall slot
   (`network+1`) with a warn; the station slot (`roles::station_addr`, `network+250`
   clamped) is unguarded. The engine sources every OT action from the station address with
   a seed-derived `stable_mac`, so a device pinned at `.250` puts two MACs on one IP that
   the sensor cannot fuse. No shipped pack hits it (all pin low hosts).
   *Fix:* mirror the firewall guard for `roles::station_addr(&d.zone)`.
+  *Landed 0.4.1-beta.3:* both slot warnings flow through a new `reserved_slot_warning`
+  helper (station slot warned always; gateway slot only under `enrich`), unit-tested.
 
-- **SP-4 [medium] Auto-assigned device collides with the station in small subnets.**
+- **SP-4 [medium] [DONE 0.4.1-beta.3] Auto-assigned device collides with the station in small subnets.**
   `src/scenario/plant.rs:178`. `devices::next_free_in` reserves only the gateway, not the
   station slot; in a small zone (e.g. `/30`, where `station_addr` clamps to `network+2`)
   an ip-less device is placed on the station slot, reproducing SP-3 with no operator
   action. Shipped packs use `/24` with explicit ips, so latent.
   *Fix:* also exclude `roles::station_addr(net)` in `next_free_in` (or the plant caller).
+  *Landed 0.4.1-beta.3:* `next_free_in` now reserves both the gateway and the station slot
+  (via a new `roles::station_addr_net`), so core fabrication and the scenario plant both
+  skip it; unit-tested on a `/29` and through `build_sealed_session`.
 
-- **SP-5 [medium] No test asserts per-event target resolution for shipped packs.**
+- **SP-5 [medium] [DONE 0.4.1-beta.3] No test asserts per-event target resolution for shipped packs.**
   `tests/scenario_e2e.rs:238`. E2E asserts one signature per pack, so an orphaned target
   in a multi-event phase (e.g. stuxnet's S7-417 `s7_read`/`s7_stop` at `10.10.20.11`, or
   either ukraine RTU breaker command) ships green. Pairs with SP-1.
   *Fix:* per-pack test that loads plant + playbook and asserts every event target resolves;
   plus a negative test that pre-flight rejects an unresolved target.
+  *Landed 0.4.1-beta.3:* `every_shipped_pack_event_target_resolves` runs each pack through
+  `build_validated_plant`/`validate_targets` (ip + model + asset_type), stronger than the
+  prior explicit-ip-only consistency loop; the negative preflight test is retained.
 
 ### P3 - hardening, safety, and coverage
 
