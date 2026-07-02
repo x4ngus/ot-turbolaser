@@ -185,6 +185,10 @@ pub struct TargetsArgs {
     /// Emit raw JSON instead of a human summary.
     #[arg(long)]
     pub json: bool,
+    /// Lint one pack instead of listing: validate target resolution, path fields,
+    /// profiles, reserved gateway/station slots, and print its fidelity report.
+    #[arg(long, value_name = "NAME")]
+    pub validate: Option<String>,
 }
 
 #[derive(Args, Debug)]

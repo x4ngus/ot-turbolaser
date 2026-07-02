@@ -269,6 +269,39 @@ fn every_shipped_pack_event_target_resolves() {
     }
 }
 
+/// The pre-flight fidelity report (CAP-1) lists each event's resolved target and a
+/// non-zero per-pass frame total, plus the IOC summary, so an operator sees what
+/// will hit the wire before firing.
+#[test]
+fn fidelity_report_lists_resolved_targets_and_counts() {
+    let base = Path::new("conf/replay.yaml");
+    let cfg = config::load_with_scenario(base, Some("stuxnet")).expect("stuxnet loads");
+    let report = ot_turbolaser::scenario::fidelity_report(&cfg)
+        .expect("report builds")
+        .expect("scenario present");
+    assert!(
+        report.contains("10.10.20.11") && report.contains("SIMATIC S7-417 CPU"),
+        "names a resolved target ip and model: {report}"
+    );
+    assert!(
+        report.contains("total attack frames per full pass:")
+            && !report.contains("total attack frames per full pass: 0"),
+        "reports a non-zero frame total: {report}"
+    );
+    assert!(
+        report.contains("ioc fidelity") && report.contains("mypremierfutbol"),
+        "reports the IOC summary including the C2 domain: {report}"
+    );
+    // A generic (no-target) config has no report.
+    let generic = config::load_with_scenario(base, None).expect("generic loads");
+    assert!(
+        ot_turbolaser::scenario::fidelity_report(&generic)
+            .expect("ok")
+            .is_none(),
+        "a generic config produces no fidelity report"
+    );
+}
+
 /// `registry::discover` finds the four installed packs, sorted, each complete.
 #[test]
 fn discover_lists_the_four_shipped_packs() {

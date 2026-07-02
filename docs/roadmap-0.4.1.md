@@ -189,15 +189,23 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
 
 ### Capability track (finish 0.4.1 features)
 
-- **CAP-1 Pre-flight fidelity report.** `turbolaser check --scenario X` prints resolved
+- **CAP-1 [DONE 0.4.1-beta.5] Pre-flight fidelity report.** `turbolaser check --scenario X` prints resolved
   targets, per-phase frame counts, and an IOC summary so an operator sees what will hit the
   wire before firing. Directly closes SP-1/SP-5 ergonomically.
-- **CAP-2 Scenario authoring lint + docs.** A `turbolaser targets --validate <pack>` lint
+  *Landed 0.4.1-beta.5:* `ScenarioEngine::fidelity_report` (read-only) rendered by
+  `scenario::fidelity_report` and printed by `check` after validation passes.
+- **CAP-2 [DONE 0.4.1-beta.5] Scenario authoring lint + docs.** A `turbolaser targets --validate <pack>` lint
   (target resolution, reserved gateway/station slots, path-field constraints, payload
   bounds) and a `docs/targets.md` section documenting the resolution and reserved-slot
   rules. Turns SP-1/SP-3/SP-4/SP-6/SP-7 into pack-author guardrails.
+  *Landed 0.4.1-beta.5:* `targets --validate <name>` runs pre-flight + `reserved_slot_lint`
+  + the fidelity report; `docs/targets.md` gained a "Target resolution and reserved slots"
+  section and a pre-flight tooling section. (Payload bounds are now graceful spill, SP-6, so
+  the lint reports per-event frame counts rather than a hard bound.)
 - **CAP-3 (stretch) New scenario content.** Additional pack(s) and/or richer playbook event
-  types, scope TBD by product; gated on the P1/P2 guardrails landing first.
+  types, scope TBD by product; gated on the P1/P2 guardrails landing first. Scoped for
+  0.4.1-beta.6: an INCONTROLLER/PIPEDREAM (2022) pack plus new emit types (DNP3, ENIP/CIP,
+  OPC-UA, IEC-101).
 
 ## Definition of done for 0.4.1 stable
 

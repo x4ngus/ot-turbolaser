@@ -133,6 +133,74 @@ impl ScenarioEngine {
         self.current_phase().techniques.clone()
     }
 
+    /// A human pre-flight fidelity report: for each phase, every event's resolved
+    /// target and how many frames it renders, plus the IOC summary. Read-only (it
+    /// does not advance the timeline), so `check --scenario` can show an operator
+    /// exactly what will hit the wire before firing (CAP-1). Frame counts are
+    /// nonce-invariant, so a fixed nonce per event is representative.
+    pub fn fidelity_report(&self, ledger: &Session, vuln: &VulnDb) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "scenario {}: {} phase(s), campaign {:?}, max {} frame(s)/burst",
+            self.name,
+            self.playbook.phases.len(),
+            self.campaign,
+            self.max_frames_per_burst
+        );
+        let mut total = 0usize;
+        for ph in &self.playbook.phases {
+            let label = ph.name.clone().unwrap_or_else(|| ph.id.clone());
+            let tech = if ph.techniques.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", ph.techniques.join(","))
+            };
+            let _ = writeln!(
+                out,
+                "  phase {} ({label}){tech}, dwell {}",
+                ph.id, ph.dwell_runs
+            );
+            let mut pframes = 0usize;
+            for (i, ev) in ph.events.iter().enumerate() {
+                let frames = self.render_event(ev, ledger, vuln, i as u64).len();
+                pframes += frames;
+                let tgt = match ev.target.as_ref() {
+                    Some(t) => match resolve(ledger, &ev.target) {
+                        Some(d) => format!(
+                            "{} {} ({})",
+                            d.ip,
+                            d.model,
+                            d.asset_type.as_deref().unwrap_or("-")
+                        ),
+                        None => format!("UNRESOLVED {t:?}"),
+                    },
+                    None if ev.emit == EmitKind::C2Beacon => match ledger.devices.first() {
+                        Some(d) => format!("c2 beacon via first device {}", d.ip),
+                        None => "c2 beacon (no plant device)".to_string(),
+                    },
+                    None => "no target".to_string(),
+                };
+                let _ = writeln!(out, "    - {:?} -> {tgt}  [{frames} frame(s)]", ev.emit);
+            }
+            let _ = writeln!(out, "    phase frames: {pframes}");
+            total += pframes;
+        }
+        let _ = writeln!(out, "  total attack frames per full pass: {total}");
+        let _ = writeln!(out, "  ioc fidelity: {:?}", self.fidelity);
+        if !self.c2_domains.is_empty() {
+            let _ = writeln!(out, "  c2 domains: {}", self.c2_domains.join(", "));
+        }
+        if !self.c2_ips.is_empty() {
+            let _ = writeln!(out, "  c2 ips: {}", self.c2_ips.join(", "));
+        }
+        if !self.external_cidrs.is_empty() {
+            let _ = writeln!(out, "  external cidrs: {}", self.external_cidrs.join(", "));
+        }
+        out
+    }
+
     /// Render this burst's attack frames and advance the timeline. Called once per
     /// identity-announce burst, so dwell and pacing are measured in bursts.
     pub fn phase_frames(&mut self, ledger: &Session, vuln: &VulnDb, nonce: u64) -> Vec<Vec<u8>> {
