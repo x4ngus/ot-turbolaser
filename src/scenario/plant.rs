@@ -122,6 +122,32 @@ fn label_for_proto(p: ProfileProto) -> &'static str {
     }
 }
 
+/// Describe the collision if a pinned device IP lands on a reserved zone slot, so
+/// the caller can warn the pack author. Two slots are reserved:
+///
+/// * the engineering-station slot (network+250 clamped): the engine sources every
+///   OT action from it with a seed-derived MAC, so a device pinned there puts two
+///   MACs on one IP the sensor cannot fuse. Reserved regardless of `enrich`.
+/// * the zone gateway slot (network+1): `enrich_plant` places the zone
+///   firewall/DNS resolver there, so a device pinned there under `enrich` displaces
+///   the firewall. Reserved only when `enrich` runs.
+///
+/// The station slot is checked first: in a subnet small enough that the two slots
+/// coincide, the OT-source collision is the more serious one to report.
+fn reserved_slot_warning(ip: Ipv4Addr, zone: &str, enrich: bool) -> Option<String> {
+    if ip == crate::simulate::roles::station_addr(zone) {
+        return Some(format!(
+            "device at {ip} occupies the engineering-station slot (network+250) the engine sources every OT action from; the sensor would see two MACs on one IP. Move it to another host."
+        ));
+    }
+    if enrich && ip == crate::simulate::roles::firewall_addr(zone) {
+        return Some(format!(
+            "device at {ip} occupies the zone gateway slot (network+1) that enrich reserves for the firewall/DNS resolver; move it or set enrich: false"
+        ));
+    }
+    None
+}
+
 /// Build a sealed ledger from a plant spec. `fallback_domains` (the config's
 /// `dns.domains`) is used when the spec declares none. The result is sealed and
 /// tagged with `scenario`, so the daemon replays it verbatim and the mismatch
@@ -237,13 +263,12 @@ pub fn build_sealed_session(
                 "device IP {ip} collides with another device in the plant"
             ));
         }
-        // Warn if a pinned device sits on the gateway slot enrich reserves for the
-        // zone firewall/DNS resolver (network+1); the firewall would then fail to
-        // be added to that zone.
-        if spec.enrich && ip == crate::simulate::roles::firewall_addr(&d.zone) {
-            log::warn!(
-                "scenario plant: device at {ip} occupies the zone gateway slot (network+1) that enrich reserves for the firewall/DNS resolver; move it or set enrich: false"
-            );
+        // Warn if a pinned device sits on a reserved zone slot: the gateway
+        // (network+1, the enrich firewall/DNS resolver) or the engineering station
+        // (network+250, which the engine sources OT actions from). Either puts a
+        // second MAC on a reserved IP the sensor cannot reconcile.
+        if let Some(w) = reserved_slot_warning(ip, &d.zone, spec.enrich) {
+            log::warn!("scenario plant: {w}");
         }
         if !s.add_device(rec) {
             return Err(format!("could not pin device at {ip} (device cap)"));
@@ -422,6 +447,64 @@ enrich: true
             cpu.ip, "10.20.10.1",
             "auto-assign skipped the firewall slot"
         );
+    }
+
+    #[test]
+    fn reserved_slot_warning_flags_station_and_gateway() {
+        use crate::simulate::roles;
+        let zone = "10.20.10.0/24";
+        let station = roles::station_addr(zone); // .250
+        let gw = roles::firewall_addr(zone); // .1
+                                             // The station slot is flagged whether or not enrich runs: the engine
+                                             // sources OT actions from it regardless (SP-3).
+        assert!(
+            reserved_slot_warning(station, zone, false)
+                .unwrap()
+                .contains("engineering-station"),
+            "station slot flagged without enrich"
+        );
+        assert!(
+            reserved_slot_warning(station, zone, true)
+                .unwrap()
+                .contains("engineering-station"),
+            "station slot flagged with enrich"
+        );
+        // The gateway slot is flagged only under enrich (that is when the firewall
+        // is placed there).
+        assert!(
+            reserved_slot_warning(gw, zone, true)
+                .unwrap()
+                .contains("gateway"),
+            "gateway slot flagged under enrich"
+        );
+        assert!(
+            reserved_slot_warning(gw, zone, false).is_none(),
+            "gateway slot is only reserved when enrich runs"
+        );
+        // An ordinary host is clean.
+        assert!(
+            reserved_slot_warning("10.20.10.50".parse().unwrap(), zone, true).is_none(),
+            "a normal host is not a reserved slot"
+        );
+    }
+
+    #[test]
+    fn auto_assigned_device_skips_the_station_slot() {
+        // In a subnet small enough that the station clamps to a low host, an
+        // ip-less device must still avoid it (SP-4 at the plant level). /29:
+        // gateway is .1, station clamps to .6, so the device lands on .2.
+        let yaml = "zones:\n  - { cidr: 10.0.0.0/29, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/29, asset_type: RTU }\nenrich: false\n";
+        let spec = PlantSpec::parse(yaml).unwrap();
+        let vuln = VulnDb::embedded().unwrap();
+        let s = build_sealed_session(&spec, &vuln, &OuiDb::embedded(), 1, 0, "x", &[]).unwrap();
+        let station = crate::simulate::roles::station_addr("10.0.0.0/29");
+        let dev = &s.devices[0];
+        assert_ne!(
+            dev.ip,
+            station.to_string(),
+            "auto-assign skipped the station slot"
+        );
+        assert_eq!(dev.ip, "10.0.0.2", "took the first non-reserved host");
     }
 
     #[test]

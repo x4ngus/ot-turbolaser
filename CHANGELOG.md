@@ -3,6 +3,35 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-beta.3] - 2026-07-02
+
+P2 correctness: two latent engineering-station slot collisions and a test gap that let a
+multi-event pack ship with an orphaned target. No behaviour change for the four shipped
+packs (all pin low hosts and use explicit ips); these close author footguns.
+
+### Fixed
+- **A pinned `.250` device no longer silently collides with the engineering-station slot
+  (SP-3).** `build_sealed_session` now warns when a pinned device lands on the station slot
+  (network+250 clamped), which the engine sources every OT action from with a seed-derived
+  MAC; without the warning the sensor would see two MACs on one IP and could not fuse them.
+  The existing gateway-slot (network+1) warning is preserved and both now flow through one
+  `reserved_slot_warning` helper.
+- **An auto-assigned device no longer lands on the station slot in a small subnet (SP-4).**
+  `devices::next_free_in` now reserves the station slot as well as the gateway, so an
+  ip-less device in a zone small enough that the station clamps low (e.g. a `/30`, where it
+  clamps to network+2) is placed elsewhere instead of reproducing SP-3 with no operator
+  action. This is shared by core fabrication and the scenario plant.
+
+### Tests
+- Per-pack, per-event target-resolution test (`every_shipped_pack_event_target_resolves`):
+  every shipped pack's every playbook event target - ip, model, and asset_type - resolves
+  against the pinned plant via `build_validated_plant`/`validate_targets`, not just explicit
+  ips as the prior consistency check did (SP-5). The negative
+  `orphaned_playbook_target_is_rejected_at_preflight` test is retained.
+- Unit tests: `next_free_in` skips both reserved slots in a small subnet; `reserved_slot_warning`
+  flags the station slot always and the gateway slot only under enrich; an auto-assigned plant
+  device skips the station slot. Full suite green (222 unit, 8 e2e); install-smoke passes.
+
 ## [0.4.1-beta.2] - 2026-07-02
 
 First 0.4.1 sprint content: the two HIGH defects from the scenario-framework review,

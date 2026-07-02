@@ -100,14 +100,20 @@ pub fn fabricate(
     added
 }
 
-/// The next host in `net` not already in `used`, skipping network+1 which is
-/// reserved for the zone-edge firewall gateway (added by `enrich_plant`). Pure
-/// helper so fabrication keeps one growing set instead of rebuilding it. Shared
-/// with the sealed scenario plant so its auto-assigned devices skip the gateway
-/// slot too.
+/// The next host in `net` not already in `used`, skipping two reserved slots:
+/// network+1 (the zone-edge firewall gateway, added by `enrich_plant`) and the
+/// engineering-station slot (network+250 clamped, which the engine sources every
+/// OT action from with a seed-derived MAC). Skipping the station slot keeps an
+/// auto-assigned device off it even in a small subnet where the station clamps
+/// low (e.g. /30 -> network+2), so no device ever shares the station's IP with a
+/// second MAC the sensor cannot fuse. Pure helper so fabrication keeps one growing
+/// set instead of rebuilding it. Shared with the sealed scenario plant so its
+/// auto-assigned devices skip both reserved slots too.
 pub(crate) fn next_free_in(net: Ipv4Net, used: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
     let gateway = Ipv4Addr::from(u32::from(net.network()).saturating_add(1));
-    net.hosts().find(|ip| *ip != gateway && !used.contains(ip))
+    let station = super::roles::station_addr_net(net);
+    net.hosts()
+        .find(|ip| *ip != gateway && *ip != station && !used.contains(ip))
 }
 
 /// A subnet CIDR with a free host, creating a new zone when there is room and
@@ -525,6 +531,40 @@ mod tests {
 
     fn db() -> VulnDb {
         VulnDb::embedded().unwrap()
+    }
+
+    #[test]
+    fn next_free_in_skips_gateway_and_station_slots() {
+        use crate::simulate::roles;
+        // /29: usable hosts .1..=.6. Gateway is .1; the station clamps to the last
+        // usable (.6). An auto-assigned device must take neither, even here where
+        // the station sits low in the subnet (SP-4).
+        let net: Ipv4Net = "10.0.0.0/29".parse().unwrap();
+        let gw = Ipv4Addr::new(10, 0, 0, 1);
+        let station = roles::station_addr_net(net);
+        assert_eq!(
+            station,
+            Ipv4Addr::new(10, 0, 0, 6),
+            "station clamps to the last usable host in a small subnet"
+        );
+        let mut used: HashSet<Ipv4Addr> = HashSet::new();
+        let mut picks = Vec::new();
+        while let Some(ip) = next_free_in(net, &used) {
+            assert_ne!(ip, gw, "never the gateway slot");
+            assert_ne!(ip, station, "never the station slot");
+            used.insert(ip);
+            picks.push(ip);
+        }
+        assert_eq!(
+            picks,
+            vec![
+                Ipv4Addr::new(10, 0, 0, 2),
+                Ipv4Addr::new(10, 0, 0, 3),
+                Ipv4Addr::new(10, 0, 0, 4),
+                Ipv4Addr::new(10, 0, 0, 5),
+            ],
+            "only the four non-reserved hosts, in order"
+        );
     }
 
     #[test]
