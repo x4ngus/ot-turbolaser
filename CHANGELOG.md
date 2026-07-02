@@ -3,6 +3,25 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-beta.1] - 2026-07-02
+
+Opens the 0.4.1 pre-release ladder. This is a consolidation build: the develop
+scenario beta ladder (last tagged 0.4.0-beta.4) is realigned onto the released and
+hardened 0.4.0 baseline. No new behaviour lands here beyond that merge; it exists so
+the 0.4.1 sprint builds on one current develop tree instead of a stale beta.
+
+### Changed
+- develop now carries the full 0.4.0 stable release (target scenarios, datapath
+  provisioning/triage, Proxmox out-of-the-box) and the 0.4.0 audit hardening: unique
+  fabricated MACs, config fail-fast on zero timing/rate knobs, saturating cycle
+  zone-naming, `l3.fallback` removal, PREFIX-aware install, and the `EX_CONFIG` exit
+  contract that stops a bad-config crash-loop. The pre-stable develop betas lacked
+  all of these; this merge supersedes them.
+
+### Notes
+- 0.4.1 capability work is scoped in `docs/roadmap-0.4.1.md`. None of it is
+  implemented in this build; the tree is functionally identical to 0.4.0 stable.
+
 ## [0.4.0] - 2026-07-02
 
 First stable 0.4.0, then hardened for prime time. The headline 0.4.0 additions
