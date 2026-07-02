@@ -67,6 +67,35 @@ impl ScenarioEngine {
         })
     }
 
+    /// Cross-check every playbook event target against the sealed plant, so a
+    /// playbook that names a device absent from the plant is rejected at pre-flight
+    /// instead of silently rendering zero frames at run time (an unresolved target
+    /// emits nothing, see [`Self::render_event`]). A `c2_beacon` event may omit its
+    /// target (it falls back to the first plant device); every other event must name
+    /// one, and any target that is set must resolve to a pinned device.
+    pub fn validate_targets(&self, ledger: &Session) -> Result<(), String> {
+        for ph in &self.playbook.phases {
+            for (i, ev) in ph.events.iter().enumerate() {
+                match &ev.target {
+                    Some(_) if resolve(ledger, &ev.target).is_none() => {
+                        return Err(format!(
+                            "playbook phase {:?} event {i} (emit {:?}) targets {:?}, which no plant device matches; pin a matching device in the plant or correct the target",
+                            ph.id, ev.emit, ev.target.as_ref().unwrap()
+                        ));
+                    }
+                    None if ev.emit != EmitKind::C2Beacon => {
+                        return Err(format!(
+                            "playbook phase {:?} event {i} (emit {:?}) has no target; only c2_beacon may omit one",
+                            ph.id, ev.emit
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -580,6 +609,38 @@ mod tests {
             e.phase_frames(&led, &vuln, 0).is_empty(),
             "no frames, no panic"
         );
+    }
+
+    #[test]
+    fn validate_targets_rejects_an_orphaned_target() {
+        // The run-time skip above is a silent detection miss; pre-flight must reject
+        // a target that names no plant device instead of letting it emit nothing.
+        let led = ledger_with_s7();
+        let e = engine(
+            "phases:\n  - id: impact\n    events:\n      - { emit: s7_stop, target: { ip: 10.99.99.99 } }\n",
+        );
+        let err = e.validate_targets(&led).unwrap_err();
+        assert!(
+            err.contains("10.99.99.99"),
+            "names the unresolved target: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_targets_accepts_resolvable_targets_and_c2_without_one() {
+        let led = ledger_with_s7();
+        let e = engine(
+            "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: c2_beacon }\n",
+        );
+        assert!(e.validate_targets(&led).is_ok());
+    }
+
+    #[test]
+    fn validate_targets_rejects_a_non_c2_event_with_no_target() {
+        let led = ledger_with_s7();
+        let e = engine("phases:\n  - id: impact\n    events:\n      - { emit: s7_stop }\n");
+        let err = e.validate_targets(&led).unwrap_err();
+        assert!(err.contains("no target"), "explains the missing target: {err}");
     }
 
     #[test]
