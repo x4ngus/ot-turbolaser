@@ -388,7 +388,7 @@ impl ScenarioEngine {
                         port,
                         ev.common_addr.unwrap_or(1),
                         ev.point.unwrap_or(0) as u8,
-                        ev.close.unwrap_or(true),
+                        ev.close.unwrap_or(false),
                     )
                 })
             }

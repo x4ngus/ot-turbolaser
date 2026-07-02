@@ -61,11 +61,13 @@ fn integrity_poll_user() -> Vec<u8> {
 
 /// A control-relay-output block (group 12 var 1) request body for one point: the
 /// object header (group 12 var 1, qualifier 0x17 = 1-octet count and index) plus
-/// the CROB. `trip` selects the trip/latch-off control code, else latch-on.
-fn crob_user(func: u8, seq: u8, index: u8, trip: bool) -> Vec<u8> {
+/// the CROB. `close` matches the IEC-104/-101 command semantics: `true` latches
+/// the point closed (TCC=Close, 0x41), `false` trips it (TCC=Trip, 0x81).
+fn crob_user(func: u8, seq: u8, index: u8, close: bool) -> Vec<u8> {
     let app_ctrl = 0xC0 | (seq & 0x0f);
-    // CROB: control code, count, on-time (LE32), off-time (LE32), status.
-    let control_code = if trip { 0x81 } else { 0x41 };
+    // CROB: control code, count, on-time (LE32), off-time (LE32), status. The TCC
+    // (top two bits) is Close (01) or Trip (10); the low bits are Pulse On (1).
+    let control_code = if close { 0x41 } else { 0x81 };
     let mut crob = vec![control_code, 0x01];
     crob.extend_from_slice(&100u32.to_le_bytes()); // on-time ms
     crob.extend_from_slice(&0u32.to_le_bytes()); // off-time ms
@@ -124,7 +126,8 @@ pub fn integrity_poll(
 
 /// A full SELECT-then-OPERATE control: the master selects a control point on the
 /// outstation, the outstation echoes it, the master operates it, the outstation
-/// confirms. `trip` opens (trips) the point, else latches it on. This is the
+/// confirms. `close` latches the point closed, else trips it (open) -- the same
+/// close-semantics as the IEC-104/-101 command emitters. This is the
 /// PIPEDREAM-style breaker actuation.
 #[allow(clippy::too_many_arguments)]
 pub fn operate(
@@ -135,7 +138,7 @@ pub fn operate(
     master_port: u16,
     common_addr: u16,
     index: u8,
-    trip: bool,
+    close: bool,
 ) -> Vec<Vec<u8>> {
     let master = common_addr.wrapping_add(1000);
     let mut s = TcpSession::new(
@@ -152,7 +155,7 @@ pub fn operate(
         CTRL_MASTER,
         common_addr,
         master,
-        &crob_user(APP_SELECT, 0, index, trip),
+        &crob_user(APP_SELECT, 0, index, close),
     ));
     s.server_says(&link_frame(
         CTRL_OUTSTATION,
@@ -164,7 +167,7 @@ pub fn operate(
         CTRL_MASTER,
         common_addr,
         master,
-        &crob_user(APP_OPERATE, 1, index, trip),
+        &crob_user(APP_OPERATE, 1, index, close),
     ));
     s.server_says(&link_frame(
         CTRL_OUTSTATION,
@@ -232,12 +235,40 @@ mod tests {
     #[test]
     fn operate_selects_then_operates() {
         let (mm, om, mi, oi) = endpoints();
-        let frames = operate(mm, om, mi, oi, 50001, 5, 3, true);
+        let frames = operate(mm, om, mi, oi, 50001, 5, 3, false);
         assert_clean(&frames);
         assert!(carries_link_with_app(&frames, APP_SELECT), "SELECT present");
         assert!(
             carries_link_with_app(&frames, APP_OPERATE),
             "OPERATE present"
         );
+    }
+
+    #[test]
+    fn operate_crob_tcc_matches_close_semantics() {
+        // The CROB control code carries the trip/close decision, which the tshark
+        // OPERATE check (dnp3.al.func==4) does not see. `close=false` must trip
+        // (TCC=Trip, 0x81) and `close=true` must close (TCC=Close, 0x41), matching
+        // the IEC-104/-101 command emitters so a pack's `close: false` opens a
+        // breaker across all three protocols.
+        let (mm, om, mi, oi) = endpoints();
+        let tcc = |close: bool| -> u8 {
+            // The object header (group 12 var 1, qual 0x17, count 1, index 2) and
+            // the control code that follows sit in the frame's first user block.
+            let frames = operate(mm, om, mi, oi, 50002, 5, 2, close);
+            for f in &frames {
+                let l = parse_layout(f).unwrap();
+                let p = &f[l.payload..l.end];
+                if let Some(i) = p
+                    .windows(5)
+                    .position(|w| w == [0x0C, 0x01, 0x17, 0x01, 0x02])
+                {
+                    return p[i + 5];
+                }
+            }
+            panic!("no CROB object header found in the OPERATE frames");
+        };
+        assert_eq!(tcc(false), 0x81, "close=false emits a Trip CROB");
+        assert_eq!(tcc(true), 0x41, "close=true emits a Close CROB");
     }
 }
