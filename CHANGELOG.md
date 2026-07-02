@@ -3,6 +3,30 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-rc.1] - 2026-07-02
+
+Promotes the 0.4.1 beta ladder to a release candidate. The full sprint backlog from
+`docs/roadmap-0.4.1.md` has landed on `develop` and no new behaviour lands here beyond
+the version bump; this marks the tree as a candidate for the 0.4.1 stable release on
+`main`.
+
+Sprint summary (see the beta.2-beta.6 entries below for detail):
+- P1 silent-misfire blockers (SP-1 orphaned-target pre-flight, SP-2 PREFIX-templated
+  install) - beta.2.
+- P2 correctness (SP-3/SP-4 engineering-station slot collisions, SP-5 per-event
+  target-resolution test) - beta.3.
+- P3 hardening (SP-6 graceful per-burst spill, SP-7 pack path-field guard, SP-8 net-setup
+  `--scenario` overlay, SP-9 `EX_CONFIG` exit, SP-10 fatal unparseable profiles, SP-11
+  plant-wide MAC uniqueness, SP-12/SP-13 coverage) - beta.4.
+- Capability track: pre-flight fidelity report and `targets --validate` lint plus docs
+  (CAP-1/CAP-2) - beta.5; the INCONTROLLER/PIPEDREAM pack and DNP3/CIP/OPC-UA/IEC-101 emit
+  types (CAP-3) - beta.6.
+
+Definition of done for 0.4.1 stable is met: all P1/P2/P3 items closed, every shipped pack
+has a per-event target-resolution test and a tshark wire-signature assertion, and a
+non-default `PREFIX` install is validated in CI. Full suite green (236 unit, 13 e2e);
+tshark and install-smoke (5 packs) pass.
+
 ## [0.4.1-beta.6] - 2026-07-02
 
 Capability track, new content (CAP-3): a fifth scenario pack and four new protocol
