@@ -43,9 +43,9 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
 
 ## Backlog
 
-### P1 — silent-misfire blockers (fix before beta -> rc)
+### P1 - silent-misfire blockers (both DONE in 0.4.1-beta.2)
 
-- **SP-1 [high] Orphaned playbook target emits zero frames, silently.**
+- **SP-1 [high] [DONE 0.4.1-beta.2] Orphaned playbook target emits zero frames, silently.**
   `src/scenario/mod.rs:53`, resolution in `src/scenario/engine.rs` (`resolve` is
   first-match; an unresolved `DeviceRef` returns an empty frame vec and the event is
   skipped while the cursor advances). `build_validated_plant` validates the playbook and
@@ -60,8 +60,11 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
   Exempt `C2Beacon`'s `None`-target fallback to `devices.first()`.
   *Acceptance:* negative test (pack with an orphaned target is rejected at pre-flight)
   plus SP-5's positive per-pack test.
+  *Landed 0.4.1-beta.2:* `ScenarioEngine::validate_targets` called from
+  `build_validated_plant`; three unit tests plus the
+  `orphaned_playbook_target_is_rejected_at_preflight` e2e test.
 
-- **SP-2 [high] `conf/replay.yaml` is not PREFIX-templated, so a non-default install
+- **SP-2 [high] [DONE 0.4.1-beta.2] `conf/replay.yaml` is not PREFIX-templated, so a non-default install
   idles forever.** `scripts/install.sh:65`. The installer templates the systemd units and
   `hardening.conf` with `sed s#/opt/replay#${PREFIX}#g` but copies `conf/replay.yaml`
   verbatim. `paths.pool`/`paths.variants` stay pinned at `/opt/replay/pcaps/*` (required
@@ -75,8 +78,11 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
   config dir.
   *Acceptance:* extend the install-layout smoke test to run under `PREFIX=/tmp/tl-test`
   and assert `paths.pool`/`variants` in the installed config point inside `PREFIX`.
+  *Landed 0.4.1-beta.2:* `install.sh` templates `conf/replay.yaml` to `PREFIX` (both
+  branches); `install-smoke.sh` asserts the installed config's pcap paths resolve
+  inside `PREFIX`.
 
-### P2 — correctness (latent / author footguns)
+### P2 - correctness (latent / author footguns)
 
 - **SP-3 [medium] Pinned `.250` device collides with the engineering-station slot.**
   `src/scenario/plant.rs:243`. `build_sealed_session` guards only the firewall slot
@@ -100,7 +106,7 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
   *Fix:* per-pack test that loads plant + playbook and asserts every event target resolves;
   plus a negative test that pre-flight rejects an unresolved target.
 
-### P3 — hardening, safety, and coverage
+### P3 - hardening, safety, and coverage
 
 - **SP-6 [low] One oversized event bypasses `max_frames_per_burst`.**
   `src/scenario/engine.rs:112`. The per-burst cap is checked only between events, so the

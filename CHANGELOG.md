@@ -3,6 +3,33 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-beta.2] - 2026-07-02
+
+First 0.4.1 sprint content: the two HIGH defects from the scenario-framework review,
+fixed and tested. Both are also latent in shipped 0.4.0 and are backported to the
+stable branch (the stable tag is held for now; see the main backport PR).
+
+### Fixed
+- **Orphaned playbook target no longer emits zero frames silently (SP-1).** A
+  playbook `target` that names no plant device now fails pre-flight
+  (`check`/`plan`/`fire`) with the offending phase and event named, instead of the
+  event (or a whole impact phase) rendering nothing while the daemon looked healthy.
+  `build_validated_plant` cross-checks every event target against the pinned plant via
+  `ScenarioEngine::validate_targets`; a `c2_beacon` may still omit its target (it
+  falls back to the first device), every other event must name one that resolves.
+- **Non-default `PREFIX` install no longer sits idle forever (SP-2).** `install.sh`
+  now templates `conf/replay.yaml` to the install `PREFIX`, so `paths.pool` and
+  `paths.variants` point inside the install tree. A verbatim copy under a custom
+  `PREFIX` left them at `/opt/replay/pcaps/*` (never created there), so `scan_pcaps`
+  found no captures and the daemon stayed in `idle_no_pcaps` while systemd saw it as
+  up. The default `/opt/replay` install is byte-for-byte unchanged.
+
+### Tests
+- `validate_targets` unit tests (orphaned reject; resolvable and `c2_beacon`-without-
+  target accept; missing-target reject), an orphaned-target pre-flight e2e test, and
+  an install-smoke assertion that the installed config's pcap paths resolve inside
+  `PREFIX`. Full suite green (219 unit, 7 e2e); install-smoke passes.
+
 ## [0.4.1-beta.1] - 2026-07-02
 
 Opens the 0.4.1 pre-release ladder. This is a consolidation build: the develop
@@ -65,7 +92,7 @@ custom-PREFIX install fix.
 
 First stable 0.4.0 release. Promotes the 0.4.0-beta ladder (beta.1–beta.5),
 validated on a live Proxmox appliance feeding a Dragos sensor, to stable with no
-code changes over beta.5 — only the version string and this entry. The per-beta
+code changes over beta.5 - only the version string and this entry. The per-beta
 sections below carry the detailed history; the headline additions over 0.3.2:
 
 - **Target scenario framework.** Drop-in attack packs under `conf/targets/<name>/`
@@ -100,8 +127,8 @@ forever. The only workaround was a manual `systemctl edit` drop-in.
 
 ### Changed
 - **`net-setup`/`net-teardown` auto-detect the deployment.** When the configured
-  `sensor_port` is absent on this host — the hypervisor (Proxmox) provides the ports
-  and runs the mirror on the host — net-setup no-ops cleanly (exit 0) instead of
+  `sensor_port` is absent on this host - the hypervisor (Proxmox) provides the ports
+  and runs the mirror on the host - net-setup no-ops cleanly (exit 0) instead of
   exiting 4. No `systemctl edit` drop-in is needed; a stock config just works on
   Proxmox. `fire`'s datapath pre-flight is hypervisor-aware to match (a missing
   sensor port is no longer an error; only a missing replay port is). The signal is

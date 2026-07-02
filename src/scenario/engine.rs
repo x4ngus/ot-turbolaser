@@ -640,7 +640,10 @@ mod tests {
         let led = ledger_with_s7();
         let e = engine("phases:\n  - id: impact\n    events:\n      - { emit: s7_stop }\n");
         let err = e.validate_targets(&led).unwrap_err();
-        assert!(err.contains("no target"), "explains the missing target: {err}");
+        assert!(
+            err.contains("no target"),
+            "explains the missing target: {err}"
+        );
     }
 
     #[test]
