@@ -3,6 +3,32 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-beta.5] - 2026-07-02
+
+Capability track: pre-flight visibility and an authoring lint, so an operator sees what a
+scenario will emit before firing and a pack author catches mistakes locally.
+
+### Added
+- **`turbolaser check --scenario <name>` prints a fidelity report (CAP-1).** After the
+  config validates, it lists each phase's events with their resolved plant target and frame
+  count, the per-pass frame total, and the IOC summary (fidelity, C2 domains/ips, external
+  ranges). An operator sees exactly what will hit the wire before firing; closes SP-1/SP-5
+  ergonomically.
+- **`turbolaser targets --validate <name>` lints one pack (CAP-2).** Runs the full
+  pre-flight (config, path fields, `profiles.toml`, per-event target resolution), a soft
+  reserved gateway/station-slot lint, and prints the fidelity report. Exits non-zero on a
+  hard failure; a reserved-slot hit is a warning.
+- **`docs/targets.md`: a "Target resolution and reserved slots" section** documenting the
+  ip -> model -> asset_type resolution, the reserved network+1 (gateway) and network+250
+  (engineering station) slots, the relative-path constraint on pack fields, and the two
+  pre-flight tools above.
+
+### Tests
+- CAP-1: the fidelity report names resolved targets and a non-zero frame total for a shipped
+  pack and is absent for a generic config. CAP-2: `reserved_slot_lint` flags an explicit
+  station-slot pin and is clean otherwise. Full suite green (228 unit, 14 e2e); tshark and
+  install-smoke pass.
+
 ## [0.4.1-beta.4] - 2026-07-02
 
 P3 hardening: the scenario framework's remaining silent-degradation and safety gaps. The

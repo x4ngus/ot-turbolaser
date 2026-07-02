@@ -111,8 +111,76 @@ pub fn preflight(cfg: &crate::config::Config) -> Result<(), String> {
     build_validated_plant(cfg, t, &oui, seed, 0).map(|_| ())
 }
 
-/// `turbolaser targets`: list the installed scenario packs.
+/// Build a scenario's pre-flight fidelity report (CAP-1): the resolved targets,
+/// per-phase frame counts, and IOC summary an operator sees before firing. Returns
+/// `None` for a generic (no-`target`) config. Assumes [`preflight`] has already
+/// validated the pack, so this only re-derives the plant/engine for the report.
+pub fn fidelity_report(cfg: &crate::config::Config) -> Result<Option<String>, String> {
+    let Some(t) = cfg.target.as_ref() else {
+        return Ok(None);
+    };
+    let vuln = crate::vuln::VulnDb::load_overlay(&t.pack_dir.join(&t.profiles));
+    let oui = crate::oui::OuiDb::embedded();
+    let seed = cfg.session.seed.unwrap_or(0);
+    let session = build_validated_plant(cfg, t, &oui, seed, 0)?;
+    let engine = engine::ScenarioEngine::load(t, seed)?;
+    Ok(Some(engine.fidelity_report(&session, &vuln)))
+}
+
+/// `turbolaser targets --validate <name>`: lint one pack (CAP-2). Runs the full
+/// pre-flight (config, path fields, profiles, per-event target resolution), then a
+/// soft reserved-slot lint, then prints the fidelity report. Returns 0 when the
+/// hard checks pass (reserved-slot hits are warnings, matching the run-time
+/// behaviour), `EX_CONFIG` otherwise.
+fn cmd_targets_validate(args: &crate::cli::TargetsArgs, name: &str) -> i32 {
+    let cfg = match crate::config::load_with_scenario(&args.config, Some(name)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("FAIL {name}: {e}");
+            return crate::EX_CONFIG;
+        }
+    };
+    let Some(t) = cfg.target.as_ref() else {
+        eprintln!("FAIL {name}: config has no target scenario");
+        return crate::EX_CONFIG;
+    };
+    if let Err(e) = preflight(&cfg) {
+        eprintln!("FAIL {name}: {e}");
+        return crate::EX_CONFIG;
+    }
+    println!("PASS {name}: config, path fields, profiles, and every event target resolve");
+    // Soft lint: a device pinned on a reserved gateway/station slot is a warning,
+    // not a hard failure, matching what build_sealed_session logs at run time.
+    match plant::PlantSpec::load(&t.pack_dir.join(&t.plant)) {
+        Ok(spec) => {
+            let warns = plant::reserved_slot_lint(&spec);
+            if warns.is_empty() {
+                println!("PASS {name}: no device on a reserved gateway/station slot");
+            } else {
+                for w in warns {
+                    println!("WARN {name}: {w}");
+                }
+            }
+        }
+        Err(e) => eprintln!("WARN {name}: could not re-read plant for the slot lint: {e}"),
+    }
+    match fidelity_report(&cfg) {
+        Ok(Some(report)) => print!("{report}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("FAIL {name}: {e}");
+            return crate::EX_CONFIG;
+        }
+    }
+    0
+}
+
+/// `turbolaser targets`: list the installed scenario packs, or lint one with
+/// `--validate <name>`.
 pub fn cmd_targets(args: &crate::cli::TargetsArgs) -> i32 {
+    if let Some(name) = &args.validate {
+        return cmd_targets_validate(args, name);
+    }
     let dir = registry::targets_dir_for(&args.config);
     let found = registry::discover(&dir);
     if args.json {

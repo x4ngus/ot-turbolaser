@@ -85,6 +85,17 @@ fn check(a: &cli::CheckArgs) -> i32 {
                 cfg.rate.model,
                 cfg.gap.dist
             );
+            // For a scenario, print the pre-flight fidelity report (CAP-1): the
+            // resolved targets, per-phase frame counts, and IOC summary, so the
+            // operator sees what will hit the wire before firing.
+            match scenario::fidelity_report(&cfg) {
+                Ok(Some(report)) => print!("{report}"),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("config error: {e}");
+                    return EX_CONFIG;
+                }
+            }
             0
         }
         Err(e) => {

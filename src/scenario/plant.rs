@@ -148,6 +148,24 @@ fn reserved_slot_warning(ip: Ipv4Addr, zone: &str, enrich: bool) -> Option<Strin
     None
 }
 
+/// Lint a plant spec for devices pinned onto a reserved zone slot (the engineering
+/// station always, or the gateway under `enrich`), returning one human warning per
+/// hit. Surfaces at author time (`turbolaser targets --validate`) what
+/// [`build_sealed_session`] only logs at run time (CAP-2, SP-3). Auto-assigned
+/// devices are already kept off both slots by [`devices::next_free_in`] (SP-4), so
+/// only explicit ips can hit one.
+pub fn reserved_slot_lint(spec: &PlantSpec) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in &spec.devices {
+        if let Some(ip) = d.ip.as_ref().and_then(|s| s.parse::<Ipv4Addr>().ok()) {
+            if let Some(w) = reserved_slot_warning(ip, &d.zone, spec.enrich) {
+                out.push(w);
+            }
+        }
+    }
+    out
+}
+
 /// Build a sealed ledger from a plant spec. `fallback_domains` (the config's
 /// `dns.domains`) is used when the spec declares none. The result is sealed and
 /// tagged with `scenario`, so the daemon replays it verbatim and the mismatch
@@ -485,6 +503,22 @@ enrich: true
         assert!(
             reserved_slot_warning("10.20.10.50".parse().unwrap(), zone, true).is_none(),
             "a normal host is not a reserved slot"
+        );
+    }
+
+    #[test]
+    fn reserved_slot_lint_flags_an_explicit_station_pin() {
+        // A device explicitly pinned on the station slot (.250) is flagged; ordinary
+        // hosts are clean. Auto-assigned devices never hit the slot (SP-4), so only
+        // explicit ips can (CAP-2).
+        let yaml = "zones:\n  - { cidr: 10.20.10.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.20.10.0/24, asset_type: RTU, ip: 10.20.10.250 }\n  - { zone: 10.20.10.0/24, asset_type: RTU, ip: 10.20.10.50 }\nenrich: false\n";
+        let lint = reserved_slot_lint(&PlantSpec::parse(yaml).unwrap());
+        assert_eq!(lint.len(), 1, "only the .250 pin is flagged: {lint:?}");
+        assert!(lint[0].contains("engineering-station"));
+        let ok = "zones:\n  - { cidr: 10.20.10.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.20.10.0/24, asset_type: RTU, ip: 10.20.10.50 }\nenrich: false\n";
+        assert!(
+            reserved_slot_lint(&PlantSpec::parse(ok).unwrap()).is_empty(),
+            "a clean plant lints clean"
         );
     }
 
