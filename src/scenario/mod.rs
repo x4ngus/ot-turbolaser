@@ -50,8 +50,13 @@ pub fn build_validated_plant(
     if vuln.is_empty() {
         return Err("no vulnerable-device profiles available".into());
     }
-    engine::ScenarioEngine::load(target, seed)?; // validate the playbook
-    plant::pin_from_pack(target, &vuln, oui, seed, now_unix, &cfg.dns.domains)
+    let engine = engine::ScenarioEngine::load(target, seed)?; // validate the playbook
+    let session = plant::pin_from_pack(target, &vuln, oui, seed, now_unix, &cfg.dns.domains)?;
+    // Cross-check the playbook's targets against the pinned plant, so a target that
+    // names no plant device is rejected here rather than silently skipped (zero
+    // frames) at run time, defeating the scenario the operator meant to fire.
+    engine.validate_targets(&session)?;
+    Ok(session)
 }
 
 /// Validate a scenario pack end to end without committing or sending traffic, so

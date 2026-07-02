@@ -537,7 +537,9 @@ impl SimulatorEngine {
                     s.vendor.as_deref(),
                     None,
                     s.purdue_level,
-                    idx + cycle_next as usize * ledger::MAX_SUBNETS,
+                    // Saturating so a very long-lived feed can never overflow the
+                    // area number (a wrap would repeat earlier zone names).
+                    idx.saturating_add((cycle_next as usize).saturating_mul(ledger::MAX_SUBNETS)),
                 )
             });
             self.dirty = true;

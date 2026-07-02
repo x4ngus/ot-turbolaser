@@ -43,6 +43,16 @@ pub fn fabricate(
     // Build the used-IP set once and update it as we go, so fabrication is
     // O(devices) rather than rebuilding the whole set on every IP probe.
     let mut used: HashSet<Ipv4Addr> = session.used_ips();
+    // MAC uniqueness mirrors IP uniqueness: seed from every asset already in the
+    // ledger so a new device never reuses an assigned MAC across restarts or
+    // cycles. A duplicate MAC would emit conflicting ARP is-at replies.
+    let mut used_macs: HashSet<[u8; 6]> = session
+        .devices
+        .iter()
+        .map(|d| d.mac.as_str())
+        .chain(session.capture_hosts.iter().map(|h| h.mac.as_str()))
+        .map(l3::parse_mac)
+        .collect();
     let mut added = 0;
     while session.device_count() < target {
         let Some(cidr) = choose_or_create_subnet(session, vuln, params, &used, rng) else {
@@ -60,7 +70,15 @@ pub fn fabricate(
             .find(|s| s.cidr == cidr)
             .and_then(|s| s.vendor.clone());
         let profile = pick_profile(vuln, zone_vendor.as_deref(), rng);
-        let mac = make_mac(profile, rng);
+        // Derive a unique, seed-stable MAC: the vendor OUI plus per-IP low bytes.
+        // On the rare intra-OUI low-byte collision, perturb the derivation until
+        // the MAC is unique, so no two assets ever share a MAC.
+        let mut salt = 0u64;
+        let mut mac = make_mac(profile, session.seed, u32::from(ip), salt);
+        while !used_macs.insert(mac) {
+            salt += 1;
+            mac = make_mac(profile, session.seed, u32::from(ip), salt);
+        }
         let rec = DeviceRecord {
             ip: ip.to_string(),
             mac: l3::fmt_mac(mac),
@@ -252,20 +270,20 @@ fn pick_profile<'a>(
     core[rng.gen_range(0..core.len())]
 }
 
-/// A MAC from the profile's vendor OUI plus random low bytes, so devices in a
-/// zone are distinct assets while keeping the vendor-identifying prefix. With no
-/// vendor OUI, fall back to a globally-administered unicast OUI (not a
-/// locally-administered one): a passive sensor ignores LAA MACs for
-/// asset association, so an LAA address would never bind MAC<->IP and the device
-/// would stay MAC-less.
-fn make_mac(profile: &DeviceProfile, rng: &mut ChaCha8Rng) -> [u8; 6] {
+/// A MAC from the profile's vendor OUI plus per-IP-derived low bytes, so devices
+/// in a zone are distinct assets that keep the vendor-identifying prefix and
+/// reproduce from the session seed (the same seed and IP always yield the same
+/// MAC, like [`bom_mac`]). `salt` perturbs the derivation on the rare intra-OUI
+/// low-byte collision (`fabricate` retries with a higher salt); `salt == 0` is
+/// the natural MAC. With no vendor OUI, fall back to the globally-administered
+/// unicast address `stable_mac` yields (LAA and multicast bits already clear): a
+/// passive sensor ignores LAA MACs for asset association, so an LAA address would
+/// never bind MAC<->IP and the device would stay MAC-less.
+fn make_mac(profile: &DeviceProfile, seed: u64, ip: u32, salt: u64) -> [u8; 6] {
+    let low = l3::stable_mac(seed.wrapping_add(salt), ip);
     match profile.oui_prefix() {
-        Some(oui) => [oui[0], oui[1], oui[2], rng.gen(), rng.gen(), rng.gen()],
-        None => {
-            // Globally administered (0x02 clear), unicast (0x01 clear).
-            let b0 = rng.gen::<u8>() & 0xFC;
-            [b0, rng.gen(), rng.gen(), rng.gen(), rng.gen(), rng.gen()]
-        }
+        Some(oui) => [oui[0], oui[1], oui[2], low[3], low[4], low[5]],
+        None => low,
     }
 }
 
@@ -524,10 +542,43 @@ mod tests {
         assert!(s.subnet_count() >= 1 && s.subnet_count() <= 4);
         let ips: HashSet<&String> = s.devices.iter().map(|d| &d.ip).collect();
         assert_eq!(ips.len(), s.devices.len(), "IPs are unique");
+        let macs: HashSet<&String> = s.devices.iter().map(|d| &d.mac).collect();
+        assert_eq!(macs.len(), s.devices.len(), "MACs are unique");
         for d in &s.devices {
             assert!(!d.cves.is_empty(), "{} carries a CVE", d.model);
             assert!(s.subnets.iter().any(|z| z.cidr == d.subnet_cidr));
         }
+    }
+
+    #[test]
+    fn fabricated_macs_are_unique_at_scale_and_reproduce() {
+        // A large fleet packed into a few zones reuses vendor OUIs, so the 24-bit
+        // per-IP suffix is where a collision would surface. The used-MAC guard
+        // must keep every MAC distinct, and the plant must reproduce from the seed.
+        let params = AllocParams {
+            max_subnets: 16,
+            max_devices: 2000,
+            default_prefix: 24,
+        };
+        let fab = || {
+            let mut s = Session::new(0x00C0FFEE, 0);
+            let mut rng = ChaCha8Rng::seed_from_u64(0x00C0FFEE);
+            fabricate(&mut s, &db(), &params, 600, &mut rng);
+            s
+        };
+        let s = fab();
+        assert!(s.device_count() >= 100, "a sizeable fleet was fabricated");
+        let macs: HashSet<&String> = s.devices.iter().map(|d| &d.mac).collect();
+        assert_eq!(
+            macs.len(),
+            s.devices.len(),
+            "every fabricated MAC is unique across the fleet"
+        );
+        // Same seed -> byte-identical plant (MACs included).
+        let s2 = fab();
+        let macs1: Vec<&String> = s.devices.iter().map(|d| &d.mac).collect();
+        let macs2: Vec<&String> = s2.devices.iter().map(|d| &d.mac).collect();
+        assert_eq!(macs1, macs2, "fabrication reproduces from the seed");
     }
 
     #[test]

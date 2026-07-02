@@ -3,11 +3,96 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
-## [0.4.0] - 2026-06-17
+## [0.4.1-beta.2] - 2026-07-02
+
+First 0.4.1 sprint content: the two HIGH defects from the scenario-framework review,
+fixed and tested. Both are also latent in shipped 0.4.0 and are backported to the
+stable branch (the stable tag is held for now; see the main backport PR).
+
+### Fixed
+- **Orphaned playbook target no longer emits zero frames silently (SP-1).** A
+  playbook `target` that names no plant device now fails pre-flight
+  (`check`/`plan`/`fire`) with the offending phase and event named, instead of the
+  event (or a whole impact phase) rendering nothing while the daemon looked healthy.
+  `build_validated_plant` cross-checks every event target against the pinned plant via
+  `ScenarioEngine::validate_targets`; a `c2_beacon` may still omit its target (it
+  falls back to the first device), every other event must name one that resolves.
+- **Non-default `PREFIX` install no longer sits idle forever (SP-2).** `install.sh`
+  now templates `conf/replay.yaml` to the install `PREFIX`, so `paths.pool` and
+  `paths.variants` point inside the install tree. A verbatim copy under a custom
+  `PREFIX` left them at `/opt/replay/pcaps/*` (never created there), so `scan_pcaps`
+  found no captures and the daemon stayed in `idle_no_pcaps` while systemd saw it as
+  up. The default `/opt/replay` install is byte-for-byte unchanged.
+
+### Tests
+- `validate_targets` unit tests (orphaned reject; resolvable and `c2_beacon`-without-
+  target accept; missing-target reject), an orphaned-target pre-flight e2e test, and
+  an install-smoke assertion that the installed config's pcap paths resolve inside
+  `PREFIX`. Full suite green (219 unit, 7 e2e); install-smoke passes.
+
+## [0.4.1-beta.1] - 2026-07-02
+
+Opens the 0.4.1 pre-release ladder. This is a consolidation build: the develop
+scenario beta ladder (last tagged 0.4.0-beta.4) is realigned onto the released and
+hardened 0.4.0 baseline. No new behaviour lands here beyond that merge; it exists so
+the 0.4.1 sprint builds on one current develop tree instead of a stale beta.
+
+### Changed
+- develop now carries the full 0.4.0 stable release (target scenarios, datapath
+  provisioning/triage, Proxmox out-of-the-box) and the 0.4.0 audit hardening: unique
+  fabricated MACs, config fail-fast on zero timing/rate knobs, saturating cycle
+  zone-naming, `l3.fallback` removal, PREFIX-aware install, and the `EX_CONFIG` exit
+  contract that stops a bad-config crash-loop. The pre-stable develop betas lacked
+  all of these; this merge supersedes them.
+
+### Notes
+- 0.4.1 capability work is scoped in `docs/roadmap-0.4.1.md`. None of it is
+  implemented in this build; the tree is functionally identical to 0.4.0 stable.
+
+## [0.4.0] - 2026-07-02
+
+First stable 0.4.0, then hardened for prime time. The headline 0.4.0 additions
+(target scenarios, datapath provisioning/triage, Proxmox out-of-the-box) are in
+the Baseline note below; this revision folds in a structured audit pass: one
+correctness fix, defensive hardening, config fail-fast, dead-code removal, and a
+custom-PREFIX install fix.
+
+### Fixed
+- **Unique MACs across the fabricated fleet.** Red-laser device fabrication now
+  derives each MAC deterministically from its (already unique) IP via the shared
+  `stable_mac` helper and enforces uniqueness with a used-MAC set, so no two
+  fabricated assets can share a MAC (which would emit conflicting ARP `is-at`
+  replies the sensor must never see). Because MAC generation no longer draws from
+  the fabrication RNG, a given `session.seed` now produces a different but stable
+  plant layout; committed/sealed ledgers replay verbatim and are unaffected.
+- **Saturating arithmetic in cycle zone-naming** (`simulate::engine`) so a very
+  long-lived unsealed feed can never overflow the area number and repeat names.
+
+### Added
+- **`turbolaser check` rejects zero timing/rate knobs** at config load instead of
+  letting them fail (or spin) at runtime: `watchdog.poll_secs`,
+  `watchdog.flatline_secs`, `no_pcaps_retry_secs`, `synthesis.announce_interval_secs`
+  (when synthesis is enabled), and `rate.pps_multi`.
+
+### Changed
+- **`install.sh` templates the systemd units and the optional hardening drop-in to
+  the install `PREFIX`.** A deploy under a non-default `PREFIX` now gets working
+  `ExecStart`/`ExecStartPre` paths and a matching `$PREFIX/systemd/hardening.conf`;
+  the default `/opt/replay` install is byte-for-byte unchanged.
+- Documentation corrections: the L1/L2 zone-cap comment (10 zones are a subset of
+  the 16-zone hard cap), the `synthesis.max_assets` default (512), the `AGENTS.md`
+  hard-cap note (16 subnet zones), and the README quickstart config path.
+
+### Removed
+- **Deprecated `l3.fallback` config key and its `L3Fallback` enum**, unused since
+  v0.2.1. A config that still sets `l3.fallback:` is now rejected by the strict
+  schema (`deny_unknown_fields`); delete the line (no shipped config used it).
+
+### Baseline (0.4.0, 2026-06-17)
 
 First stable 0.4.0 release. Promotes the 0.4.0-beta ladder (beta.1–beta.5),
 validated on a live Proxmox appliance feeding a Dragos sensor, to stable with no
-code changes over beta.5 — only the version string and this entry. The per-beta
+code changes over beta.5 - only the version string and this entry. The per-beta
 sections below carry the detailed history; the headline additions over 0.3.2:
 
 - **Target scenario framework.** Drop-in attack packs under `conf/targets/<name>/`
@@ -42,8 +127,8 @@ forever. The only workaround was a manual `systemctl edit` drop-in.
 
 ### Changed
 - **`net-setup`/`net-teardown` auto-detect the deployment.** When the configured
-  `sensor_port` is absent on this host — the hypervisor (Proxmox) provides the ports
-  and runs the mirror on the host — net-setup no-ops cleanly (exit 0) instead of
+  `sensor_port` is absent on this host - the hypervisor (Proxmox) provides the ports
+  and runs the mirror on the host - net-setup no-ops cleanly (exit 0) instead of
   exiting 4. No `systemctl edit` drop-in is needed; a stock config just works on
   Proxmox. `fire`'s datapath pre-flight is hypervisor-aware to match (a missing
   sensor port is no longer an error; only a missing replay port is). The signal is

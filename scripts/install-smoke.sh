@@ -33,6 +33,22 @@ for name in stuxnet triton oldsmar ukraine2015; do
     fi
 done
 
+# The installed config's pcap paths must be templated to THIS PREFIX. A verbatim
+# copy leaves them at /opt/replay/pcaps/*, which a non-default install never
+# creates, so scan_pcaps finds nothing and the daemon idles forever while systemd
+# still sees the unit as up.
+if grep -q "$PREFIX/pcaps/pool" "$CFG" && grep -q "$PREFIX/pcaps/variants" "$CFG"; then
+    echo "  ok: replay.yaml pcap paths templated to the install PREFIX"
+else
+    echo "  FAIL: replay.yaml pcap paths not templated to $PREFIX" >&2
+    grep -nE "pool:|variants:" "$CFG" >&2 || true
+    fail=1
+fi
+if grep -q "/opt/replay/pcaps" "$CFG"; then
+    echo "  FAIL: replay.yaml still references /opt/replay/pcaps under a non-default PREFIX" >&2
+    fail=1
+fi
+
 # `targets` must discover all four through the installed config's sibling dir.
 count="$("$BIN" targets --config "$CFG" --json | grep -c '"name":' || true)"
 if [[ "$count" == 4 ]]; then
