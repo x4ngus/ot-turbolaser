@@ -96,11 +96,6 @@ pub struct L3Cfg {
     /// asset. On by default; only the red-laser remap honours it.
     #[serde(default = "default_true")]
     pub remap_mac: bool,
-    /// Deprecated and unused as of v0.2.1: the in-process remap is mandatory in
-    /// red laser, and a capture that cannot be remapped is skipped, never
-    /// replayed raw. Retained so existing configs still parse; to be removed.
-    #[serde(default)]
-    pub fallback: L3Fallback,
     /// Optional CIDR hints for grouping hosts into subnets.
     #[serde(default)]
     pub subnets: Vec<String>,
@@ -139,7 +134,6 @@ impl Default for L3Cfg {
         Self {
             remap: true,
             remap_mac: true,
-            fallback: L3Fallback::default(),
             subnets: Vec::new(),
             zone_affinity: ZoneAffinity::default(),
             max_remap_bytes: default_max_remap_bytes(),
@@ -178,14 +172,6 @@ pub enum ZoneAffinity {
     Off,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum L3Fallback {
-    #[default]
-    None,
-    Tcprewrite,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateCfg {
@@ -218,7 +204,15 @@ impl RateCfg {
         match self.model {
             RateModel::Original | RateModel::Topspeed => Ok(()),
             RateModel::Multiplier => require_positive("rate.multiplier", self.multiplier).map(drop),
-            RateModel::Pps => require_positive("rate.pps", self.pps).map(drop),
+            RateModel::Pps => {
+                require_positive("rate.pps", self.pps)?;
+                // pps_multi is optional, but an explicit 0 emits `--pps-multi=0`,
+                // which tcpreplay rejects. Catch it at config load.
+                if self.pps_multi == Some(0) {
+                    return Err("rate.pps_multi must be > 0".into());
+                }
+                Ok(())
+            }
             RateModel::Mbps => match (self.mbps_min, self.mbps_max) {
                 (Some(lo), Some(hi)) => {
                     require_positive("rate.mbps_min", Some(lo))?;
@@ -483,7 +477,7 @@ pub struct SynthesisCfg {
     /// Total wire-asset cap: fabricated devices plus capture-derived assets.
     /// Replayed capture hosts fill spare zone capacity up to this; surplus rides
     /// existing assets, so the wire never exceeds the plan. Clamped to the device
-    /// hard cap; defaults to 256.
+    /// hard cap; defaults to 512 (ledger::DEFAULT_MAX_ASSETS).
     #[serde(default)]
     pub max_assets: Option<usize>,
 }
@@ -804,6 +798,21 @@ impl Config {
                 return Err("north_south.max_flows_per_pair must be > 0".into());
             }
         }
+        // Timing knobs must be positive: a zero interval would spin a loop or fire
+        // bursts with no delay. Some are also guarded at runtime, but rejecting a
+        // zero here makes `check` fail fast with a named field instead.
+        if self.watchdog.poll_secs == 0 {
+            return Err("watchdog.poll_secs must be > 0".into());
+        }
+        if self.watchdog.flatline_secs == 0 {
+            return Err("watchdog.flatline_secs must be > 0".into());
+        }
+        if self.no_pcaps_retry_secs == 0 {
+            return Err("no_pcaps_retry_secs must be > 0".into());
+        }
+        if self.synthesis.enabled && self.synthesis.announce_interval_secs == 0 {
+            return Err("synthesis.announce_interval_secs must be > 0".into());
+        }
         if self.threats.min_interval_secs > self.threats.max_interval_secs {
             return Err("threats.min_interval_secs must be <= threats.max_interval_secs".into());
         }
@@ -1098,6 +1107,19 @@ mod tests {
     }
 
     #[test]
+    fn pps_multi_zero_is_rejected() {
+        let mut r = rate(RateModel::Pps, None, Some(100.0), None);
+        assert!(r.validate().is_ok(), "no pps_multi is fine");
+        r.pps_multi = Some(0);
+        assert!(
+            r.validate().unwrap_err().contains("pps_multi"),
+            "an explicit pps_multi of 0 is rejected"
+        );
+        r.pps_multi = Some(2);
+        assert!(r.validate().is_ok(), "a positive pps_multi validates");
+    }
+
+    #[test]
     fn mbps_band_validates_and_samples_in_range() {
         use rand::SeedableRng;
         let mut banded = rate(RateModel::Mbps, None, None, None);
@@ -1150,6 +1172,37 @@ mod tests {
         );
         assert_eq!(cfg.synthesis.target_devices, 64);
         assert_eq!(cfg.session.seed, Some(1337));
+    }
+
+    #[test]
+    fn zero_timing_fields_are_rejected() {
+        // Load the valid shipped config, mutate one timing knob to 0, re-validate.
+        let validate_with = |mutate: fn(&mut Config)| {
+            let mut c = load(std::path::Path::new("conf/replay.yaml")).unwrap();
+            mutate(&mut c);
+            c.validate()
+        };
+        assert!(validate_with(|c| c.watchdog.poll_secs = 0)
+            .unwrap_err()
+            .contains("watchdog.poll_secs"));
+        assert!(validate_with(|c| c.watchdog.flatline_secs = 0)
+            .unwrap_err()
+            .contains("watchdog.flatline_secs"));
+        assert!(validate_with(|c| c.no_pcaps_retry_secs = 0)
+            .unwrap_err()
+            .contains("no_pcaps_retry_secs"));
+        assert!(validate_with(|c| c.synthesis.announce_interval_secs = 0)
+            .unwrap_err()
+            .contains("announce_interval_secs"));
+        // A disabled synthesis block does not require a positive announce interval.
+        assert!(
+            validate_with(|c| {
+                c.synthesis.enabled = false;
+                c.synthesis.announce_interval_secs = 0;
+            })
+            .is_ok(),
+            "announce interval is irrelevant when synthesis is disabled"
+        );
     }
 
     #[test]

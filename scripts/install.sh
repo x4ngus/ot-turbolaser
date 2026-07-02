@@ -4,9 +4,11 @@
 # captures first, then run `turbolaser up`. Run as root (the justfile uses sudo).
 #
 # PREFIX is overridable (PREFIX=/tmp/tl-test scripts/install.sh) so the
-# install-layout smoke test can lay the tree into a sandbox; defaults to the
-# appliance path the systemd unit runs. Set OT_INSTALL_SYSTEM=0 to lay only the
-# runtime tree and skip system integration (PATH symlink, systemd units, /var/lib).
+# install-layout smoke test can lay the tree into a sandbox; defaults to
+# /opt/replay. The systemd units and the optional hardening drop-in are templated
+# to the chosen PREFIX at install time, so a non-default prefix still yields
+# working ExecStart paths. Set OT_INSTALL_SYSTEM=0 to lay only the runtime tree
+# and skip system integration (PATH symlink, systemd units, /var/lib).
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/replay}"
@@ -33,6 +35,16 @@ install -m 0755 scripts/net-setup.sh scripts/net-teardown.sh scripts/net-provisi
 # operator can run the on-wire dissector check from the installed tree.
 [[ -f scripts/veth-replay-check.sh ]] && \
     install -m 0755 scripts/veth-replay-check.sh "$PREFIX/scripts/"
+
+# Ship a PREFIX-correct copy of the optional systemd hardening drop-in. The repo
+# copy assumes the default /opt/replay; templating it here means an operator on a
+# bare-metal host or VM installs ReadWritePaths that match THIS install. See the
+# drop-in's own header for how to apply it.
+if [[ -f systemd/hardening.conf ]]; then
+    install -d "$PREFIX/systemd"
+    sed "s#/opt/replay#${PREFIX}#g" systemd/hardening.conf > "$PREFIX/systemd/hardening.conf"
+    chmod 0644 "$PREFIX/systemd/hardening.conf"
+fi
 
 # Bundled OUI and vulnerable-profile databases. The binary embeds these; the
 # on-disk copies are optional overrides the operator can edit. Never clobber an
@@ -95,11 +107,19 @@ if [[ "$SYSTEM_INTEGRATION" == 1 ]]; then
 fi
 
 RESTARTED=0
+# Install a unit file, substituting the install PREFIX for the unit's default
+# /opt/replay paths so a deploy under a non-default PREFIX gets working
+# ExecStart/ExecStartPre paths. For the default PREFIX=/opt/replay this is a no-op.
+install_unit() {
+    sed "s#/opt/replay#${PREFIX}#g" "$1" > "$2"
+    chmod 0644 "$2"
+}
+
 if [[ "$SYSTEM_INTEGRATION" == 1 && -d /etc/systemd/system ]]; then
-    install -m 0644 systemd/ot-turbolaser.service /etc/systemd/system/ot-turbolaser.service
+    install_unit systemd/ot-turbolaser.service /etc/systemd/system/ot-turbolaser.service
     # Templated unit for running a target scenario as the daemon
     # (systemctl start ot-turbolaser@stuxnet); the plain unit runs generic red laser.
-    install -m 0644 systemd/ot-turbolaser@.service /etc/systemd/system/ot-turbolaser@.service
+    install_unit systemd/ot-turbolaser@.service /etc/systemd/system/ot-turbolaser@.service
     systemctl daemon-reload || true
     # On an upgrade of a running appliance, roll the daemon onto the freshly
     # installed binary so the operator never has to restart by hand. A stale

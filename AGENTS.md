@@ -60,9 +60,10 @@ Linux VM.
   payloads in the hot path: device identities and switch beacons are synthesized
   whole (the lengths are ours to set) and fired as a separate burst, and threat
   promotion only rewrites a selected host's L3 and MAC and recomputes checksums.
-- Hard caps (10 zones, 2000 devices) live in ledger constants; config may lower
-  but never raise them. External-threat promotion is sparse, at most one per 24h
-  (a floor enforced regardless of config).
+- Hard caps (16 subnet zones, 2000 devices) live in ledger constants; config may
+  lower but never raise them. Fabrication packs at most 10 of the zones as L1/L2
+  control zones, leaving headroom for L3 (DCS) operations zones. External-threat
+  promotion is sparse, at most one per 24h (a floor enforced regardless of config).
 - Synthesized and promoted traffic is data-plane payload on the isolated bridge
   only. External source addresses are bytes, not routes; keep the bridge
   isolated (net-setup refuses a physical NIC).

@@ -3,6 +3,14 @@ Description=ot-turbolaser ICS/OT pcap replay appliance
 Documentation=https://github.com/x4ngus/ot-turbolaser
 After=network-online.target
 Wants=network-online.target
+# A non-retryable fault (bad config, missing replay port, scenario/ledger mismatch)
+# makes `run` or net-setup exit fast; with Restart=always that would crash-loop
+# every RestartSec forever. Cap it: after 5 failed starts in 60s systemd gives up
+# and leaves the unit `failed` (visible in `systemctl status`) instead of looping.
+# RestartPreventExitStatus below stops such faults on the first hit; this is the
+# backstop for anything that slips past it (e.g. an ExecStartPre failure).
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -14,6 +22,10 @@ ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml
 ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
 Restart=always
 RestartSec=3
+# A non-retryable config/state error exits 78 (EX_CONFIG): bad config, missing
+# replay port, or a scenario/ledger mismatch. Do not restart it; the daemon's own
+# in-loop retries handle transient faults (missing captures, a failed send).
+RestartPreventExitStatus=78
 
 # Creates /run/ot-turbolaser (0755) for the status heartbeat, cleaned on stop.
 RuntimeDirectory=ot-turbolaser

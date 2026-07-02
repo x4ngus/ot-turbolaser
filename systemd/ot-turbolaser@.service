@@ -25,6 +25,10 @@ ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml -
 ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
 Restart=always
 RestartSec=3
+# A non-retryable config/state error exits 78 (EX_CONFIG): bad/missing pack, a
+# scenario/ledger mismatch, or a missing replay port. Stop on the first hit rather
+# than burning the StartLimit budget; transient faults keep the in-loop retries.
+RestartPreventExitStatus=78
 
 # Creates /run/ot-turbolaser (0755) for the status heartbeat, cleaned on stop.
 RuntimeDirectory=ot-turbolaser

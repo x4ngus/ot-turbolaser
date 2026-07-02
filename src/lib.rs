@@ -23,6 +23,13 @@ pub mod vuln;
 
 use cli::{Cli, Command};
 
+/// Process exit code for a non-retryable configuration or state error (bad config,
+/// missing datapath port, scenario/ledger mismatch). The value is sysexits.h
+/// `EX_CONFIG`. The systemd units set `RestartPreventExitStatus=78` so such a
+/// failure leaves the unit `failed` with its one-line remedy instead of
+/// crash-looping; transient faults keep the daemon's in-loop sleep-and-retry.
+pub const EX_CONFIG: i32 = 78;
+
 /// Current unix time in whole seconds, or 0 if the clock predates the epoch.
 /// Shared by the run loop and the simulate commands so the appliance stamps
 /// time one way.
@@ -64,7 +71,7 @@ fn check(a: &cli::CheckArgs) -> i32 {
             // the daemon's first start.
             if let Err(e) = scenario::preflight(&cfg) {
                 eprintln!("config error: {e}");
-                return 1;
+                return EX_CONFIG;
             }
             let scenario = cfg
                 .target
@@ -82,7 +89,7 @@ fn check(a: &cli::CheckArgs) -> i32 {
         }
         Err(e) => {
             eprintln!("config error: {e}");
-            1
+            EX_CONFIG
         }
     }
 }

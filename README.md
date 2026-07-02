@@ -118,10 +118,12 @@ just bootstrap        # build, install the binary, the unit, and a default confi
 just reload n=16
 ```
 
-For red laser operations review/approve `conf/replay.yaml`, then commit the plan:
+For red laser operations review/approve the installed
+`/opt/replay/conf/replay.yaml`, then commit the plan. `plan` defaults to that
+path, so no `--config` is needed after `just bootstrap`:
 
 ```
-turbolaser plan --config conf/replay.yaml --commit
+turbolaser plan --commit
 ```
 
 Then bring it online:

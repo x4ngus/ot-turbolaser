@@ -3,6 +3,111 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.0] - 2026-07-02
+
+First stable 0.4.0, then hardened for prime time. The headline 0.4.0 additions
+(target scenarios, datapath provisioning/triage, Proxmox out-of-the-box) are in
+the Baseline note below; this revision folds in a structured audit pass: one
+correctness fix, defensive hardening, config fail-fast, dead-code removal, and a
+custom-PREFIX install fix.
+
+### Fixed
+- **Unique MACs across the fabricated fleet.** Red-laser device fabrication now
+  derives each MAC deterministically from its (already unique) IP via the shared
+  `stable_mac` helper and enforces uniqueness with a used-MAC set, so no two
+  fabricated assets can share a MAC (which would emit conflicting ARP `is-at`
+  replies the sensor must never see). Because MAC generation no longer draws from
+  the fabrication RNG, a given `session.seed` now produces a different but stable
+  plant layout; committed/sealed ledgers replay verbatim and are unaffected.
+- **Saturating arithmetic in cycle zone-naming** (`simulate::engine`) so a very
+  long-lived unsealed feed can never overflow the area number and repeat names.
+
+### Added
+- **`turbolaser check` rejects zero timing/rate knobs** at config load instead of
+  letting them fail (or spin) at runtime: `watchdog.poll_secs`,
+  `watchdog.flatline_secs`, `no_pcaps_retry_secs`, `synthesis.announce_interval_secs`
+  (when synthesis is enabled), and `rate.pps_multi`.
+
+### Changed
+- **`install.sh` templates the systemd units and the optional hardening drop-in to
+  the install `PREFIX`.** A deploy under a non-default `PREFIX` now gets working
+  `ExecStart`/`ExecStartPre` paths and a matching `$PREFIX/systemd/hardening.conf`;
+  the default `/opt/replay` install is byte-for-byte unchanged.
+- Documentation corrections: the L1/L2 zone-cap comment (10 zones are a subset of
+  the 16-zone hard cap), the `synthesis.max_assets` default (512), the `AGENTS.md`
+  hard-cap note (16 subnet zones), and the README quickstart config path.
+
+### Removed
+- **Deprecated `l3.fallback` config key and its `L3Fallback` enum**, unused since
+  v0.2.1. A config that still sets `l3.fallback:` is now rejected by the strict
+  schema (`deny_unknown_fields`); delete the line (no shipped config used it).
+
+### Baseline (0.4.0, 2026-06-17)
+
+First stable 0.4.0 release. Promotes the 0.4.0-beta ladder (beta.1–beta.5),
+validated on a live Proxmox appliance feeding a Dragos sensor, to stable with no
+code changes over beta.5 — only the version string and this entry. The per-beta
+sections below carry the detailed history; the headline additions over 0.3.2:
+
+- **Target scenario framework.** Drop-in attack packs under `conf/targets/<name>/`
+  pin a specific real-world OT attack on top of red laser: a YAML overlay, a CVE
+  profile overlay, a sealed plant, and a phased playbook. `turbolaser targets`
+  lists them; `--scenario <name>` (and `ot-turbolaser@<name>.service`) runs one,
+  guarded so a generic daemon never replays a scenario ledger and vice versa.
+- **Datapath provisioning and triage.** `turbolaser net-provision` creates the
+  isolated replay+sensor veth pair a self-contained host needs; `net-setup`
+  auto-detects self-contained vs hypervisor and no-ops where the host owns the
+  mirror (Proxmox works out of the box, no systemd drop-in); `turbolaser net-show`
+  qualifies the live datapath for "the sensor sees nothing" faults.
+- **Robust SPAN delivery.** `scripts/net-setup.sh` floods bridge members so unicast
+  reaches the sensor even past `PACKET_QDISC_BYPASS` (the split-assets fix).
+- **Fail clean, not crash-loop.** Non-retryable config/state errors exit 78
+  (`EX_CONFIG`) uniformly; both systemd units stop on it (`RestartPreventExitStatus`)
+  with `StartLimit` as the backstop, leaving a bad config `failed` with its remedy.
+
+## [0.4.0-beta.5] - 2026-06-17
+
+Make the Proxmox deployment work out of the box and stop non-retryable errors from
+crash-looping under systemd. A fresh appliance whose unit ran `net-setup` in the
+container hit `scripts/net-setup.sh` exit 4 ("interface 'sens0' not found") because
+on Proxmox the host provides the ports and owns the mirror; with `Restart=always`
+and no `StartLimit`/`RestartPreventExitStatus`, the unit looped the same error
+forever. The only workaround was a manual `systemctl edit` drop-in.
+
+### Added
+- **`conf/replay.proxmox.yaml.example`**: a ready-made profile for the hypervisor
+  layout (`iface: eth1`, host-side `bridge`/`sensor_port`), so the in-container
+  `net-setup` auto-no-ops and the host runs the mirror (see `docs/proxmox.md`).
+
+### Changed
+- **`net-setup`/`net-teardown` auto-detect the deployment.** When the configured
+  `sensor_port` is absent on this host — the hypervisor (Proxmox) provides the ports
+  and runs the mirror on the host — net-setup no-ops cleanly (exit 0) instead of
+  exiting 4. No `systemctl edit` drop-in is needed; a stock config just works on
+  Proxmox. `fire`'s datapath pre-flight is hypervisor-aware to match (a missing
+  sensor port is no longer an error; only a missing replay port is). The signal is
+  the sensor port because a self-contained host's `net-provision` makes both ports
+  exist, so "ports exist" alone cannot tell the regimes apart.
+- **`scripts/net-setup.sh` applies the robust L2 fix by default.** Its `tc` mode now
+  sets `learning off flood on` on every bridge-member port, so a monitoring span
+  delivers unicast to the sensor even when tcpreplay transmits with
+  `PACKET_QDISC_BYPASS` (which skips the egress qdisc and the tc-mirred mirror). This
+  is the in-script equivalent of the manual `bridge link set` step the Proxmox guide
+  documented for the "broadcast but not unicast / split assets" symptom.
+- **Non-retryable config/state errors exit `78` (`EX_CONFIG`), uniformly.** A bad
+  config, a missing replay port, a scenario/ledger mismatch, or a corrupt ledger now
+  exit 78 across every subcommand (`run`, `check`, `fire`, `net-setup`, `zones`,
+  `reset`, `plan`, `verify`, …) instead of the previous mix of 1/2. Transient faults
+  (missing captures, a failed send) keep the daemon's in-loop sleep-and-retry.
+- **systemd units fail clean instead of crash-looping.** Both units set
+  `RestartPreventExitStatus=78`, and the plain `ot-turbolaser.service` gains
+  `StartLimitIntervalSec=60`/`StartLimitBurst=5` (matching the templated unit). A
+  config/scenario error now leaves the unit `failed` with its one-line remedy in the
+  journal rather than scrolling forever.
+- **`docs/proxmox.md`**: the manual `ExecStartPre=` drop-in step is gone (net-setup
+  auto-no-ops); notes that `net-setup.sh` now applies flood-on; adds a `pct exec`
+  PATH note (use the absolute `/opt/replay/bin/turbolaser` for non-login shells).
+
 ## [0.4.0-beta.4] - 2026-06-11
 
 Operator ergonomics for the datapath interfaces, after a fresh-appliance
