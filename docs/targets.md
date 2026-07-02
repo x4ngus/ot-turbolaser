@@ -182,6 +182,13 @@ An event's `target` selects a plant device by `ip`, `model`, or `asset_type`
 | `tristation_download` | TriStation /1502 | `target`, `payload_hex`, `chunk` |
 | `iec104_interrogation` | IEC-104 /2404 | `target`, `common_addr` |
 | `iec104_command` | IEC-104 /2404 | `target`, `common_addr`, `ioa`, `close` |
+| `dnp3_read` | DNP3 /20000 | `target`, `common_addr` |
+| `dnp3_operate` | DNP3 /20000 | `target`, `common_addr`, `point`, `close` |
+| `cip_read` | EtherNet/IP CIP /44818 | `target` |
+| `cip_write` | EtherNet/IP CIP /44818 | `target`, `register` (attribute), `value` |
+| `opcua_read` | OPC-UA /4840 | `target` |
+| `iec101_interrogation` | IEC-101 /2405 (tunneled) | `target`, `common_addr` |
+| `iec101_command` | IEC-101 /2405 (tunneled) | `target`, `common_addr`, `ioa`, `close` |
 | `c2_beacon` | DNS + TCP | `domain`, `ip`, `port` (else `actors`) |
 | `remote_access` | TCP | `target`, `port` |
 | `wiper` | SMB2 /445 | `target`, `share` |
@@ -194,6 +201,41 @@ never aborts the replay run.
 
 A new protocol emitter is a `synth` module plus an `EmitKind` arm; the framework,
 config, status, and CLI need no change to gain a new scenario.
+
+### Target resolution and reserved slots
+
+An event's `target` resolves against the pinned plant by `ip`, then `model`, then
+`asset_type`, first match wins. Every event except `c2_beacon` must name a target
+that resolves to a pinned device; `c2_beacon` may omit its target (it falls back to
+the first plant device). A target that resolves to nothing is rejected at pre-flight
+(`check`/`plan`/`fire`), not silently skipped at run time, so a whole phase can never
+emit zero frames while the daemon looks healthy.
+
+Two host slots in each zone are reserved and must not be pinned by an author:
+
+- **network+1** (the zone gateway): `enrich: true` places the zone firewall and DNS
+  resolver here.
+- **network+250, clamped to the last usable host** (the engineering station): the
+  engine sources every OT action from this address with a seed-derived MAC, so a
+  device pinned here would put two MACs on one IP that a passive sensor cannot fuse.
+
+An `ip`-less device is auto-assigned the next free host and already skips both slots,
+even in a small subnet where the station clamps low (e.g. a `/30`). An explicit `ip`
+on a reserved slot is flagged (a warning at run time, and by the lint below).
+
+The `plant`, `playbook`, and `profiles` path fields must be relative and stay inside
+the pack directory; an absolute or `..`-bearing value is rejected.
+
+### Pre-flight tooling
+
+- `turbolaser check --scenario <name>` validates the pack and prints a fidelity
+  report: each phase's events with their resolved targets and frame counts, the
+  per-pass frame total, and the IOC summary (fidelity, C2 domains/ips, external
+  ranges). Use it to see what will hit the wire before firing.
+- `turbolaser targets --validate <name>` lints one pack: target resolution, path
+  fields, `profiles.toml`, and reserved gateway/station slots, then prints the same
+  fidelity report. It exits non-zero on a hard failure; a reserved-slot hit is a
+  warning.
 
 ## Notes
 

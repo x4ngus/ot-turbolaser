@@ -181,7 +181,13 @@ session:
 #[test]
 fn all_shipped_packs_are_internally_consistent() {
     let base = Path::new("conf/replay.yaml");
-    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+    for name in [
+        "stuxnet",
+        "triton",
+        "oldsmar",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let cfg = config::load_with_scenario(base, Some(name))
             .unwrap_or_else(|e| panic!("{name} config: {e}"));
         let t = cfg.target.as_ref().expect("target present");
@@ -240,6 +246,7 @@ fn all_shipped_packs_are_internally_consistent() {
             "triton" => ("TriStation implant", b"imain"), // chunked into 6-byte download packets
             "oldsmar" => ("Modbus setpoint 11100", &[0x2b, 0x5c]), // 11100 big-endian
             "ukraine2015" => ("KillDisk share write", b"ADMIN$"),
+            "incontroller" => ("Modbus setpoint 11100", &[0x2b, 0x5c]), // Schneider CODECALL write
             other => panic!("unexpected pack {other}"),
         };
         assert!(
@@ -249,16 +256,81 @@ fn all_shipped_packs_are_internally_consistent() {
     }
 }
 
-/// `registry::discover` finds the four installed packs, sorted, each complete.
+/// Per-pack, per-event: every playbook event target resolves against the pinned
+/// plant, checked with the same ip -> model -> asset_type logic the engine uses,
+/// not just explicit-ip targets. `build_validated_plant` loads and validates the
+/// playbook, pins the plant, then runs `validate_targets`, so a pack with any
+/// orphaned target - a stray model or asset_type as well as an ip - fails here
+/// rather than shipping green and emitting nothing for that event (SP-5). Pairs
+/// with the negative `orphaned_playbook_target_is_rejected_at_preflight` below.
 #[test]
-fn discover_lists_the_four_shipped_packs() {
+fn every_shipped_pack_event_target_resolves() {
+    let base = Path::new("conf/replay.yaml");
+    for name in [
+        "oldsmar",
+        "stuxnet",
+        "triton",
+        "ukraine2015",
+        "incontroller",
+    ] {
+        let cfg = config::load_with_scenario(base, Some(name))
+            .unwrap_or_else(|e| panic!("{name} config: {e}"));
+        let t = cfg.target.as_ref().expect("target present");
+        let oui = OuiDb::embedded();
+        ot_turbolaser::scenario::build_validated_plant(&cfg, t, &oui, 1337, 0)
+            .unwrap_or_else(|e| panic!("{name}: every event target must resolve: {e}"));
+    }
+}
+
+/// The pre-flight fidelity report (CAP-1) lists each event's resolved target and a
+/// non-zero per-pass frame total, plus the IOC summary, so an operator sees what
+/// will hit the wire before firing.
+#[test]
+fn fidelity_report_lists_resolved_targets_and_counts() {
+    let base = Path::new("conf/replay.yaml");
+    let cfg = config::load_with_scenario(base, Some("stuxnet")).expect("stuxnet loads");
+    let report = ot_turbolaser::scenario::fidelity_report(&cfg)
+        .expect("report builds")
+        .expect("scenario present");
+    assert!(
+        report.contains("10.10.20.11") && report.contains("SIMATIC S7-417 CPU"),
+        "names a resolved target ip and model: {report}"
+    );
+    assert!(
+        report.contains("total attack frames per full pass:")
+            && !report.contains("total attack frames per full pass: 0"),
+        "reports a non-zero frame total: {report}"
+    );
+    assert!(
+        report.contains("ioc fidelity") && report.contains("mypremierfutbol"),
+        "reports the IOC summary including the C2 domain: {report}"
+    );
+    // A generic (no-target) config has no report.
+    let generic = config::load_with_scenario(base, None).expect("generic loads");
+    assert!(
+        ot_turbolaser::scenario::fidelity_report(&generic)
+            .expect("ok")
+            .is_none(),
+        "a generic config produces no fidelity report"
+    );
+}
+
+/// `registry::discover` finds the five installed packs, sorted, each complete.
+#[test]
+fn discover_lists_the_shipped_packs() {
     let dir = ot_turbolaser::scenario::registry::targets_dir_for(Path::new("conf/replay.yaml"));
     let found = ot_turbolaser::scenario::registry::discover(&dir);
     let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["oldsmar", "stuxnet", "triton", "ukraine2015"],
-        "all four shipped packs, sorted"
+        vec![
+            "incontroller",
+            "oldsmar",
+            "stuxnet",
+            "triton",
+            "ukraine2015"
+        ],
+        "all five shipped packs, sorted"
     );
     for s in &found {
         assert!(
@@ -276,7 +348,13 @@ fn discover_lists_the_four_shipped_packs() {
 #[test]
 fn all_shipped_packs_build_through_the_daemon() {
     let base = Path::new("conf/replay.yaml");
-    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+    for name in [
+        "stuxnet",
+        "triton",
+        "oldsmar",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut cfg =
@@ -354,5 +432,140 @@ session:
     assert!(
         err.contains("playbook"),
         "pre-flight names the playbook: {err}"
+    );
+}
+
+/// A pack whose playbook targets a device absent from the plant is rejected at
+/// pre-flight, not silently skipped (zero frames) at run time. This is the exact
+/// gap that let a whole impact phase emit nothing while `check` reported OK.
+#[test]
+fn orphaned_playbook_target_is_rejected_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(
+        &conf,
+        &format!(
+            "iface: tl0
+mode: red_laser
+paths:
+  pool: {root}/pool
+  variants: {root}/variants
+  shm_dir: {root}/shm
+  status_file: {root}/status.json
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 1.0
+session:
+  path: {root}/session.json
+",
+            root = root.display()
+        ),
+    );
+    let pack = root.join("conf").join("targets").join("orphan");
+    write(&pack.join("scenario.yaml"), "target:\n  name: orphan\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP', ip: 10.0.0.11 }\n",
+    );
+    // The impact phase stops a PLC in a subnet the plant never pins, so the target
+    // resolves to no device.
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: impact\n    events:\n      - { emit: s7_stop, target: { ip: 192.0.2.99 } }\n",
+    );
+    write(&pack.join("profiles.toml"), "");
+
+    let cfg = config::load_with_scenario(&conf, Some("orphan")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg).expect_err("orphaned target is rejected");
+    assert!(
+        err.contains("192.0.2.99"),
+        "pre-flight names the unresolved target: {err}"
+    );
+}
+
+/// A minimal valid red-laser base config under `root`, for preflight tests that
+/// then drop a scenario pack under `<root>/conf/targets/<name>`.
+fn base_conf(root: &Path) -> String {
+    format!(
+        "iface: tl0
+mode: red_laser
+paths:
+  pool: {root}/pool
+  variants: {root}/variants
+  shm_dir: {root}/shm
+  status_file: {root}/status.json
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 1.0
+session:
+  path: {root}/session.json
+",
+        root = root.display()
+    )
+}
+
+/// A declared, non-empty profiles.toml that does not parse is fatal at pre-flight,
+/// not a silent fall-back to the embedded set: otherwise a plant model defined only
+/// in that overlay would degrade to identity-only (CVE-less) while `check` reports
+/// OK (SP-10).
+#[test]
+fn malformed_profiles_toml_is_fatal_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(&conf, &base_conf(root));
+    let pack = root.join("conf").join("targets").join("badprof");
+    write(&pack.join("scenario.yaml"), "target:\n  name: badprof\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP', ip: 10.0.0.11 }\n",
+    );
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.0.0.11 } }\n",
+    );
+    write(&pack.join("profiles.toml"), "not = valid toml [[[\n");
+
+    let cfg = config::load_with_scenario(&conf, Some("badprof")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg).expect_err("malformed profiles is fatal");
+    assert!(
+        err.contains("malformed"),
+        "pre-flight names the malformed profiles: {err}"
+    );
+}
+
+/// A plant device that names a `model` (setting no identity-only fields) which
+/// resolves to no CVE profile is flagged at pre-flight - a typo or a model the
+/// profiles.toml forgot to define (SP-10). A genuinely identity-only device
+/// (protocol/vendor set) with a descriptive model stays exempt.
+#[test]
+fn unresolved_cve_model_without_identity_fields_is_flagged_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(&conf, &base_conf(root));
+    let pack = root.join("conf").join("targets").join("typo");
+    write(&pack.join("scenario.yaml"), "target:\n  name: typo\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-317 TYPO', ip: 10.0.0.11 }\n",
+    );
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.0.0.11 } }\n",
+    );
+    write(&pack.join("profiles.toml"), "");
+
+    let cfg = config::load_with_scenario(&conf, Some("typo")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg)
+        .expect_err("an unresolved CVE-expecting model is flagged");
+    assert!(
+        err.contains("SIMATIC S7-317 TYPO"),
+        "pre-flight names the unresolved model: {err}"
     );
 }

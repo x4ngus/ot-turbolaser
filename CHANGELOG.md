@@ -3,6 +3,226 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1] - 2026-07-02
+
+Stable release. Identical to `0.4.1-rc.1`; promotes the release candidate to the stable
+line on `main`. The 0.4.1 sprint hardened the target-scenario framework against silent
+misfire and extended its authoring, verification, and content story. See the pre-release
+entries below for the full item-by-item detail (SP-1 through SP-13, CAP-1/CAP-2/CAP-3).
+
+Highlights:
+- Pre-flight now rejects a pack that would emit the wrong traffic or none (orphaned
+  targets, malformed profiles, reserved-slot collisions, path-field escapes).
+- A non-default `PREFIX` install works end to end and is validated in CI.
+- Every shipped pack has a per-event target-resolution test and a tshark wire-signature
+  assertion; a fifth pack (INCONTROLLER/PIPEDREAM) and four new protocol emitters
+  (DNP3, ENIP/CIP, OPC-UA, IEC-101) ship alongside the original four.
+- `turbolaser check --scenario` prints a pre-flight fidelity report and
+  `turbolaser targets --validate` lints a pack before it fires.
+
+## [0.4.1-rc.1] - 2026-07-02
+
+Promotes the 0.4.1 beta ladder to a release candidate. The full sprint backlog from
+`docs/roadmap-0.4.1.md` has landed on `develop` and no new behaviour lands here beyond
+the version bump; this marks the tree as a candidate for the 0.4.1 stable release on
+`main`.
+
+Sprint summary (see the beta.2-beta.6 entries below for detail):
+- P1 silent-misfire blockers (SP-1 orphaned-target pre-flight, SP-2 PREFIX-templated
+  install) - beta.2.
+- P2 correctness (SP-3/SP-4 engineering-station slot collisions, SP-5 per-event
+  target-resolution test) - beta.3.
+- P3 hardening (SP-6 graceful per-burst spill, SP-7 pack path-field guard, SP-8 net-setup
+  `--scenario` overlay, SP-9 `EX_CONFIG` exit, SP-10 fatal unparseable profiles, SP-11
+  plant-wide MAC uniqueness, SP-12/SP-13 coverage) - beta.4.
+- Capability track: pre-flight fidelity report and `targets --validate` lint plus docs
+  (CAP-1/CAP-2) - beta.5; the INCONTROLLER/PIPEDREAM pack and DNP3/CIP/OPC-UA/IEC-101 emit
+  types (CAP-3) - beta.6.
+
+Definition of done for 0.4.1 stable is met: all P1/P2/P3 items closed, every shipped pack
+has a per-event target-resolution test and a tshark wire-signature assertion, and a
+non-default `PREFIX` install is validated in CI. Full suite green (236 unit, 13 e2e);
+tshark and install-smoke (5 packs) pass.
+
+## [0.4.1-beta.6] - 2026-07-02
+
+Capability track, new content (CAP-3): a fifth scenario pack and four new protocol
+emitters, gated on the P2/P3 guardrails now in place.
+
+### Added
+- **INCONTROLLER / PIPEDREAM (2022) scenario pack.** A multi-vendor plant (Schneider
+  Modbus PLC, Omron CIP controller, DNP3 outstation, IEC-101 RTU, OPC-UA server) driven
+  through a recon -> access -> manipulation -> impact playbook that exercises every new
+  emitter plus the existing Modbus/C2/remote-access ones.
+- **Four new playbook emit kinds and their synth encoders:**
+  - `dnp3_read` / `dnp3_operate` - DNP3 (IEEE 1815) integrity poll and SELECT-then-OPERATE
+    control-relay-output block, over TCP/20000 (reuses the DNP3 data-link CRC).
+  - `cip_read` / `cip_write` - EtherNet/IP CIP Get_Attribute_Single and Set_Attribute_Single
+    over a connected session (RegisterSession + SendRRData), TCP/44818.
+  - `opcua_read` - the OPC-UA HELLO/ACKNOWLEDGE handshake that fingerprints an OPC-UA
+    server, TCP/4840. (A secure channel and typed service calls are deferred.)
+  - `iec101_interrogation` / `iec101_command` - IEC 60870-5-101 station interrogation and
+    single command in FT1.2 link frames, tunneled over TCP/2405, reusing the shared IEC-104
+    ASDU layer.
+  All decode cleanly in their Wireshark dissectors with no malformed frames; IEC-101 needs
+  an explicit decode-as on its TCP port (documented in the test).
+- A new `point` playbook event field (a DNP3 control-point index) and the emit-kind table
+  in `docs/targets.md`.
+
+### Tests
+- Per-encoder synth unit tests (checksum-clean frames carrying the intended PDU). The
+  INCONTROLLER pack joins the internal-consistency, per-event-resolution, daemon-build,
+  discovery, and tshark suites; the tshark suite asserts DNP3 (READ and OPERATE), CIP,
+  OPC-UA, and IEC-101 (via decode-as) all dissect. Full suite green (235 unit, 13 e2e);
+  tshark and install-smoke (5 packs) pass.
+
+## [0.4.1-beta.5] - 2026-07-02
+
+Capability track: pre-flight visibility and an authoring lint, so an operator sees what a
+scenario will emit before firing and a pack author catches mistakes locally.
+
+### Added
+- **`turbolaser check --scenario <name>` prints a fidelity report (CAP-1).** After the
+  config validates, it lists each phase's events with their resolved plant target and frame
+  count, the per-pass frame total, and the IOC summary (fidelity, C2 domains/ips, external
+  ranges). An operator sees exactly what will hit the wire before firing; closes SP-1/SP-5
+  ergonomically.
+- **`turbolaser targets --validate <name>` lints one pack (CAP-2).** Runs the full
+  pre-flight (config, path fields, `profiles.toml`, per-event target resolution), a soft
+  reserved gateway/station-slot lint, and prints the fidelity report. Exits non-zero on a
+  hard failure; a reserved-slot hit is a warning.
+- **`docs/targets.md`: a "Target resolution and reserved slots" section** documenting the
+  ip -> model -> asset_type resolution, the reserved network+1 (gateway) and network+250
+  (engineering station) slots, the relative-path constraint on pack fields, and the two
+  pre-flight tools above.
+
+### Tests
+- CAP-1: the fidelity report names resolved targets and a non-zero frame total for a shipped
+  pack and is absent for a generic config. CAP-2: `reserved_slot_lint` flags an explicit
+  station-slot pin and is clean otherwise. Full suite green (228 unit, 14 e2e); tshark and
+  install-smoke pass.
+
+## [0.4.1-beta.4] - 2026-07-02
+
+P3 hardening: the scenario framework's remaining silent-degradation and safety gaps. The
+four shipped packs are unaffected (guarded by the consistency and tshark tests).
+
+### Fixed
+- **An oversized event no longer bypasses `max_frames_per_burst` (SP-6).** The per-burst
+  cap was checked only between events, so the first event of a burst emitted whole even if
+  it alone exceeded the cap (an unbounded `tristation_download` with `chunk: 1` built one
+  microburst). A single over-cap event now spills across successive bursts, each within the
+  cap, via an intra-event frame cursor; a pinned per-event nonce keeps each re-render
+  byte-identical so the spilled slices reassemble exactly, and the phase does not advance
+  until the event fully drains.
+- **Pack path fields can no longer escape the pack dir (SP-7).** `validate()` rejects a
+  `plant`/`playbook`/`profiles` path that `is_absolute()` or contains a `..` component,
+  mirroring the scenario-name guard at component granularity.
+- **`net-setup`/`net-teardown`/`net-provision` honor the `--scenario` overlay (SP-8).** A
+  pack that overlays `iface`/`net.*` now builds the bridge and mirror on the same ports the
+  daemon transmits on, instead of the base config's ports, so the mirror stays in sync. A
+  datapath-overlaying scenario is flagged with one warning at load. The systemd unit passes
+  `--scenario %i` to the datapath commands.
+- **A missing pack fails clean instead of crash-looping (SP-9).** The systemd unit's
+  missing-pack `ExecStartPre` exits 78 (`EX_CONFIG`) to match `RestartPreventExitStatus`,
+  so it fails on the first hit rather than burning the StartLimit budget.
+- **An unparseable pack `profiles.toml` is now fatal at pre-flight (SP-10).** A declared,
+  non-empty `profiles.toml` that does not parse stops `check`/`plan`/`fire` rather than
+  silently falling back to the embedded set (which would degrade a CVE-bearing plant device
+  to identity-only). Pre-flight also flags a plant device that names a `model` expecting a
+  profile (no identity-only fields set) which resolves to none.
+- **MAC uniqueness is now enforced across the whole plant (SP-11).** `enrich_plant` (the
+  bill of materials) and capture-host reconciliation thread the used-MAC set that
+  `fabricate` already kept, perturbing a colliding MAC off the fabricated fleet and each
+  other, so the "no two assets share a MAC" property holds beyond the fabricated core. A
+  perturbed capture-host MAC is carried into the frame rewrite so its ARP and L3 traffic
+  still agree.
+
+### Tests
+- SP-6: a single over-cap event spills across bursts, each within the cap, and reassembles
+  to the single-shot render; a phase holds until a spilling event drains.
+- SP-7: absolute and `..` plant/playbook/profiles paths are rejected. SP-8: a scenario
+  overlaying `iface`/`net.sensor_port` yields the overlaid datapath on the net-setup path.
+  SP-10: a malformed `profiles.toml` and an unresolved CVE-expecting model are both rejected
+  at pre-flight. SP-12: a full-plant MAC-uniqueness assertion after `enrich_plant`. SP-13:
+  the stuxnet C2 domain is asserted on the wire as a DNS query, paralleling ukraine2015's
+  C2-IP check. Full suite green (227 unit, 13 e2e); tshark and install-smoke pass.
+
+## [0.4.1-beta.3] - 2026-07-02
+
+P2 correctness: two latent engineering-station slot collisions and a test gap that let a
+multi-event pack ship with an orphaned target. No behaviour change for the four shipped
+packs (all pin low hosts and use explicit ips); these close author footguns.
+
+### Fixed
+- **A pinned `.250` device no longer silently collides with the engineering-station slot
+  (SP-3).** `build_sealed_session` now warns when a pinned device lands on the station slot
+  (network+250 clamped), which the engine sources every OT action from with a seed-derived
+  MAC; without the warning the sensor would see two MACs on one IP and could not fuse them.
+  The existing gateway-slot (network+1) warning is preserved and both now flow through one
+  `reserved_slot_warning` helper.
+- **An auto-assigned device no longer lands on the station slot in a small subnet (SP-4).**
+  `devices::next_free_in` now reserves the station slot as well as the gateway, so an
+  ip-less device in a zone small enough that the station clamps low (e.g. a `/30`, where it
+  clamps to network+2) is placed elsewhere instead of reproducing SP-3 with no operator
+  action. This is shared by core fabrication and the scenario plant.
+
+### Tests
+- Per-pack, per-event target-resolution test (`every_shipped_pack_event_target_resolves`):
+  every shipped pack's every playbook event target - ip, model, and asset_type - resolves
+  against the pinned plant via `build_validated_plant`/`validate_targets`, not just explicit
+  ips as the prior consistency check did (SP-5). The negative
+  `orphaned_playbook_target_is_rejected_at_preflight` test is retained.
+- Unit tests: `next_free_in` skips both reserved slots in a small subnet; `reserved_slot_warning`
+  flags the station slot always and the gateway slot only under enrich; an auto-assigned plant
+  device skips the station slot. Full suite green (222 unit, 8 e2e); install-smoke passes.
+
+## [0.4.1-beta.2] - 2026-07-02
+
+First 0.4.1 sprint content: the two HIGH defects from the scenario-framework review,
+fixed and tested. Both are also latent in shipped 0.4.0 and are backported to the
+stable branch (the stable tag is held for now; see the main backport PR).
+
+### Fixed
+- **Orphaned playbook target no longer emits zero frames silently (SP-1).** A
+  playbook `target` that names no plant device now fails pre-flight
+  (`check`/`plan`/`fire`) with the offending phase and event named, instead of the
+  event (or a whole impact phase) rendering nothing while the daemon looked healthy.
+  `build_validated_plant` cross-checks every event target against the pinned plant via
+  `ScenarioEngine::validate_targets`; a `c2_beacon` may still omit its target (it
+  falls back to the first device), every other event must name one that resolves.
+- **Non-default `PREFIX` install no longer sits idle forever (SP-2).** `install.sh`
+  now templates `conf/replay.yaml` to the install `PREFIX`, so `paths.pool` and
+  `paths.variants` point inside the install tree. A verbatim copy under a custom
+  `PREFIX` left them at `/opt/replay/pcaps/*` (never created there), so `scan_pcaps`
+  found no captures and the daemon stayed in `idle_no_pcaps` while systemd saw it as
+  up. The default `/opt/replay` install is byte-for-byte unchanged.
+
+### Tests
+- `validate_targets` unit tests (orphaned reject; resolvable and `c2_beacon`-without-
+  target accept; missing-target reject), an orphaned-target pre-flight e2e test, and
+  an install-smoke assertion that the installed config's pcap paths resolve inside
+  `PREFIX`. Full suite green (219 unit, 7 e2e); install-smoke passes.
+
+## [0.4.1-beta.1] - 2026-07-02
+
+Opens the 0.4.1 pre-release ladder. This is a consolidation build: the develop
+scenario beta ladder (last tagged 0.4.0-beta.4) is realigned onto the released and
+hardened 0.4.0 baseline. No new behaviour lands here beyond that merge; it exists so
+the 0.4.1 sprint builds on one current develop tree instead of a stale beta.
+
+### Changed
+- develop now carries the full 0.4.0 stable release (target scenarios, datapath
+  provisioning/triage, Proxmox out-of-the-box) and the 0.4.0 audit hardening: unique
+  fabricated MACs, config fail-fast on zero timing/rate knobs, saturating cycle
+  zone-naming, `l3.fallback` removal, PREFIX-aware install, and the `EX_CONFIG` exit
+  contract that stops a bad-config crash-loop. The pre-stable develop betas lacked
+  all of these; this merge supersedes them.
+
+### Notes
+- 0.4.1 capability work is scoped in `docs/roadmap-0.4.1.md`. None of it is
+  implemented in this build; the tree is functionally identical to 0.4.0 stable.
+
 ## [0.4.0] - 2026-07-02
 
 First stable 0.4.0, then hardened for prime time. The headline 0.4.0 additions
@@ -46,7 +266,7 @@ custom-PREFIX install fix.
 
 First stable 0.4.0 release. Promotes the 0.4.0-beta ladder (beta.1–beta.5),
 validated on a live Proxmox appliance feeding a Dragos sensor, to stable with no
-code changes over beta.5 — only the version string and this entry. The per-beta
+code changes over beta.5 - only the version string and this entry. The per-beta
 sections below carry the detailed history; the headline additions over 0.3.2:
 
 - **Target scenario framework.** Drop-in attack packs under `conf/targets/<name>/`
@@ -81,8 +301,8 @@ forever. The only workaround was a manual `systemctl edit` drop-in.
 
 ### Changed
 - **`net-setup`/`net-teardown` auto-detect the deployment.** When the configured
-  `sensor_port` is absent on this host — the hypervisor (Proxmox) provides the ports
-  and runs the mirror on the host — net-setup no-ops cleanly (exit 0) instead of
+  `sensor_port` is absent on this host - the hypervisor (Proxmox) provides the ports
+  and runs the mirror on the host - net-setup no-ops cleanly (exit 0) instead of
   exiting 4. No `systemctl edit` drop-in is needed; a stock config just works on
   Proxmox. `fire`'s datapath pre-flight is hypervisor-aware to match (a missing
   sensor port is no longer an error; only a missing replay port is). The signal is

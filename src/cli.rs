@@ -116,6 +116,11 @@ pub struct ReloadArgs {
 pub struct NetArgs {
     #[arg(long, default_value = "/opt/replay/conf/replay.yaml")]
     pub config: PathBuf,
+    /// Overlay a target scenario's config (its `iface`/`net.*`, if any) so the
+    /// bridge and mirror are built on the same ports the daemon transmits on.
+    /// Omit for a generic red-laser datapath.
+    #[arg(long, value_name = "NAME")]
+    pub scenario: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -180,6 +185,10 @@ pub struct TargetsArgs {
     /// Emit raw JSON instead of a human summary.
     #[arg(long)]
     pub json: bool,
+    /// Lint one pack instead of listing: validate target resolution, path fields,
+    /// profiles, reserved gateway/station slots, and print its fidelity report.
+    #[arg(long, value_name = "NAME")]
+    pub validate: Option<String>,
 }
 
 #[derive(Args, Debug)]

@@ -17,7 +17,10 @@ use crate::ledger::{DeviceRecord, Session};
 use crate::proto::l3;
 use crate::simulate::roles;
 use crate::synth::ioc::C2Target;
-use crate::synth::{iec104, ioc, modbus_write, parse_version, s7_control, s7_szl, tristation};
+use crate::synth::{
+    dnp3, enip_cip, iec101, iec104, ioc, modbus_write, opcua, parse_version, s7_control, s7_szl,
+    tristation,
+};
 use crate::vuln::VulnDb;
 
 use super::playbook::{DeviceRef, EmitKind, Event, Phase, Playbook};
@@ -35,6 +38,15 @@ pub struct ScenarioEngine {
     phase_idx: usize,
     event_cursor: usize,
     bursts_in_phase: u64,
+    /// Frames already emitted from the event at `event_cursor` when it is spilling
+    /// across bursts. `0` means the event has not started, or drained exactly on a
+    /// burst boundary; `> 0` means it is mid-spill and must re-render identically.
+    event_frame_offset: usize,
+    /// The nonce the currently-spilling event was first rendered with. `render_event`
+    /// is deterministic in its nonce, so re-rendering with this pinned value
+    /// reproduces the exact frame vector being sliced, and the carried slice is an
+    /// exact continuation. `None` when no event is spilling.
+    spill_nonce: Option<u64>,
 }
 
 impl ScenarioEngine {
@@ -64,7 +76,38 @@ impl ScenarioEngine {
             phase_idx: 0,
             event_cursor: 0,
             bursts_in_phase: 0,
+            event_frame_offset: 0,
+            spill_nonce: None,
         })
+    }
+
+    /// Cross-check every playbook event target against the sealed plant, so a
+    /// playbook that names a device absent from the plant is rejected at pre-flight
+    /// instead of silently rendering zero frames at run time (an unresolved target
+    /// emits nothing, see [`Self::render_event`]). A `c2_beacon` event may omit its
+    /// target (it falls back to the first plant device); every other event must name
+    /// one, and any target that is set must resolve to a pinned device.
+    pub fn validate_targets(&self, ledger: &Session) -> Result<(), String> {
+        for ph in &self.playbook.phases {
+            for (i, ev) in ph.events.iter().enumerate() {
+                match &ev.target {
+                    Some(_) if resolve(ledger, &ev.target).is_none() => {
+                        return Err(format!(
+                            "playbook phase {:?} event {i} (emit {:?}) targets {:?}, which no plant device matches; pin a matching device in the plant or correct the target",
+                            ph.id, ev.emit, ev.target.as_ref().unwrap()
+                        ));
+                    }
+                    None if ev.emit != EmitKind::C2Beacon => {
+                        return Err(format!(
+                            "playbook phase {:?} event {i} (emit {:?}) has no target; only c2_beacon may omit one",
+                            ph.id, ev.emit
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -93,30 +136,123 @@ impl ScenarioEngine {
         self.current_phase().techniques.clone()
     }
 
+    /// A human pre-flight fidelity report: for each phase, every event's resolved
+    /// target and how many frames it renders, plus the IOC summary. Read-only (it
+    /// does not advance the timeline), so `check --scenario` can show an operator
+    /// exactly what will hit the wire before firing (CAP-1). Frame counts are
+    /// nonce-invariant, so a fixed nonce per event is representative.
+    pub fn fidelity_report(&self, ledger: &Session, vuln: &VulnDb) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "scenario {}: {} phase(s), campaign {:?}, max {} frame(s)/burst",
+            self.name,
+            self.playbook.phases.len(),
+            self.campaign,
+            self.max_frames_per_burst
+        );
+        let mut total = 0usize;
+        for ph in &self.playbook.phases {
+            let label = ph.name.clone().unwrap_or_else(|| ph.id.clone());
+            let tech = if ph.techniques.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", ph.techniques.join(","))
+            };
+            let _ = writeln!(
+                out,
+                "  phase {} ({label}){tech}, dwell {}",
+                ph.id, ph.dwell_runs
+            );
+            let mut pframes = 0usize;
+            for (i, ev) in ph.events.iter().enumerate() {
+                let frames = self.render_event(ev, ledger, vuln, i as u64).len();
+                pframes += frames;
+                let tgt = match ev.target.as_ref() {
+                    Some(t) => match resolve(ledger, &ev.target) {
+                        Some(d) => format!(
+                            "{} {} ({})",
+                            d.ip,
+                            d.model,
+                            d.asset_type.as_deref().unwrap_or("-")
+                        ),
+                        None => format!("UNRESOLVED {t:?}"),
+                    },
+                    None if ev.emit == EmitKind::C2Beacon => match ledger.devices.first() {
+                        Some(d) => format!("c2 beacon via first device {}", d.ip),
+                        None => "c2 beacon (no plant device)".to_string(),
+                    },
+                    None => "no target".to_string(),
+                };
+                let _ = writeln!(out, "    - {:?} -> {tgt}  [{frames} frame(s)]", ev.emit);
+            }
+            let _ = writeln!(out, "    phase frames: {pframes}");
+            total += pframes;
+        }
+        let _ = writeln!(out, "  total attack frames per full pass: {total}");
+        let _ = writeln!(out, "  ioc fidelity: {:?}", self.fidelity);
+        if !self.c2_domains.is_empty() {
+            let _ = writeln!(out, "  c2 domains: {}", self.c2_domains.join(", "));
+        }
+        if !self.c2_ips.is_empty() {
+            let _ = writeln!(out, "  c2 ips: {}", self.c2_ips.join(", "));
+        }
+        if !self.external_cidrs.is_empty() {
+            let _ = writeln!(out, "  external cidrs: {}", self.external_cidrs.join(", "));
+        }
+        out
+    }
+
     /// Render this burst's attack frames and advance the timeline. Called once per
     /// identity-announce burst, so dwell and pacing are measured in bursts.
     pub fn phase_frames(&mut self, ledger: &Session, vuln: &VulnDb, nonce: u64) -> Vec<Vec<u8>> {
         let events_len = self.current_phase().events.len();
         let dwell = self.current_phase().dwell_runs.max(1);
+        let cap = self.max_frames_per_burst; // already .max(1) at load
         let mut frames: Vec<Vec<u8>> = Vec::new();
-        // Emit from the cursor, bounded by the per-burst frame cap so a long
-        // sequence spreads across successive bursts instead of one microburst.
+        // Emit from the cursor, bounded by the per-burst frame cap. A single event
+        // that alone renders more than the cap now spills across successive bursts
+        // (its frames are sliced by `event_frame_offset`) instead of overshooting
+        // the cap in one microburst. The pinned `spill_nonce` keeps each re-render
+        // byte-identical, so the carried slice is an exact continuation of what the
+        // prior burst already sent.
         while self.event_cursor < events_len {
+            let room = cap.saturating_sub(frames.len());
+            if room == 0 {
+                break; // cap filled by earlier events this burst; resume next burst
+            }
+            let ev_nonce = self
+                .spill_nonce
+                .unwrap_or_else(|| nonce.wrapping_add(self.event_cursor as u64));
             let ev = &self.playbook.phases[self.phase_idx].events[self.event_cursor];
-            let ev_frames = self.render_event(
-                ev,
-                ledger,
-                vuln,
-                nonce.wrapping_add(self.event_cursor as u64),
+            let ev_frames = self.render_event(ev, ledger, vuln, ev_nonce);
+            let remaining = ev_frames.len().saturating_sub(self.event_frame_offset);
+            let take = remaining.min(room);
+            frames.extend_from_slice(
+                &ev_frames[self.event_frame_offset..self.event_frame_offset + take],
             );
-            if !frames.is_empty() && frames.len() + ev_frames.len() > self.max_frames_per_burst {
+            if take == remaining {
+                // Event fully drained: clear the spill state and advance the cursor.
+                self.event_frame_offset = 0;
+                self.spill_nonce = None;
+                self.event_cursor += 1;
+            } else {
+                // Event still has frames: carry the offset and pin the nonce so the
+                // next burst re-renders identically and continues the slice.
+                self.event_frame_offset += take;
+                self.spill_nonce = Some(ev_nonce);
                 break;
             }
-            frames.extend(ev_frames);
-            self.event_cursor += 1;
         }
         self.bursts_in_phase += 1;
-        if self.event_cursor >= events_len && self.bursts_in_phase >= dwell {
+        // Advance only when the cursor is past the last event AND no event is
+        // mid-spill, so an oversized impact action fully lands before the timeline
+        // moves.
+        if self.event_cursor >= events_len
+            && self.event_frame_offset == 0
+            && self.bursts_in_phase >= dwell
+        {
             self.advance();
         }
         frames
@@ -125,6 +261,8 @@ impl ScenarioEngine {
     fn advance(&mut self) {
         self.event_cursor = 0;
         self.bursts_in_phase = 0;
+        self.event_frame_offset = 0;
+        self.spill_nonce = None;
         let last = self.playbook.phases.len() - 1;
         if self.phase_idx < last {
             self.phase_idx += 1;
@@ -226,6 +364,61 @@ impl ScenarioEngine {
             EmitKind::Iec104Command => {
                 self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
                     iec104::single_command(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        ev.common_addr.unwrap_or(1),
+                        ev.ioa.unwrap_or(1),
+                        ev.close.unwrap_or(false),
+                    )
+                })
+            }
+            EmitKind::Dnp3Read => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                dnp3::integrity_poll(cmac, dmac, cip, dip, port, ev.common_addr.unwrap_or(1))
+            }),
+            EmitKind::Dnp3Operate => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    dnp3::operate(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        ev.common_addr.unwrap_or(1),
+                        ev.point.unwrap_or(0) as u8,
+                        ev.close.unwrap_or(false),
+                    )
+                })
+            }
+            EmitKind::CipRead => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                enip_cip::get_attribute(cmac, dmac, cip, dip, port)
+            }),
+            EmitKind::CipWrite => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                enip_cip::set_attribute(
+                    cmac,
+                    dmac,
+                    cip,
+                    dip,
+                    port,
+                    ev.register.unwrap_or(1) as u8,
+                    ev.value.unwrap_or(0),
+                )
+            }),
+            EmitKind::OpcuaRead => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    opcua::read(cmac, dmac, cip, dip, port)
+                })
+            }
+            EmitKind::Iec101Interrogation => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    iec101::interrogation(cmac, dmac, cip, dip, port, ev.common_addr.unwrap_or(1))
+                })
+            }
+            EmitKind::Iec101Command => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    iec101::single_command(
                         cmac,
                         dmac,
                         cip,
@@ -496,6 +689,8 @@ mod tests {
             phase_idx: 0,
             event_cursor: 0,
             bursts_in_phase: 0,
+            event_frame_offset: 0,
+            spill_nonce: None,
         }
     }
 
@@ -552,21 +747,87 @@ mod tests {
     }
 
     #[test]
-    fn long_event_sequence_splits_across_bursts_under_the_cap() {
+    fn multi_event_phase_spreads_one_event_per_burst() {
         let led = ledger_with_s7();
         let vuln = VulnDb::embedded().unwrap();
-        // Three reads in one phase with a per-burst cap of 1: each event yields
-        // several frames, so only one event is consumed per burst and the rest
-        // spread across following bursts instead of one microburst.
-        let mut e = engine(
-            "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n",
-        );
-        e.max_frames_per_burst = 1;
+        // Three reads in one phase, with the cap sized to exactly one event's
+        // frames: each burst consumes one whole event and the three spread across
+        // three bursts, so a long sequence never lands as one microburst.
+        let ev = "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n";
+        let mut e = engine(ev);
+        let one = e
+            .render_event(&e.playbook.phases[0].events[0].clone(), &led, &vuln, 0)
+            .len();
+        e.max_frames_per_burst = one;
         let b0 = e.phase_frames(&led, &vuln, 0);
-        assert!(!b0.is_empty(), "the first event still emits");
-        assert_eq!(e.event_cursor, 1, "only one event consumed under the cap");
+        assert_eq!(b0.len(), one, "the burst emits exactly one whole event");
+        assert_eq!(e.event_cursor, 1, "one event consumed under the cap");
+        assert_eq!(
+            e.event_frame_offset, 0,
+            "the event drained on the boundary, no spill"
+        );
         e.phase_frames(&led, &vuln, 1);
         assert_eq!(e.event_cursor, 2, "the next event lands on the next burst");
+    }
+
+    #[test]
+    fn oversized_event_never_exceeds_the_cap_and_reassembles() {
+        // A single s7_read renders a multi-frame S7 exchange. With a cap of 2 it
+        // must spill across bursts: no burst exceeds the cap, no frame is dropped,
+        // and the concatenation equals the single-shot render (SP-6). Before the
+        // fix the whole event emitted in one over-cap microburst.
+        let led = ledger_with_s7();
+        let vuln = VulnDb::embedded().unwrap();
+        let ev = "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n";
+        let mut e = engine(ev);
+        // The full render at the nonce the engine pins (burst 0 nonce + cursor 0).
+        let first_ev = e.playbook.phases[0].events[0].clone();
+        let full = e.render_event(&first_ev, &led, &vuln, 0);
+        assert!(full.len() > 2, "the read is larger than the cap");
+
+        e.max_frames_per_burst = 2;
+        // Collect until the first full emission is drained. (This is a one-shot
+        // single-phase campaign, so once the event drains the phase holds and
+        // re-emits it with a fresh nonce; stop at the first complete render.)
+        let mut drained: Vec<Vec<u8>> = Vec::new();
+        for n in 0..50u64 {
+            let b = e.phase_frames(&led, &vuln, n);
+            assert!(b.len() <= 2, "burst {n} stays within the cap");
+            drained.extend(b);
+            if drained.len() >= full.len() {
+                break;
+            }
+        }
+        assert_eq!(
+            &drained[..full.len()],
+            &full[..],
+            "spilled frames reassemble the whole event, in order"
+        );
+    }
+
+    #[test]
+    fn phase_holds_until_a_spilling_event_drains() {
+        // dwell_runs: 1 with a single over-cap event: the phase must not advance
+        // until the event is fully emitted, so an oversized impact action always
+        // lands on the wire before the timeline moves (SP-6).
+        let led = ledger_with_s7();
+        let vuln = VulnDb::embedded().unwrap();
+        let ev = "phases:\n  - id: impact\n    dwell_runs: 1\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n  - id: after\n    events:\n      - { emit: s7_stop, target: { ip: 10.20.10.11 } }\n";
+        let mut e = engine(ev);
+        let first_ev = e.playbook.phases[0].events[0].clone();
+        let full_len = e.render_event(&first_ev, &led, &vuln, 0).len();
+        assert!(full_len > 1, "the impact event is multi-frame");
+        e.max_frames_per_burst = 1;
+        for _ in 0..(full_len - 1) {
+            e.phase_frames(&led, &vuln, 0);
+            assert_eq!(e.phase_id(), "impact", "phase holds while the event spills");
+        }
+        e.phase_frames(&led, &vuln, 0);
+        assert_eq!(
+            e.phase_id(),
+            "after",
+            "phase advances once the event fully drains"
+        );
     }
 
     #[test]
@@ -579,6 +840,41 @@ mod tests {
         assert!(
             e.phase_frames(&led, &vuln, 0).is_empty(),
             "no frames, no panic"
+        );
+    }
+
+    #[test]
+    fn validate_targets_rejects_an_orphaned_target() {
+        // The run-time skip above is a silent detection miss; pre-flight must reject
+        // a target that names no plant device instead of letting it emit nothing.
+        let led = ledger_with_s7();
+        let e = engine(
+            "phases:\n  - id: impact\n    events:\n      - { emit: s7_stop, target: { ip: 10.99.99.99 } }\n",
+        );
+        let err = e.validate_targets(&led).unwrap_err();
+        assert!(
+            err.contains("10.99.99.99"),
+            "names the unresolved target: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_targets_accepts_resolvable_targets_and_c2_without_one() {
+        let led = ledger_with_s7();
+        let e = engine(
+            "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.20.10.11 } }\n      - { emit: c2_beacon }\n",
+        );
+        assert!(e.validate_targets(&led).is_ok());
+    }
+
+    #[test]
+    fn validate_targets_rejects_a_non_c2_event_with_no_target() {
+        let led = ledger_with_s7();
+        let e = engine("phases:\n  - id: impact\n    events:\n      - { emit: s7_stop }\n");
+        let err = e.validate_targets(&led).unwrap_err();
+        assert!(
+            err.contains("no target"),
+            "explains the missing target: {err}"
         );
     }
 

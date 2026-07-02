@@ -13,6 +13,14 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/replay}"
 
+# Copy a repo file into the install tree, rewriting the default /opt/replay paths
+# to the chosen PREFIX so a non-default install gets working paths. For the default
+# PREFIX=/opt/replay this is a byte-for-byte copy.
+template_to_prefix() {
+    sed "s#/opt/replay#${PREFIX}#g" "$1" > "$2"
+    chmod "${3:-0644}" "$2"
+}
+
 BIN_SRC=""
 for c in \
     target/x86_64-unknown-linux-musl/release/turbolaser \
@@ -57,12 +65,16 @@ for d in oui.csv vuln_profiles.toml; do
     fi
 done
 
-# Never clobber an edited config: install the sample alongside instead.
+# Never clobber an edited config: install the sample alongside instead. Template
+# the config to PREFIX so paths.pool/variants match THIS install tree; a verbatim
+# copy under a non-default PREFIX would keep them at /opt/replay/pcaps/* (never
+# created here), leaving the daemon idle forever with no captures to send while it
+# still looks "up" to systemd.
 if [[ -f "$PREFIX/conf/replay.yaml" ]]; then
-    install -m 0644 conf/replay.yaml "$PREFIX/conf/replay.yaml.example"
+    template_to_prefix conf/replay.yaml "$PREFIX/conf/replay.yaml.example"
     echo "kept existing config; new sample at $PREFIX/conf/replay.yaml.example"
 else
-    install -m 0644 conf/replay.yaml "$PREFIX/conf/replay.yaml"
+    template_to_prefix conf/replay.yaml "$PREFIX/conf/replay.yaml"
 fi
 
 # Target-scenario packs. The binary does NOT embed these (unlike the OUI and

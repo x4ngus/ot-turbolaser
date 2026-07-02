@@ -8,14 +8,18 @@
 
 pub mod arp;
 pub mod cdp;
+pub mod dnp3;
 pub mod dns;
+pub mod enip_cip;
 pub mod enip_identity;
 pub mod eth;
+pub mod iec101;
 pub mod iec104;
 pub mod ioc;
 pub mod lldp;
 pub mod modbus_devid;
 pub mod modbus_write;
+pub mod opcua;
 pub mod s7_common;
 pub mod s7_control;
 pub mod s7_szl;

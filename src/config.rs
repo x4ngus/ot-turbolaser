@@ -865,6 +865,27 @@ impl Config {
             if t.max_frames_per_burst == 0 {
                 return Err("target.max_frames_per_burst must be > 0".into());
             }
+            // The plant/playbook/profiles paths are joined onto the pack dir and read
+            // from disk, so an absolute path or a `..` component would escape the pack
+            // sandbox (a third-party pack could point them at arbitrary files). Reject
+            // both, at component granularity, mirroring the scenario-name guard in
+            // `load_with_scenario` (SP-7).
+            for (field, path) in [
+                ("plant", &t.plant),
+                ("playbook", &t.playbook),
+                ("profiles", &t.profiles),
+            ] {
+                if path.is_absolute()
+                    || path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(format!(
+                        "target.{field} '{}' must be a relative path inside the pack dir (no leading '/' or '..')",
+                        path.display()
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -915,6 +936,23 @@ pub fn load_with_scenario(base: &Path, scenario: Option<&str>) -> Result<Config,
         .map_err(|e| format!("parsing {}: {e}", base.display()))?;
     let overlay: Value = serde_norway::from_str(&scen_text)
         .map_err(|e| format!("parsing {}: {e}", scenario_path.display()))?;
+    // A scenario that overlays the datapath (`iface` or `net.*`) changes the bridge
+    // and mirror, not just the attack. net-setup now honors the same --scenario
+    // overlay (SP-8), so this is allowed and stays in sync, but it is unusual and
+    // operationally significant, so name it once rather than let it change the
+    // datapath silently. `validate()` sees only the merged config and cannot tell
+    // an override from a base value, so the probe belongs here at the overlay site.
+    if let Value::Mapping(m) = &overlay {
+        for (k, _) in m {
+            if let Some(key) = k.as_str() {
+                if key == "iface" || key == "net" {
+                    log::warn!(
+                        "scenario {name} overlays `{key}`, changing the datapath (not just the attack); net-setup/net-teardown honor the same --scenario overlay so the mirror stays in sync"
+                    );
+                }
+            }
+        }
+    }
     deep_merge(&mut merged, overlay);
 
     let mut cfg: Config = serde_norway::from_value(merged)
@@ -1357,5 +1395,62 @@ target:
                 "name {bad:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn target_path_fields_cannot_escape_the_pack_dir() {
+        use std::io::Write;
+        // An absolute or `..`-bearing plant/playbook/profiles path would read files
+        // outside the pack dir; validate() must reject it (SP-7).
+        for (field, bad) in [
+            ("plant", "/etc/passwd"),
+            ("playbook", "../../evil.yaml"),
+            ("profiles", "../secrets.toml"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let conf_dir = dir.path().join("conf");
+            std::fs::create_dir_all(&conf_dir).unwrap();
+            let base = conf_dir.join("replay.yaml");
+            std::fs::copy("conf/replay.yaml", &base).unwrap();
+            let pack = conf_dir.join("targets").join("escape");
+            std::fs::create_dir_all(&pack).unwrap();
+            let mut f = std::fs::File::create(pack.join("scenario.yaml")).unwrap();
+            write!(f, "target:\n  name: escape\n  {field}: \"{bad}\"\n").unwrap();
+            let err = load_with_scenario(&base, Some("escape"))
+                .expect_err(&format!("{field}={bad} must be rejected"));
+            assert!(
+                err.contains(field) && err.contains("relative"),
+                "{field}={bad} error names the field and constraint: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_overlaying_iface_and_net_is_honored_on_the_net_setup_path() {
+        use std::io::Write;
+        // net-setup/net-teardown/net-provision load via load_with_scenario (SP-8),
+        // so a pack that overlays iface/net.* builds the bridge and mirror on the
+        // same ports the daemon transmits on. Assert the resolved config carries
+        // the overlaid datapath values.
+        let dir = tempfile::tempdir().unwrap();
+        let conf_dir = dir.path().join("conf");
+        std::fs::create_dir_all(&conf_dir).unwrap();
+        let base = conf_dir.join("replay.yaml");
+        std::fs::copy("conf/replay.yaml", &base).unwrap();
+        let pack = conf_dir.join("targets").join("ifacepack");
+        std::fs::create_dir_all(&pack).unwrap();
+        let mut f = std::fs::File::create(pack.join("scenario.yaml")).unwrap();
+        write!(
+            f,
+            "iface: tl9\nnet:\n  sensor_port: sens9\ntarget:\n  name: ifacepack\n"
+        )
+        .unwrap();
+
+        let cfg = load_with_scenario(&base, Some("ifacepack")).expect("overlay loads");
+        assert_eq!(cfg.iface, "tl9", "overlay iface wins on the net-setup path");
+        assert_eq!(
+            cfg.net.sensor_port, "sens9",
+            "overlay net.sensor_port wins, other net.* fields preserved by deep-merge"
+        );
     }
 }

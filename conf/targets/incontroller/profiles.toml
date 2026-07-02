@@ -1,0 +1,6 @@
+# INCONTROLLER scenario CVE profiles, overlaid on the embedded set. The Schneider
+# Modicon M340 is already embedded (CVE-2018-7811) and carries the CVE-bearing
+# Modbus identity. The Omron (EtherNet/IP CIP), DNP3 outstation, IEC-101 RTU, and
+# OPC-UA server are driven by the playbook as identity-only devices (their control
+# protocols are not passive read-identity carriers), so they are pinned in
+# plant.yaml rather than as read-identity profiles. No additional profiles here.

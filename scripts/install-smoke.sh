@@ -23,8 +23,8 @@ BIN="$PREFIX/bin/turbolaser"
 CFG="$PREFIX/conf/replay.yaml"
 fail=0
 
-# The four shipped packs must be on disk under the installed conf/targets.
-for name in stuxnet triton oldsmar ukraine2015; do
+# The five shipped packs must be on disk under the installed conf/targets.
+for name in stuxnet triton oldsmar ukraine2015 incontroller; do
     if [[ -f "$PREFIX/conf/targets/$name/scenario.yaml" ]]; then
         echo "  ok: $name/scenario.yaml installed"
     else
@@ -33,19 +33,35 @@ for name in stuxnet triton oldsmar ukraine2015; do
     fi
 done
 
-# `targets` must discover all four through the installed config's sibling dir.
-count="$("$BIN" targets --config "$CFG" --json | grep -c '"name":' || true)"
-if [[ "$count" == 4 ]]; then
-    echo "  ok: turbolaser targets lists 4 scenarios"
+# The installed config's pcap paths must be templated to THIS PREFIX. A verbatim
+# copy leaves them at /opt/replay/pcaps/*, which a non-default install never
+# creates, so scan_pcaps finds nothing and the daemon idles forever while systemd
+# still sees the unit as up.
+if grep -q "$PREFIX/pcaps/pool" "$CFG" && grep -q "$PREFIX/pcaps/variants" "$CFG"; then
+    echo "  ok: replay.yaml pcap paths templated to the install PREFIX"
 else
-    echo "  FAIL: turbolaser targets listed $count scenarios, expected 4" >&2
+    echo "  FAIL: replay.yaml pcap paths not templated to $PREFIX" >&2
+    grep -nE "pool:|variants:" "$CFG" >&2 || true
+    fail=1
+fi
+if grep -q "/opt/replay/pcaps" "$CFG"; then
+    echo "  FAIL: replay.yaml still references /opt/replay/pcaps under a non-default PREFIX" >&2
+    fail=1
+fi
+
+# `targets` must discover all five through the installed config's sibling dir.
+count="$("$BIN" targets --config "$CFG" --json | grep -c '"name":' || true)"
+if [[ "$count" == 5 ]]; then
+    echo "  ok: turbolaser targets lists 5 scenarios"
+else
+    echo "  FAIL: turbolaser targets listed $count scenarios, expected 5" >&2
     "$BIN" targets --config "$CFG" || true
     fail=1
 fi
 
 # Every pack must merge + validate through the real loader from the installed
 # layout (this is the exact path that failed on the alpha appliance).
-for name in stuxnet triton oldsmar ukraine2015; do
+for name in stuxnet triton oldsmar ukraine2015 incontroller; do
     if "$BIN" check --config "$CFG" --scenario "$name" >/dev/null 2>&1; then
         echo "  ok: check --scenario $name exits 0"
     else

@@ -19,10 +19,15 @@ Type=simple
 # same isolated-bridge config and refuses to attach to a physical uplink.
 # Fail early and clearly if the named pack is not installed, before bringing up
 # the bridge for a doomed run. (`turbolaser targets` lists what is installed.)
-ExecStartPre=/bin/sh -c 'test -f /opt/replay/conf/targets/%i/scenario.yaml || { echo "ot-turbolaser: scenario pack %i not installed at /opt/replay/conf/targets/%i (run: turbolaser targets)" >&2; exit 1; }'
-ExecStartPre=/opt/replay/bin/turbolaser net-setup --config /opt/replay/conf/replay.yaml
+# Exit 78 (EX_CONFIG), not 1, so a missing pack matches RestartPreventExitStatus
+# below and fails clean on the first hit instead of crash-looping to the StartLimit.
+ExecStartPre=/bin/sh -c 'test -f /opt/replay/conf/targets/%i/scenario.yaml || { echo "ot-turbolaser: scenario pack %i not installed at /opt/replay/conf/targets/%i (run: turbolaser targets)" >&2; exit 78; }'
+# net-setup/teardown honor the same --scenario overlay as `run`, so a pack that
+# overlays iface/net.* builds the bridge and mirror on the same ports the daemon
+# transmits on (SP-8).
+ExecStartPre=/opt/replay/bin/turbolaser net-setup --config /opt/replay/conf/replay.yaml --scenario %i
 ExecStart=/opt/replay/bin/turbolaser run --config /opt/replay/conf/replay.yaml --scenario %i
-ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml
+ExecStopPost=/opt/replay/bin/turbolaser net-teardown --config /opt/replay/conf/replay.yaml --scenario %i
 Restart=always
 RestartSec=3
 # A non-retryable config/state error exits 78 (EX_CONFIG): bad/missing pack, a

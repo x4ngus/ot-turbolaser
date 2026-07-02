@@ -50,8 +50,13 @@ pub fn build_validated_plant(
     if vuln.is_empty() {
         return Err("no vulnerable-device profiles available".into());
     }
-    engine::ScenarioEngine::load(target, seed)?; // validate the playbook
-    plant::pin_from_pack(target, &vuln, oui, seed, now_unix, &cfg.dns.domains)
+    let engine = engine::ScenarioEngine::load(target, seed)?; // validate the playbook
+    let session = plant::pin_from_pack(target, &vuln, oui, seed, now_unix, &cfg.dns.domains)?;
+    // Cross-check the playbook's targets against the pinned plant, so a target that
+    // names no plant device is rejected here rather than silently skipped (zero
+    // frames) at run time, defeating the scenario the operator meant to fire.
+    engine.validate_targets(&session)?;
+    Ok(session)
 }
 
 /// Validate a scenario pack end to end without committing or sending traffic, so
@@ -62,17 +67,39 @@ pub fn preflight(cfg: &crate::config::Config) -> Result<(), String> {
     let Some(t) = cfg.target.as_ref() else {
         return Ok(());
     };
-    // A malformed profiles.toml is not fatal (load_overlay keeps the embedded set
-    // and only logs it, and check/plan run without a logger), but a silent drop
-    // hides a typo'd CVE profile from the operator. Surface it here.
+    // A declared, non-empty profiles.toml that does not parse is FATAL here (SP-10).
+    // `load_overlay` only logs it and falls back to the embedded set, so a plant
+    // model defined only in that overlay (e.g. stuxnet's SIMATIC S7-417 CPU) would
+    // silently pin identity-only: CVE-less, protocol-none, the literal model string
+    // on the wire instead of the real MLFB. An operator must not fire that; make
+    // the malformed overlay stop pre-flight rather than degrade quietly.
     let profiles_path = t.pack_dir.join(&t.profiles);
     if let Ok(text) = std::fs::read_to_string(&profiles_path) {
         if !text.trim().is_empty() {
             if let Err(e) = toml::from_str::<toml::Value>(&text) {
-                eprintln!(
-                    "warning: scenario profiles {} is malformed and will be ignored (the embedded CVE set is used instead): {e}",
+                return Err(format!(
+                    "scenario profiles {} is malformed: {e}; fix it or remove it (a CVE-bearing plant device would otherwise silently degrade to identity-only)",
                     profiles_path.display()
-                );
+                ));
+            }
+        }
+    }
+    // Flag a plant device that names a `model` expecting a CVE profile (it sets none
+    // of the identity-only descriptive fields protocol/vendor/firmware) yet resolves
+    // to no profile in the overlaid DB (SP-10). That is an author error: a typo, or a
+    // model the profiles.toml was meant to define but does not. A genuinely
+    // identity-only device (a SIS/RTU/HMI that sets protocol/vendor) is exempt, since
+    // an unresolved descriptive model is intentional there.
+    let vuln = crate::vuln::VulnDb::load_overlay(&profiles_path);
+    let spec = plant::PlantSpec::load(&t.pack_dir.join(&t.plant))?;
+    for d in &spec.devices {
+        if let Some(m) = &d.model {
+            let identity_only = d.protocol.is_some() || d.vendor.is_some() || d.firmware.is_some();
+            if !identity_only && vuln.by_model(m).is_none() {
+                return Err(format!(
+                    "scenario plant model {m:?} resolves to no CVE profile and declares no identity-only fields (protocol/vendor/firmware); define it in {} or mark it identity-only",
+                    profiles_path.display()
+                ));
             }
         }
     }
@@ -84,8 +111,76 @@ pub fn preflight(cfg: &crate::config::Config) -> Result<(), String> {
     build_validated_plant(cfg, t, &oui, seed, 0).map(|_| ())
 }
 
-/// `turbolaser targets`: list the installed scenario packs.
+/// Build a scenario's pre-flight fidelity report (CAP-1): the resolved targets,
+/// per-phase frame counts, and IOC summary an operator sees before firing. Returns
+/// `None` for a generic (no-`target`) config. Assumes [`preflight`] has already
+/// validated the pack, so this only re-derives the plant/engine for the report.
+pub fn fidelity_report(cfg: &crate::config::Config) -> Result<Option<String>, String> {
+    let Some(t) = cfg.target.as_ref() else {
+        return Ok(None);
+    };
+    let vuln = crate::vuln::VulnDb::load_overlay(&t.pack_dir.join(&t.profiles));
+    let oui = crate::oui::OuiDb::embedded();
+    let seed = cfg.session.seed.unwrap_or(0);
+    let session = build_validated_plant(cfg, t, &oui, seed, 0)?;
+    let engine = engine::ScenarioEngine::load(t, seed)?;
+    Ok(Some(engine.fidelity_report(&session, &vuln)))
+}
+
+/// `turbolaser targets --validate <name>`: lint one pack (CAP-2). Runs the full
+/// pre-flight (config, path fields, profiles, per-event target resolution), then a
+/// soft reserved-slot lint, then prints the fidelity report. Returns 0 when the
+/// hard checks pass (reserved-slot hits are warnings, matching the run-time
+/// behaviour), `EX_CONFIG` otherwise.
+fn cmd_targets_validate(args: &crate::cli::TargetsArgs, name: &str) -> i32 {
+    let cfg = match crate::config::load_with_scenario(&args.config, Some(name)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("FAIL {name}: {e}");
+            return crate::EX_CONFIG;
+        }
+    };
+    let Some(t) = cfg.target.as_ref() else {
+        eprintln!("FAIL {name}: config has no target scenario");
+        return crate::EX_CONFIG;
+    };
+    if let Err(e) = preflight(&cfg) {
+        eprintln!("FAIL {name}: {e}");
+        return crate::EX_CONFIG;
+    }
+    println!("PASS {name}: config, path fields, profiles, and every event target resolve");
+    // Soft lint: a device pinned on a reserved gateway/station slot is a warning,
+    // not a hard failure, matching what build_sealed_session logs at run time.
+    match plant::PlantSpec::load(&t.pack_dir.join(&t.plant)) {
+        Ok(spec) => {
+            let warns = plant::reserved_slot_lint(&spec);
+            if warns.is_empty() {
+                println!("PASS {name}: no device on a reserved gateway/station slot");
+            } else {
+                for w in warns {
+                    println!("WARN {name}: {w}");
+                }
+            }
+        }
+        Err(e) => eprintln!("WARN {name}: could not re-read plant for the slot lint: {e}"),
+    }
+    match fidelity_report(&cfg) {
+        Ok(Some(report)) => print!("{report}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("FAIL {name}: {e}");
+            return crate::EX_CONFIG;
+        }
+    }
+    0
+}
+
+/// `turbolaser targets`: list the installed scenario packs, or lint one with
+/// `--validate <name>`.
 pub fn cmd_targets(args: &crate::cli::TargetsArgs) -> i32 {
+    if let Some(name) = &args.validate {
+        return cmd_targets_validate(args, name);
+    }
     let dir = registry::targets_dir_for(&args.config);
     let found = registry::discover(&dir);
     if args.json {

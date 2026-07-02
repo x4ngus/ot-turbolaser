@@ -72,17 +72,22 @@ pub fn station_addr(subnet_cidr: &str) -> Ipv4Addr {
     subnet_cidr
         .parse::<Ipv4Net>()
         .ok()
-        .map(|n| {
-            let host_bits = 32 - u32::from(n.prefix_len());
-            let last_usable = if host_bits >= 1 {
-                (1u32 << host_bits).saturating_sub(2)
-            } else {
-                0
-            };
-            let offset = 250.min(last_usable);
-            Ipv4Addr::from(u32::from(n.network()) + offset)
-        })
+        .map(station_addr_net)
         .unwrap_or(Ipv4Addr::new(10, 0, 0, 250))
+}
+
+/// The engineering-station address for an already-parsed subnet, so callers that
+/// hold an [`Ipv4Net`] (host allocation) can reserve the slot without a string
+/// round-trip. See [`station_addr`] for the semantics.
+pub fn station_addr_net(n: Ipv4Net) -> Ipv4Addr {
+    let host_bits = 32 - u32::from(n.prefix_len());
+    let last_usable = if host_bits >= 1 {
+        (1u32 << host_bits).saturating_sub(2)
+    } else {
+        0
+    };
+    let offset = 250.min(last_usable);
+    Ipv4Addr::from(u32::from(n.network()) + offset)
 }
 
 /// The zone-edge firewall/gateway address within a subnet (network + 1, the

@@ -270,8 +270,18 @@ fn mac_for(mac_map: &HashMap<u32, [u8; 6]>, seed: u64, new_ip: u32) -> [u8; 6] {
 /// stored asset MAC and the remapped L3 source MAC, so a host's ARP is-at and
 /// its replayed traffic always carry the same MAC and it unions.
 pub(crate) fn host_mac(seed: u64, ip: u32) -> [u8; 6] {
+    host_mac_salted(seed, ip, 0)
+}
+
+/// [`host_mac`] with a collision `salt`: `salt == 0` is the natural per-IP MAC;
+/// a higher salt perturbs the low bytes (keeping the IT-pool OUI) so
+/// reconciliation can resolve the rare case where a capture host's derived MAC
+/// would duplicate one already assigned to a fabricated or BOM asset. The stored
+/// asset MAC and the remapped frame MAC both flow through the same resolved value
+/// (a per-IP override), so a host's ARP is-at and its L3 traffic stay in sync.
+fn host_mac_salted(seed: u64, ip: u32, salt: u64) -> [u8; 6] {
     let oui = crate::oui::it_pool_oui(u64::from(ip));
-    let low = stable_mac(seed, ip);
+    let low = stable_mac(seed.wrapping_add(salt), ip);
     [oui[0], oui[1], oui[2], low[3], low[4], low[5]]
 }
 
@@ -578,6 +588,10 @@ pub struct ReconcileCtx<'a> {
     pub remap_mac: bool,
     pub registered: &'a HashMap<u32, u32>,
     pub device_macs: &'a HashMap<u32, [u8; 6]>,
+    /// MACs already assigned to fabricated and previously-registered capture
+    /// assets. A new capture host's per-IP MAC is perturbed off any of these so no
+    /// two assets ever share a MAC (SP-11); empty is fine (no reservations).
+    pub reserved_macs: &'a HashSet<[u8; 6]>,
     pub budget: usize,
 }
 
@@ -604,6 +618,12 @@ pub fn reconcile_capture_into_zones(
     let registered = ctx.registered;
     let device_macs = ctx.device_macs;
     let mut budget = ctx.budget;
+    // Grows as each new capture host is assigned, so its MAC is unique against the
+    // fabricated/BOM fleet and against every other capture host (SP-11). A resolved
+    // per-IP override carries any perturbed MAC into the frame rewrite so the stored
+    // asset MAC and the wire MAC agree.
+    let mut used_macs: HashSet<[u8; 6]> = ctx.reserved_macs.clone();
+    let mut resolved: HashMap<u32, [u8; 6]> = HashMap::new();
     if zones.is_empty() {
         return (
             RemapSummary {
@@ -647,10 +667,22 @@ pub fn reconcile_capture_into_zones(
                 if let Some(newip) = place_in_zone(&z.net, &mut taken, hu) {
                     let nu = u32::from(newip);
                     map.insert(hu, nu);
+                    // Assign a unique MAC: the natural per-IP MAC, perturbed off any
+                    // reserved or already-assigned MAC. Record a perturbed value as a
+                    // per-IP override so the frame rewrite uses the same MAC.
+                    let mut salt = 0u64;
+                    let mut mac = host_mac_salted(seed, nu, salt);
+                    while !used_macs.insert(mac) {
+                        salt += 1;
+                        mac = host_mac_salted(seed, nu, salt);
+                    }
+                    if salt != 0 {
+                        resolved.insert(nu, mac);
+                    }
                     new_assets.push(NewCaptureAsset {
                         origin: host,
                         ip: newip,
-                        mac: host_mac(seed, nu),
+                        mac,
                         vendor: z.vendor.clone(),
                         protocol: z.protocol.clone(),
                         purdue_level: z.purdue_level,
@@ -673,7 +705,17 @@ pub fn reconcile_capture_into_zones(
         }
     }
 
-    apply_host_map(cap, &map, device_macs, seed, remap_mac);
+    // A perturbed capture-host MAC must reach the frame rewrite too, so the wire
+    // MAC matches the stored asset MAC. Merge the (rare) resolved overrides onto the
+    // caller's ride-a-device overrides; the common no-collision path uses the
+    // caller's map directly without a clone.
+    if resolved.is_empty() {
+        apply_host_map(cap, &map, device_macs, seed, remap_mac);
+    } else {
+        let mut overrides = device_macs.clone();
+        overrides.extend(resolved);
+        apply_host_map(cap, &map, &overrides, seed, remap_mac);
+    }
     let valid: HashSet<u32> = map.values().copied().collect();
     let dropped = drop_incoherent_frames(cap, &valid);
     if dropped > 0 {
@@ -1005,6 +1047,13 @@ mod tests {
 
     /// A reconciliation context with the test defaults (affinity Both, MAC remap
     /// on); the call sites vary only zones, registry, device MACs, seed, budget.
+    /// A shared empty reserved-MAC set, so the test `rctx` needs no extra local.
+    fn no_reserved() -> &'static HashSet<[u8; 6]> {
+        use std::sync::OnceLock;
+        static EMPTY: OnceLock<HashSet<[u8; 6]>> = OnceLock::new();
+        EMPTY.get_or_init(HashSet::new)
+    }
+
     fn rctx<'a>(
         zones: &'a [ZoneTarget],
         registered: &'a HashMap<u32, u32>,
@@ -1019,6 +1068,7 @@ mod tests {
             remap_mac: true,
             registered,
             device_macs,
+            reserved_macs: no_reserved(),
             budget,
         }
     }
