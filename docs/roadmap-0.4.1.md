@@ -202,10 +202,15 @@ patch is wanted, SP-1 and SP-2 are the candidates to backport.
   + the fidelity report; `docs/targets.md` gained a "Target resolution and reserved slots"
   section and a pre-flight tooling section. (Payload bounds are now graceful spill, SP-6, so
   the lint reports per-event frame counts rather than a hard bound.)
-- **CAP-3 (stretch) New scenario content.** Additional pack(s) and/or richer playbook event
+- **CAP-3 (stretch) [DONE 0.4.1-beta.6] New scenario content.** Additional pack(s) and/or richer playbook event
   types, scope TBD by product; gated on the P1/P2 guardrails landing first. Scoped for
   0.4.1-beta.6: an INCONTROLLER/PIPEDREAM (2022) pack plus new emit types (DNP3, ENIP/CIP,
   OPC-UA, IEC-101).
+  *Landed 0.4.1-beta.6:* four new synth encoders (`dnp3`, `enip_cip`, `opcua`, `iec101`)
+  and seven emit kinds (`dnp3_read`/`dnp3_operate`, `cip_read`/`cip_write`, `opcua_read`,
+  `iec101_interrogation`/`iec101_command`), plus the `incontroller` pack. All dissect clean
+  in tshark (IEC-101 via decode-as); OPC-UA is the HELLO/ACK handshake (secure channel and
+  typed services deferred). The e2e signature reuses the proven Modbus 11100 marker.
 
 ## Definition of done for 0.4.1 stable
 

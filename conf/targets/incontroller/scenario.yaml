@@ -1,0 +1,15 @@
+# INCONTROLLER / PIPEDREAM: a modular ICS attack toolkit disclosed in 2022
+# (CISA AA22-103A) with purpose-built modules for Schneider (CODESYS/Modbus),
+# Omron (FINS/CIP), and OPC-UA, plus a generic DNP3/IEC-101 telecontrol reach.
+# No confirmed victim, so the network indicators are documentation stand-ins.
+
+target:
+  name: incontroller
+  description: "INCONTROLLER / PIPEDREAM modular ICS toolkit (2022, CISA AA22-103A)"
+  campaign: oneshot
+  ioc_fidelity: standin
+  actors:
+    external_cidrs: ["198.51.100.0/24"]
+    c2_domains: ["update.example"]
+    c2_ips: ["203.0.113.10"]
+    artifacts: ["INCONTROLLER", "TAGRUN", "CODECALL", "OMSHELL"]

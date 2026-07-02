@@ -182,6 +182,13 @@ An event's `target` selects a plant device by `ip`, `model`, or `asset_type`
 | `tristation_download` | TriStation /1502 | `target`, `payload_hex`, `chunk` |
 | `iec104_interrogation` | IEC-104 /2404 | `target`, `common_addr` |
 | `iec104_command` | IEC-104 /2404 | `target`, `common_addr`, `ioa`, `close` |
+| `dnp3_read` | DNP3 /20000 | `target`, `common_addr` |
+| `dnp3_operate` | DNP3 /20000 | `target`, `common_addr`, `point`, `close` |
+| `cip_read` | EtherNet/IP CIP /44818 | `target` |
+| `cip_write` | EtherNet/IP CIP /44818 | `target`, `register` (attribute), `value` |
+| `opcua_read` | OPC-UA /4840 | `target` |
+| `iec101_interrogation` | IEC-101 /2405 (tunneled) | `target`, `common_addr` |
+| `iec101_command` | IEC-101 /2405 (tunneled) | `target`, `common_addr`, `ioa`, `close` |
 | `c2_beacon` | DNS + TCP | `domain`, `ip`, `port` (else `actors`) |
 | `remote_access` | TCP | `target`, `port` |
 | `wiper` | SMB2 /445 | `target`, `share` |

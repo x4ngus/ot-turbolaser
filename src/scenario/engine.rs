@@ -17,7 +17,10 @@ use crate::ledger::{DeviceRecord, Session};
 use crate::proto::l3;
 use crate::simulate::roles;
 use crate::synth::ioc::C2Target;
-use crate::synth::{iec104, ioc, modbus_write, parse_version, s7_control, s7_szl, tristation};
+use crate::synth::{
+    dnp3, enip_cip, iec101, iec104, ioc, modbus_write, opcua, parse_version, s7_control, s7_szl,
+    tristation,
+};
 use crate::vuln::VulnDb;
 
 use super::playbook::{DeviceRef, EmitKind, Event, Phase, Playbook};
@@ -361,6 +364,61 @@ impl ScenarioEngine {
             EmitKind::Iec104Command => {
                 self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
                     iec104::single_command(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        ev.common_addr.unwrap_or(1),
+                        ev.ioa.unwrap_or(1),
+                        ev.close.unwrap_or(false),
+                    )
+                })
+            }
+            EmitKind::Dnp3Read => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                dnp3::integrity_poll(cmac, dmac, cip, dip, port, ev.common_addr.unwrap_or(1))
+            }),
+            EmitKind::Dnp3Operate => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    dnp3::operate(
+                        cmac,
+                        dmac,
+                        cip,
+                        dip,
+                        port,
+                        ev.common_addr.unwrap_or(1),
+                        ev.point.unwrap_or(0) as u8,
+                        ev.close.unwrap_or(false),
+                    )
+                })
+            }
+            EmitKind::CipRead => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                enip_cip::get_attribute(cmac, dmac, cip, dip, port)
+            }),
+            EmitKind::CipWrite => self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                enip_cip::set_attribute(
+                    cmac,
+                    dmac,
+                    cip,
+                    dip,
+                    port,
+                    ev.register.unwrap_or(1) as u8,
+                    ev.value.unwrap_or(0),
+                )
+            }),
+            EmitKind::OpcuaRead => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    opcua::read(cmac, dmac, cip, dip, port)
+                })
+            }
+            EmitKind::Iec101Interrogation => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    iec101::interrogation(cmac, dmac, cip, dip, port, ev.common_addr.unwrap_or(1))
+                })
+            }
+            EmitKind::Iec101Command => {
+                self.on_target(ledger, &ev.target, |_d, cip, cmac, dip, dmac| {
+                    iec101::single_command(
                         cmac,
                         dmac,
                         cip,

@@ -23,8 +23,8 @@ BIN="$PREFIX/bin/turbolaser"
 CFG="$PREFIX/conf/replay.yaml"
 fail=0
 
-# The four shipped packs must be on disk under the installed conf/targets.
-for name in stuxnet triton oldsmar ukraine2015; do
+# The five shipped packs must be on disk under the installed conf/targets.
+for name in stuxnet triton oldsmar ukraine2015 incontroller; do
     if [[ -f "$PREFIX/conf/targets/$name/scenario.yaml" ]]; then
         echo "  ok: $name/scenario.yaml installed"
     else
@@ -49,19 +49,19 @@ if grep -q "/opt/replay/pcaps" "$CFG"; then
     fail=1
 fi
 
-# `targets` must discover all four through the installed config's sibling dir.
+# `targets` must discover all five through the installed config's sibling dir.
 count="$("$BIN" targets --config "$CFG" --json | grep -c '"name":' || true)"
-if [[ "$count" == 4 ]]; then
-    echo "  ok: turbolaser targets lists 4 scenarios"
+if [[ "$count" == 5 ]]; then
+    echo "  ok: turbolaser targets lists 5 scenarios"
 else
-    echo "  FAIL: turbolaser targets listed $count scenarios, expected 4" >&2
+    echo "  FAIL: turbolaser targets listed $count scenarios, expected 5" >&2
     "$BIN" targets --config "$CFG" || true
     fail=1
 fi
 
 # Every pack must merge + validate through the real loader from the installed
 # layout (this is the exact path that failed on the alpha appliance).
-for name in stuxnet triton oldsmar ukraine2015; do
+for name in stuxnet triton oldsmar ukraine2015 incontroller; do
     if "$BIN" check --config "$CFG" --scenario "$name" >/dev/null 2>&1; then
         echo "  ok: check --scenario $name exits 0"
     else

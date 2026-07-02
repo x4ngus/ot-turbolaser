@@ -52,8 +52,10 @@ fn s_frame(nr: u16) -> Vec<u8> {
     b
 }
 
-/// One ASDU with a single, non-sequence information object.
-fn asdu(type_id: u8, cot: u8, common_addr: u16, ioa: u32, elements: &[u8]) -> Vec<u8> {
+/// One ASDU with a single, non-sequence information object. Shared with
+/// [`super::iec101`], which wraps the same ASDU in an FT1.2 link frame rather than
+/// an APCI (the ASDU layer is identical across IEC 60870-5-101 and -104).
+pub(crate) fn asdu(type_id: u8, cot: u8, common_addr: u16, ioa: u32, elements: &[u8]) -> Vec<u8> {
     let mut a = vec![
         type_id, // type identification
         0x01,    // variable structure qualifier: SQ=0, 1 object
