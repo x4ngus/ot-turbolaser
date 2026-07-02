@@ -279,7 +279,7 @@ fn pick_profile<'a>(
 /// A MAC from the profile's vendor OUI plus per-IP-derived low bytes, so devices
 /// in a zone are distinct assets that keep the vendor-identifying prefix and
 /// reproduce from the session seed (the same seed and IP always yield the same
-/// MAC, like [`bom_mac`]). `salt` perturbs the derivation on the rare intra-OUI
+/// MAC, like [`bom_mac_salted`]). `salt` perturbs the derivation on the rare intra-OUI
 /// low-byte collision (`fabricate` retries with a higher salt); `salt == 0` is
 /// the natural MAC. With no vendor OUI, fall back to the globally-administered
 /// unicast address `stable_mac` yields (LAA and multicast bits already clear): a
@@ -381,13 +381,17 @@ fn infra_profile<'a>(
 }
 
 /// A believable, stable MAC for a BOM asset: the class vendor's OUI (or the IT
-/// pool when the vendor has none registered) with low bytes derived per-IP.
-fn bom_mac(oui: &OuiDb, vendor: &str, seed: u64, ip: u32) -> [u8; 6] {
+/// pool when the vendor has none registered) with low bytes derived per-IP. The
+/// collision `bump` is `0` for the natural MAC; a higher bump perturbs the per-IP
+/// low bytes (keeping the vendor OUI) so `enrich_plant` can resolve the rare case
+/// where a BOM MAC would duplicate one already assigned to a fabricated or capture
+/// asset, mirroring `fabricate`'s salt retry.
+fn bom_mac_salted(oui: &OuiDb, vendor: &str, seed: u64, ip: u32, bump: u64) -> [u8; 6] {
     let salt = u64::from(ip);
     let prefix = oui
         .oui_for_vendor(vendor, salt)
         .unwrap_or_else(|| oui::it_pool_oui(salt));
-    let low = l3::stable_mac(seed, ip);
+    let low = l3::stable_mac(seed.wrapping_add(bump), ip);
     [prefix[0], prefix[1], prefix[2], low[3], low[4], low[5]]
 }
 
@@ -421,6 +425,17 @@ pub fn assign_domains(session: &mut Session, domains: &[String], seed: u64) {
 /// Deterministic from the seed. Run at plan time so the supporting cast and the
 /// names are sealed into the ledger the daemon replays verbatim.
 pub fn enrich_plant(session: &mut Session, vuln: &VulnDb, oui: &OuiDb, seed: u64) {
+    // Seed the used-MAC set from every asset already in the ledger (the fabricated
+    // core and any capture hosts), so a BOM MAC never duplicates one `fabricate`
+    // assigned. A duplicate would emit conflicting ARP is-at replies for two IPs,
+    // which the sensor cannot fuse. Grows as each BOM device is added (SP-11).
+    let mut used_macs: HashSet<[u8; 6]> = session
+        .devices
+        .iter()
+        .map(|d| d.mac.as_str())
+        .chain(session.capture_hosts.iter().map(|h| h.mac.as_str()))
+        .map(l3::parse_mac)
+        .collect();
     let zones: Vec<(usize, String, u8, Option<String>)> = session
         .subnets
         .iter()
@@ -497,7 +512,15 @@ pub fn enrich_plant(session: &mut Session, vuln: &VulnDb, oui: &OuiDb, seed: u64
                         Vec::new(),
                     ),
                 };
-                let mac = bom_mac(oui, &vendor, seed, u32::from(ip));
+                // Derive the BOM MAC, perturbing on the rare collision with an
+                // already-assigned MAC so uniqueness holds across the whole plant,
+                // not just the fabricated core (SP-11).
+                let mut bump = 0u64;
+                let mut mac = bom_mac_salted(oui, &vendor, seed, u32::from(ip), bump);
+                while !used_macs.insert(mac) {
+                    bump += 1;
+                    mac = bom_mac_salted(oui, &vendor, seed, u32::from(ip), bump);
+                }
                 let rec = DeviceRecord {
                     ip: ip.to_string(),
                     mac: l3::fmt_mac(mac),
@@ -746,6 +769,51 @@ mod tests {
         // IPs stay unique once the BOM is in.
         let ips: HashSet<&String> = s.devices.iter().map(|d| &d.ip).collect();
         assert_eq!(ips.len(), s.devices.len(), "IPs unique including the BOM");
+    }
+
+    #[test]
+    fn enrich_plant_keeps_macs_unique_across_the_full_plant() {
+        // fabricate() keeps the core MACs unique; enrich_plant adds the BOM
+        // (firewall/HMI/EWS/historian/router/server), whose MACs must not collide
+        // with the core or each other. Assert a MAC set equals the device count
+        // after enrich - the MAC analogue of the existing IP-uniqueness check - so a
+        // BOM-MAC regression fails CI (SP-11/SP-12). Also assert the assignment
+        // reproduces from the seed.
+        let params = AllocParams {
+            max_subnets: 16,
+            max_devices: 400,
+            default_prefix: 24,
+        };
+        let build = || {
+            let mut s = Session::new(2024, 0);
+            let mut rng = ChaCha8Rng::seed_from_u64(2024);
+            fabricate(&mut s, &db(), &params, 200, &mut rng);
+            create_l3_zones(&mut s, &params, 3, &mut rng);
+            enrich_plant(&mut s, &db(), &OuiDb::embedded(), 2024);
+            s
+        };
+        let s = build();
+        assert!(
+            s.device_count() > 200,
+            "the BOM added assets beyond the core"
+        );
+        let macs: HashSet<&String> = s.devices.iter().map(|d| &d.mac).collect();
+        assert_eq!(
+            macs.len(),
+            s.devices.len(),
+            "every MAC is unique across the fabricated core and the BOM"
+        );
+        let macs_of = |sess: &Session| {
+            sess.devices
+                .iter()
+                .map(|d| d.mac.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            macs_of(&s),
+            macs_of(&build()),
+            "MAC assignment reproduces from the seed"
+        );
     }
 
     #[test]

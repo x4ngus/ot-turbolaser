@@ -67,17 +67,39 @@ pub fn preflight(cfg: &crate::config::Config) -> Result<(), String> {
     let Some(t) = cfg.target.as_ref() else {
         return Ok(());
     };
-    // A malformed profiles.toml is not fatal (load_overlay keeps the embedded set
-    // and only logs it, and check/plan run without a logger), but a silent drop
-    // hides a typo'd CVE profile from the operator. Surface it here.
+    // A declared, non-empty profiles.toml that does not parse is FATAL here (SP-10).
+    // `load_overlay` only logs it and falls back to the embedded set, so a plant
+    // model defined only in that overlay (e.g. stuxnet's SIMATIC S7-417 CPU) would
+    // silently pin identity-only: CVE-less, protocol-none, the literal model string
+    // on the wire instead of the real MLFB. An operator must not fire that; make
+    // the malformed overlay stop pre-flight rather than degrade quietly.
     let profiles_path = t.pack_dir.join(&t.profiles);
     if let Ok(text) = std::fs::read_to_string(&profiles_path) {
         if !text.trim().is_empty() {
             if let Err(e) = toml::from_str::<toml::Value>(&text) {
-                eprintln!(
-                    "warning: scenario profiles {} is malformed and will be ignored (the embedded CVE set is used instead): {e}",
+                return Err(format!(
+                    "scenario profiles {} is malformed: {e}; fix it or remove it (a CVE-bearing plant device would otherwise silently degrade to identity-only)",
                     profiles_path.display()
-                );
+                ));
+            }
+        }
+    }
+    // Flag a plant device that names a `model` expecting a CVE profile (it sets none
+    // of the identity-only descriptive fields protocol/vendor/firmware) yet resolves
+    // to no profile in the overlaid DB (SP-10). That is an author error: a typo, or a
+    // model the profiles.toml was meant to define but does not. A genuinely
+    // identity-only device (a SIS/RTU/HMI that sets protocol/vendor) is exempt, since
+    // an unresolved descriptive model is intentional there.
+    let vuln = crate::vuln::VulnDb::load_overlay(&profiles_path);
+    let spec = plant::PlantSpec::load(&t.pack_dir.join(&t.plant))?;
+    for d in &spec.devices {
+        if let Some(m) = &d.model {
+            let identity_only = d.protocol.is_some() || d.vendor.is_some() || d.firmware.is_some();
+            if !identity_only && vuln.by_model(m).is_none() {
+                return Err(format!(
+                    "scenario plant model {m:?} resolves to no CVE profile and declares no identity-only fields (protocol/vendor/firmware); define it in {} or mark it identity-only",
+                    profiles_path.display()
+                ));
             }
         }
     }

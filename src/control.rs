@@ -215,7 +215,9 @@ fn run_systemctl(args: &[&str]) -> i32 {
 /// script refuses to touch a physical NIC, keeping the isolation invariant. On
 /// Proxmox the hypervisor provides these ports, so this is not used there.
 pub fn net_provision(args: &NetArgs) -> i32 {
-    let cfg = match config::load(&args.config) {
+    // Honor the same --scenario overlay the daemon uses, so a pack that overlays
+    // iface/net.* provisions the ports it will actually transmit on (SP-8).
+    let cfg = match config::load_with_scenario(&args.config, args.scenario.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
@@ -234,15 +236,17 @@ pub fn net_provision(args: &NetArgs) -> i32 {
 }
 
 pub fn net_setup(args: &NetArgs) -> i32 {
-    run_net_script("net-setup.sh", &args.config)
+    run_net_script("net-setup.sh", &args.config, args.scenario.as_deref())
 }
 
 pub fn net_teardown(args: &NetArgs) -> i32 {
-    run_net_script("net-teardown.sh", &args.config)
+    run_net_script("net-teardown.sh", &args.config, args.scenario.as_deref())
 }
 
-fn run_net_script(name: &str, config: &Path) -> i32 {
-    let cfg = match config::load(config) {
+fn run_net_script(name: &str, config: &Path, scenario: Option<&str>) -> i32 {
+    // Honor the same --scenario overlay as `run`, so net-setup/net-teardown build
+    // and tear down the bridge/mirror on the ports the overlaid config names (SP-8).
+    let cfg = match config::load_with_scenario(config, scenario) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");

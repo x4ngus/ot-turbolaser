@@ -427,3 +427,87 @@ session:
         "pre-flight names the unresolved target: {err}"
     );
 }
+
+/// A minimal valid red-laser base config under `root`, for preflight tests that
+/// then drop a scenario pack under `<root>/conf/targets/<name>`.
+fn base_conf(root: &Path) -> String {
+    format!(
+        "iface: tl0
+mode: red_laser
+paths:
+  pool: {root}/pool
+  variants: {root}/variants
+  shm_dir: {root}/shm
+  status_file: {root}/status.json
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 1.0
+session:
+  path: {root}/session.json
+",
+        root = root.display()
+    )
+}
+
+/// A declared, non-empty profiles.toml that does not parse is fatal at pre-flight,
+/// not a silent fall-back to the embedded set: otherwise a plant model defined only
+/// in that overlay would degrade to identity-only (CVE-less) while `check` reports
+/// OK (SP-10).
+#[test]
+fn malformed_profiles_toml_is_fatal_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(&conf, &base_conf(root));
+    let pack = root.join("conf").join("targets").join("badprof");
+    write(&pack.join("scenario.yaml"), "target:\n  name: badprof\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP', ip: 10.0.0.11 }\n",
+    );
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.0.0.11 } }\n",
+    );
+    write(&pack.join("profiles.toml"), "not = valid toml [[[\n");
+
+    let cfg = config::load_with_scenario(&conf, Some("badprof")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg).expect_err("malformed profiles is fatal");
+    assert!(
+        err.contains("malformed"),
+        "pre-flight names the malformed profiles: {err}"
+    );
+}
+
+/// A plant device that names a `model` (setting no identity-only fields) which
+/// resolves to no CVE profile is flagged at pre-flight - a typo or a model the
+/// profiles.toml forgot to define (SP-10). A genuinely identity-only device
+/// (protocol/vendor set) with a descriptive model stays exempt.
+#[test]
+fn unresolved_cve_model_without_identity_fields_is_flagged_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(&conf, &base_conf(root));
+    let pack = root.join("conf").join("targets").join("typo");
+    write(&pack.join("scenario.yaml"), "target:\n  name: typo\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-317 TYPO', ip: 10.0.0.11 }\n",
+    );
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: recon\n    events:\n      - { emit: s7_read, target: { ip: 10.0.0.11 } }\n",
+    );
+    write(&pack.join("profiles.toml"), "");
+
+    let cfg = config::load_with_scenario(&conf, Some("typo")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg)
+        .expect_err("an unresolved CVE-expecting model is flagged");
+    assert!(
+        err.contains("SIMATIC S7-317 TYPO"),
+        "pre-flight names the unresolved model: {err}"
+    );
+}

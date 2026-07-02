@@ -324,6 +324,21 @@ impl SimulatorEngine {
             let cap_assets = ledger::effective_asset_cap(cfg.synthesis.max_assets);
             let registered = self.registered_origins();
             let device_macs = self.device_mac_map();
+            // Every MAC already on the wire (fabricated core, BOM, and capture hosts
+            // registered from prior captures), so a new capture host's MAC is
+            // perturbed off all of them and no two assets ever share a MAC (SP-11).
+            let reserved_macs: std::collections::HashSet<[u8; 6]> = self
+                .ledger
+                .devices
+                .iter()
+                .map(|d| l3::parse_mac(&d.mac))
+                .chain(
+                    self.ledger
+                        .capture_hosts
+                        .iter()
+                        .map(|h| l3::parse_mac(&h.mac)),
+                )
+                .collect();
             let budget = cap_assets.saturating_sub(self.ledger.total_wire_assets());
             let ctx = l3::ReconcileCtx {
                 zones: &zones,
@@ -332,6 +347,7 @@ impl SimulatorEngine {
                 remap_mac: cfg.l3.remap_mac,
                 registered: &registered,
                 device_macs: &device_macs,
+                reserved_macs: &reserved_macs,
                 budget,
             };
             let (_summary, new_assets) = l3::reconcile_capture_into_zones(&mut cap, &groups, &ctx);
