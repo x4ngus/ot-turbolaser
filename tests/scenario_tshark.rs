@@ -87,7 +87,13 @@ fn write_pcap(dir: &Path, name: &str) -> std::path::PathBuf {
 fn dump_scenario_pcaps() {
     let dir = std::env::temp_dir().join("ot-scenarios");
     std::fs::create_dir_all(&dir).unwrap();
-    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+    for name in [
+        "stuxnet",
+        "triton",
+        "oldsmar",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let p = write_pcap(&dir, name);
         eprintln!("wrote {}", p.display());
     }
@@ -110,7 +116,13 @@ fn scenario_attack_frames_dissect_in_tshark() {
 
     // Print each scenario's protocol hierarchy for visibility (run with
     // --nocapture), then assert the key control-plane protocol dissects cleanly.
-    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+    for name in [
+        "stuxnet",
+        "triton",
+        "oldsmar",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let p = write_pcap(dir.path(), name);
         eprintln!(
             "\n==== {name} protocol hierarchy ====\n{}",
@@ -167,5 +179,51 @@ fn scenario_attack_frames_dissect_in_tshark() {
     assert!(
         dissects(&p, "ip.addr==5.149.254.114"),
         "the real published BlackEnergy3 C2 address reaches the wire"
+    );
+
+    // INCONTROLLER: the four new protocol modules must dissect. DNP3 (TCP/20000),
+    // EtherNet/IP CIP (TCP/44818), and OPC-UA (TCP/4840) auto-attach to their
+    // dissectors; IEC-101 is tunneled over TCP, so it needs an explicit decode-as
+    // plus the ASDU field widths the shared IEC-104 ASDU uses (2-octet cause and
+    // common address, 3-octet IOA).
+    let p = dir.path().join("incontroller.pcap");
+    assert!(
+        dissects(&p, "dnp3.al.func==1"),
+        "INCONTROLLER DNP3 integrity poll (READ) must dissect"
+    );
+    assert!(
+        dissects(&p, "dnp3.al.func==4"),
+        "INCONTROLLER DNP3 OPERATE must dissect"
+    );
+    assert!(
+        dissects(&p, "cip.sc"),
+        "INCONTROLLER CIP service must dissect"
+    );
+    assert!(
+        dissects(&p, "opcua"),
+        "INCONTROLLER OPC-UA handshake must dissect"
+    );
+    let iec101 = tshark(
+        &p,
+        &[
+            "-d",
+            "tcp.port==2405,iec60870_101",
+            "-o",
+            "iec60870_101.cot_len:2",
+            "-o",
+            "iec60870_101.asdu_addr_len:2",
+            "-o",
+            "iec60870_101.asdu_ioa_len:3",
+            "-Y",
+            "iec60870_asdu",
+            "-T",
+            "fields",
+            "-e",
+            "iec60870_asdu.typeid",
+        ],
+    );
+    assert!(
+        iec101.contains("100") && iec101.contains("45"),
+        "INCONTROLLER IEC-101 interrogation (100) and single command (45) ASDUs must dissect: {iec101}"
     );
 }

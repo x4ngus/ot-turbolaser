@@ -181,7 +181,13 @@ session:
 #[test]
 fn all_shipped_packs_are_internally_consistent() {
     let base = Path::new("conf/replay.yaml");
-    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+    for name in [
+        "stuxnet",
+        "triton",
+        "oldsmar",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let cfg = config::load_with_scenario(base, Some(name))
             .unwrap_or_else(|e| panic!("{name} config: {e}"));
         let t = cfg.target.as_ref().expect("target present");
@@ -240,6 +246,7 @@ fn all_shipped_packs_are_internally_consistent() {
             "triton" => ("TriStation implant", b"imain"), // chunked into 6-byte download packets
             "oldsmar" => ("Modbus setpoint 11100", &[0x2b, 0x5c]), // 11100 big-endian
             "ukraine2015" => ("KillDisk share write", b"ADMIN$"),
+            "incontroller" => ("Modbus setpoint 11100", &[0x2b, 0x5c]), // Schneider CODECALL write
             other => panic!("unexpected pack {other}"),
         };
         assert!(
@@ -259,7 +266,13 @@ fn all_shipped_packs_are_internally_consistent() {
 #[test]
 fn every_shipped_pack_event_target_resolves() {
     let base = Path::new("conf/replay.yaml");
-    for name in ["oldsmar", "stuxnet", "triton", "ukraine2015"] {
+    for name in [
+        "oldsmar",
+        "stuxnet",
+        "triton",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let cfg = config::load_with_scenario(base, Some(name))
             .unwrap_or_else(|e| panic!("{name} config: {e}"));
         let t = cfg.target.as_ref().expect("target present");
@@ -302,16 +315,22 @@ fn fidelity_report_lists_resolved_targets_and_counts() {
     );
 }
 
-/// `registry::discover` finds the four installed packs, sorted, each complete.
+/// `registry::discover` finds the five installed packs, sorted, each complete.
 #[test]
-fn discover_lists_the_four_shipped_packs() {
+fn discover_lists_the_shipped_packs() {
     let dir = ot_turbolaser::scenario::registry::targets_dir_for(Path::new("conf/replay.yaml"));
     let found = ot_turbolaser::scenario::registry::discover(&dir);
     let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["oldsmar", "stuxnet", "triton", "ukraine2015"],
-        "all four shipped packs, sorted"
+        vec![
+            "incontroller",
+            "oldsmar",
+            "stuxnet",
+            "triton",
+            "ukraine2015"
+        ],
+        "all five shipped packs, sorted"
     );
     for s in &found {
         assert!(
@@ -329,7 +348,13 @@ fn discover_lists_the_four_shipped_packs() {
 #[test]
 fn all_shipped_packs_build_through_the_daemon() {
     let base = Path::new("conf/replay.yaml");
-    for name in ["stuxnet", "triton", "oldsmar", "ukraine2015"] {
+    for name in [
+        "stuxnet",
+        "triton",
+        "oldsmar",
+        "ukraine2015",
+        "incontroller",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut cfg =

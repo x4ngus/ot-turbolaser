@@ -3,6 +3,38 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [0.4.1-beta.6] - 2026-07-02
+
+Capability track, new content (CAP-3): a fifth scenario pack and four new protocol
+emitters, gated on the P2/P3 guardrails now in place.
+
+### Added
+- **INCONTROLLER / PIPEDREAM (2022) scenario pack.** A multi-vendor plant (Schneider
+  Modbus PLC, Omron CIP controller, DNP3 outstation, IEC-101 RTU, OPC-UA server) driven
+  through a recon -> access -> manipulation -> impact playbook that exercises every new
+  emitter plus the existing Modbus/C2/remote-access ones.
+- **Four new playbook emit kinds and their synth encoders:**
+  - `dnp3_read` / `dnp3_operate` - DNP3 (IEEE 1815) integrity poll and SELECT-then-OPERATE
+    control-relay-output block, over TCP/20000 (reuses the DNP3 data-link CRC).
+  - `cip_read` / `cip_write` - EtherNet/IP CIP Get_Attribute_Single and Set_Attribute_Single
+    over a connected session (RegisterSession + SendRRData), TCP/44818.
+  - `opcua_read` - the OPC-UA HELLO/ACKNOWLEDGE handshake that fingerprints an OPC-UA
+    server, TCP/4840. (A secure channel and typed service calls are deferred.)
+  - `iec101_interrogation` / `iec101_command` - IEC 60870-5-101 station interrogation and
+    single command in FT1.2 link frames, tunneled over TCP/2405, reusing the shared IEC-104
+    ASDU layer.
+  All decode cleanly in their Wireshark dissectors with no malformed frames; IEC-101 needs
+  an explicit decode-as on its TCP port (documented in the test).
+- A new `point` playbook event field (a DNP3 control-point index) and the emit-kind table
+  in `docs/targets.md`.
+
+### Tests
+- Per-encoder synth unit tests (checksum-clean frames carrying the intended PDU). The
+  INCONTROLLER pack joins the internal-consistency, per-event-resolution, daemon-build,
+  discovery, and tshark suites; the tshark suite asserts DNP3 (READ and OPERATE), CIP,
+  OPC-UA, and IEC-101 (via decode-as) all dissect. Full suite green (235 unit, 13 e2e);
+  tshark and install-smoke (5 packs) pass.
+
 ## [0.4.1-beta.5] - 2026-07-02
 
 Capability track: pre-flight visibility and an authoring lint, so an operator sees what a

@@ -1,0 +1,38 @@
+# The INCONTROLLER kill chain: enumerate every reachable controller across its
+# protocol modules, gain remote access, push rogue writes, then trip a breaker
+# over DNP3 and IEC-101.
+
+phases:
+  - id: recon
+    name: "Multi-protocol enumeration"
+    techniques: [T0842, T0846, T0888]   # network sniffing, remote system discovery, OS/app info
+    dwell_runs: 2
+    events:
+      - { emit: cip_read, target: { ip: 10.77.10.12 } }             # Omron over EtherNet/IP CIP
+      - { emit: opcua_read, target: { ip: 10.77.20.30 } }           # OPC-UA server handshake
+      - { emit: dnp3_read, target: { ip: 10.77.10.20 }, common_addr: 4 }  # DNP3 integrity poll
+      - { emit: iec101_interrogation, target: { ip: 10.77.10.21 }, common_addr: 1 }
+
+  - id: access
+    name: "Remote access / C2"
+    techniques: [T0822, T0859]          # external remote services, valid accounts
+    dwell_runs: 2
+    events:
+      - { emit: c2_beacon }
+      - { emit: remote_access, target: { ip: 10.77.20.20 }, port: 4840 }
+
+  - id: manipulation
+    name: "Rogue writes"
+    techniques: [T0836, T0855]          # modify parameter, unauthorized command message
+    dwell_runs: 3
+    events:
+      - { emit: modbus_write, target: { ip: 10.77.10.11 }, register: 100, value: 11100 }  # Schneider setpoint
+      - { emit: cip_write, target: { ip: 10.77.10.12 }, register: 3, value: 1 }           # Omron CIP attribute
+
+  - id: impact
+    name: "Breaker trip"
+    techniques: [T0831, T0813]          # manipulation of control, denial of control
+    dwell_runs: 4
+    events:
+      - { emit: dnp3_operate, target: { ip: 10.77.10.20 }, common_addr: 4, point: 1, close: false }  # trip
+      - { emit: iec101_command, target: { ip: 10.77.10.21 }, common_addr: 1, ioa: 1001, close: false }

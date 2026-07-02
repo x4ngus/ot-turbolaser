@@ -84,6 +84,9 @@ pub struct Event {
     pub ioa: Option<u32>,
     #[serde(default)]
     pub common_addr: Option<u16>,
+    /// A DNP3 control-point index, for `dnp3_operate`.
+    #[serde(default)]
+    pub point: Option<u16>,
     #[serde(default)]
     pub close: Option<bool>,
     #[serde(default)]
@@ -125,6 +128,20 @@ pub enum EmitKind {
     Iec104Interrogation,
     /// IEC-104 single command (breaker open/close).
     Iec104Command,
+    /// DNP3 integrity poll (recon).
+    Dnp3Read,
+    /// DNP3 SELECT-then-OPERATE control-relay-output block (breaker trip).
+    Dnp3Operate,
+    /// EtherNet/IP CIP Get_Attribute_Single (connected-session recon).
+    CipRead,
+    /// EtherNet/IP CIP Set_Attribute_Single (attribute write / manipulation).
+    CipWrite,
+    /// OPC-UA HELLO/ACKNOWLEDGE handshake (server discovery / recon).
+    OpcuaRead,
+    /// IEC 60870-5-101 station interrogation (recon).
+    Iec101Interrogation,
+    /// IEC 60870-5-101 single command (breaker open/close).
+    Iec101Command,
     /// C2 beacon: resolve the actor domain and contact its address.
     C2Beacon,
     /// Inbound remote-access session (TeamViewer/VPN).

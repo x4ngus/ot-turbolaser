@@ -1,0 +1,24 @@
+# A multi-vendor plant matching the INCONTROLLER module set: a supervisory zone
+# (engineering workstation + OPC-UA server) above a control zone with a Schneider
+# Modbus PLC (CVE-bearing), an Omron CIP controller, a DNP3 outstation, and an
+# IEC-101 RTU. `enrich: true` adds the zone firewall/DNS and supporting cast.
+
+zones:
+  - { cidr: 10.77.20.0/24, name: "Supervisory / SCADA", purdue_level: 2, vendor: "Schneider Electric" }
+  - { cidr: 10.77.10.0/24, name: "Control (PLC / RTU)", purdue_level: 1, vendor: "Schneider Electric" }
+
+devices:
+  # Engineering workstation (TAGRUN host), identity-only; the remote-access target.
+  - { zone: 10.77.20.0/24, asset_type: EWS, vendor: "Dell", model: "Engineering Workstation", protocol: none, ip: 10.77.20.20, hostname: INC-ENG-WS }
+  # OPC-UA server (the MOUSEHOLE/OPC-UA module target), identity-only.
+  - { zone: 10.77.20.0/24, asset_type: Server, vendor: "OPC Foundation", model: "OPC-UA Server", protocol: opcua, ip: 10.77.20.30, hostname: INC-OPCUA-SRV }
+  # Schneider Modicon M340 (CODECALL/Modbus) -- embedded CVE-bearing Modbus identity.
+  - { zone: 10.77.10.0/24, model: "Modicon M340 BMXP342020", ip: 10.77.10.11, hostname: INC-SCHNEIDER-PLC }
+  # Omron controller (OMSHELL), reached over EtherNet/IP CIP, identity-only.
+  - { zone: 10.77.10.0/24, asset_type: Controller, vendor: "Omron", model: "NJ501-1300", protocol: enip, ip: 10.77.10.12, hostname: INC-OMRON-PLC }
+  # DNP3 outstation (generic telecontrol reach), identity-only.
+  - { zone: 10.77.10.0/24, asset_type: RTU, vendor: "generic", model: "DNP3 Outstation", protocol: dnp3, ip: 10.77.10.20, hostname: INC-DNP3-RTU }
+  # IEC 60870-5-101 RTU behind a serial gateway, identity-only.
+  - { zone: 10.77.10.0/24, asset_type: RTU, vendor: "generic", model: "IEC-101 RTU", protocol: iec101, ip: 10.77.10.21, hostname: INC-IEC101-RTU }
+
+enrich: true
