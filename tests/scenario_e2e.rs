@@ -356,3 +356,54 @@ session:
         "pre-flight names the playbook: {err}"
     );
 }
+
+/// A pack whose playbook targets a device absent from the plant is rejected at
+/// pre-flight, not silently skipped (zero frames) at run time. This is the exact
+/// gap that let a whole impact phase emit nothing while `check` reported OK.
+#[test]
+fn orphaned_playbook_target_is_rejected_at_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conf = root.join("conf").join("replay.yaml");
+    write(
+        &conf,
+        &format!(
+            "iface: tl0
+mode: red_laser
+paths:
+  pool: {root}/pool
+  variants: {root}/variants
+  shm_dir: {root}/shm
+  status_file: {root}/status.json
+rate:
+  model: original
+gap:
+  dist: exp_poisson
+  mean_secs: 1.0
+session:
+  path: {root}/session.json
+",
+            root = root.display()
+        ),
+    );
+    let pack = root.join("conf").join("targets").join("orphan");
+    write(&pack.join("scenario.yaml"), "target:\n  name: orphan\n");
+    write(
+        &pack.join("plant.yaml"),
+        "zones:\n  - { cidr: 10.0.0.0/24, name: Z, purdue_level: 1 }\ndevices:\n  - { zone: 10.0.0.0/24, model: 'SIMATIC S7-300 CPU 315-2 PN/DP', ip: 10.0.0.11 }\n",
+    );
+    // The impact phase stops a PLC in a subnet the plant never pins, so the target
+    // resolves to no device.
+    write(
+        &pack.join("playbook.yaml"),
+        "phases:\n  - id: impact\n    events:\n      - { emit: s7_stop, target: { ip: 192.0.2.99 } }\n",
+    );
+    write(&pack.join("profiles.toml"), "");
+
+    let cfg = config::load_with_scenario(&conf, Some("orphan")).expect("config merges");
+    let err = ot_turbolaser::scenario::preflight(&cfg).expect_err("orphaned target is rejected");
+    assert!(
+        err.contains("192.0.2.99"),
+        "pre-flight names the unresolved target: {err}"
+    );
+}

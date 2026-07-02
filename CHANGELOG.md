@@ -3,6 +3,23 @@
 All notable changes to ot-turbolaser are recorded here. The format follows
 Keep a Changelog, and the project uses semantic versioning.
 
+## [Unreleased]
+
+Backport of the two HIGH defects found in the 0.4.1 scenario-framework review. Both
+are latent in 0.4.0; they will ship in the next stable release (0.4.1). The stable
+tag is held for now (these also land on the develop 0.4.1 line as 0.4.1-beta.2).
+
+### Fixed
+- **Orphaned playbook target no longer emits zero frames silently (SP-1).** A
+  playbook `target` naming no plant device now fails pre-flight instead of rendering
+  nothing while the daemon looked healthy. `build_validated_plant` cross-checks every
+  event target against the pinned plant (`ScenarioEngine::validate_targets`); a
+  `c2_beacon` may omit its target, every other event must name one that resolves.
+- **Non-default `PREFIX` install no longer sits idle forever (SP-2).** `install.sh`
+  templates `conf/replay.yaml` to the install `PREFIX` so `paths.pool` and
+  `paths.variants` point inside the install tree, not the never-created
+  `/opt/replay/pcaps/*`. The default `/opt/replay` install is unchanged.
+
 ## [0.4.0] - 2026-07-02
 
 First stable 0.4.0, then hardened for prime time. The headline 0.4.0 additions
